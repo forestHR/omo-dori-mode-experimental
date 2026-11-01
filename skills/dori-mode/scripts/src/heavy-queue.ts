@@ -20,7 +20,7 @@ type HelperTry = { readonly kind: "started"; readonly run: Started } | { readonl
 
 const VERDICT = /^WORKER_(ADMIT|BUSY|REFUSED)\b ?(.*)$/;
 
-async function* linesOf(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+export async function* linesOf(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const dec = new TextDecoder();
   let buf = "";
   for await (const chunk of stream) {

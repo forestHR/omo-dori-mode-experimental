@@ -4,13 +4,14 @@ import { basename } from "node:path";
 import { newJobDir, onStop, packTo, RESULT_ENTRIES, requestProblem, runJob, stopWithCaller, sweepJobDirs, unpackFrom } from "./heavy-job.ts";
 import type { HeavyCtx } from "./heavy-queue.ts";
 import { admitOnce, pidAlive, releaseSlot } from "./heavy-slot.ts";
+import { defaultTools, heavyExec } from "./heavy-spread.ts";
 
 // dori heavy-worker: the forced command of the queue host's key on a helper. It reads the request from
 // SSH_ORIGINAL_COMMAND, never a shell: "run [--rl] <label> <job> [args]" runs one job named in this host's own heavyQueue.jobs
 // (an rl job only when this host's heavyQueue.rl allows rl jobs) when this host's heavy slots admit it now, "sweep" deletes job folders left by killed runs. Verdict
 // lines on stderr (WORKER_ADMIT / WORKER_BUSY / WORKER_REFUSED) come before anything is read from stdin; after
 // WORKER_ADMIT stdin is the inputs as tar, stdout the result as tar, and the job's folder is gone when it exits.
-export const heavyWorker = async (ctx: HeavyCtx, command: string): Promise<number> => {
+export const heavyWorker = async (ctx: HeavyCtx, command: string, caller?: string): Promise<number> => {
   const [verb, ...rest] = command.trim().split(/\s+/);
   // the heavy log lives here; a refusal on a host that never ran a heavy job still logs and says WORKER_REFUSED
   mkdirSync(ctx.deps.dir, { recursive: true });
@@ -23,6 +24,9 @@ export const heavyWorker = async (ctx: HeavyCtx, command: string): Promise<numbe
     console.error(`WORKER_SWEPT ${sweepJobDirs(ctx.q.jobDir, pidAlive)}`);
     return 0;
   }
+  // exec: another host's own command in a bwrap box (heavy-spread.ts); caller: the account whose key it is (the forced
+  // command's --caller), for the log
+  if (verb === "exec") return heavyExec(ctx, rest, { refuse, caller: caller && /^[\w.-]{1,64}$/.test(caller) ? caller : "-", tools: defaultTools(), maxMin: ctx.q.execMaxMin });
   if (verb !== "run") return refuse("-", `unknown request "${verb ?? ""}"`);
   const rlAsked = rest.includes("--rl");
   const [label = "", kind = "", ...args] = rest.filter((a) => a !== "--rl");

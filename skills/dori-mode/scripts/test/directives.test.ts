@@ -204,7 +204,7 @@ test("directive-audit: gaps of the day go to the watch log and one summary to th
   await deps.registry.write({ ...clean, key: "old", thread: "none", brief: "/nope.md", openedAt: "2026-10-14T00:00:00.000Z" });
   const inbox = await write("inbox.jsonl", "");
   const quiet = await runDirectiveAudit(deps, { since: "2026-10-15T06:00:00.000Z", inbox, owner: "7" });
-  expect(quiet.lines).toEqual(["DIRECTIVE_AUDIT_OK since 2026-10-15T06:00:00.000Z: 1 lanes and the owner's messages read against 30 directives, no gap"]);
+  expect(quiet.lines).toEqual(["DIRECTIVE_AUDIT_OK since 2026-10-15T06:00:00.000Z: 1 lanes and the owner's messages read against 31 directives, no gap"]);
   expect(await Bun.file(deps.config.watchLog).exists()).toBe(false);
   expect(sent(world)).toEqual([]);
   // a lane whose brief lacks a directive and has no thread, and a standing directive of the owner nobody put in the ledger
@@ -339,12 +339,12 @@ test("directives apply: a lane launched before the ledger gets what its brief la
   const r = await applyDirectives(deps, lane);
   expect(r.ok).toBe(true);
   expect(r.added).toEqual(before);
-  // one [LEAD] message with every text, as launch writes them
-  const msgs = sent(world).filter((t) => t.startsWith("[LEAD] 지침 보충"));
-  expect(msgs).toHaveLength(1);
+  // one [LEAD] message with every text, as launch writes them (typed in SEND_CHUNK_BYTES pieces, so read as one text)
+  const typed = sent(world).join("");
+  expect(typed.split("[LEAD] 지침 보충")).toHaveLength(2);
   const options = ledger.entries.find((e) => e.id === "options-ledger")!;
-  expect(msgs[0]).toContain(directiveText(options));
-  expect(msgs[0]).toContain(blocks["eight-steps"]);
+  expect(typed).toContain(directiveText(options));
+  expect(typed).toContain(blocks["eight-steps"]);
   const text = await Bun.file(lane.brief).text();
   // the lead's text above is untouched; the section sits before what launch appended
   expect(text.startsWith(fields.replace(/\s*$/, ""))).toBe(true);

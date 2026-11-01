@@ -37,7 +37,7 @@ const ctxWith = (q: Partial<HeavyQueue>, sleep: () => Promise<void> = () => new 
   // every reading of the clock a millisecond later, so jobs line up in the order they were started
   let tick = Date.now();
   const deps: SlotDeps = { dir: join(state.dir, "heavy"), slots: 1, maxLoad: 80, clock: { now: () => tick++, sleep }, pid: process.pid, load: async () => 10, alive: (p) => (p === HOLDER ? holderAlive : true), log: (l) => logs.push(l) };
-  return { q: { jobs: { upper: upper("queue"), train, rlprobe: { ...upper("queue"), rl: true } }, helpers: [], queue: [], rl: true, jobDir: join(state.dir, "jobs"), ...q }, deps };
+  return { q: { jobs: { upper: upper("queue"), train, rlprobe: { ...upper("queue"), rl: true } }, helpers: [], queue: [], rl: true, jobDir: join(state.dir, "jobs"), exec: false, execMaxMin: 240, ...q }, deps };
 };
 
 const holdSlot = () => {

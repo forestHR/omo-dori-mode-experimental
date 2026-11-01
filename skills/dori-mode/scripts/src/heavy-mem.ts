@@ -60,7 +60,7 @@ export const scopeLimit = (m: MemInfo, free: number, needBytes?: number): number
 // systemd unit names take letters, digits and : _ . - only
 export const unitName = (label: string, pid: number): string => `dori-heavy-${label.replace(/[^\w.:-]/g, "_").slice(0, 64)}-${pid}`;
 
-export const scopeArgv = (unit: string, limitBytes: number, cmd: readonly string[]): string[] => [
+export const scopeArgv = (unit: string, limitBytes: number, cmd: readonly string[], props: readonly string[] = []): string[] => [
   "systemd-run",
   "--user",
   "--scope",
@@ -71,6 +71,7 @@ export const scopeArgv = (unit: string, limitBytes: number, cmd: readonly string
   `MemoryMax=${limitBytes}`,
   "-p",
   "MemorySwapMax=0",
+  ...props.flatMap((p) => ["-p", p]),
   "--",
   "/bin/sh",
   "-c",
@@ -108,22 +109,23 @@ const scopeResult = async (unit: string): Promise<string> => {
   return result;
 };
 
-export type ScopedRun = { readonly label: string; readonly cmd: readonly string[]; readonly free: number; readonly needBytes?: number; readonly log?: (line: string) => void };
-type SpawnOpts = { cwd?: string; env?: Record<string, string | undefined>; stdin?: "inherit" | "ignore"; stdout?: "inherit" | "ignore" | ReturnType<typeof Bun.file>; stderr?: "inherit" | "ignore" };
+// props: more scope properties (CPUQuota=..., RuntimeMaxSec=...)
+export type ScopedRun = { readonly label: string; readonly cmd: readonly string[]; readonly free: number; readonly needBytes?: number; readonly props?: readonly string[]; readonly log?: (line: string) => void };
+type SpawnOpts = { cwd?: string; env?: Record<string, string | undefined>; stdin?: "inherit" | "ignore"; stdout?: "inherit" | "ignore" | "pipe" | ReturnType<typeof Bun.file>; stderr?: "inherit" | "ignore" | "pipe" };
 
 // Starts a heavy command in its own scope (HEAVY_SCOPE) or, where no user scope can be made, as before (HEAVY_NO_SCOPE).
 // Resolves with the command's exit code; HEAVY_OOM when the kernel killed it in its scope.
-export const spawnScoped = async (r: ScopedRun, opts: SpawnOpts, onStart?: (pid: number) => void): Promise<number> => {
+export const spawnScoped = async (r: ScopedRun, opts: SpawnOpts, onStart?: (pid: number, proc: Bun.Subprocess) => void): Promise<number> => {
   const m = readMeminfo();
   const no = m ? await canScope() : "no /proc/meminfo";
   const unit = unitName(r.label, process.pid);
   const limit = m ? scopeLimit(m, r.free, r.needBytes) : 0;
   if (no) r.log?.(`HEAVY_NO_SCOPE ${r.label}: ${no}; runs without a memory cap`);
   else r.log?.(`HEAVY_SCOPE ${r.label} ${unit}.scope MemoryMax=${fmtMem(limit)}${r.needBytes ? " (its --mem)" : ` (keeps ${r.free}% free now)`}`);
-  const argv = no ? [...r.cmd] : scopeArgv(unit, limit, r.cmd);
+  const argv = no ? [...r.cmd] : scopeArgv(unit, limit, r.cmd, r.props);
   const env = no ? opts.env : { ...(opts.env ?? process.env), ...userBusEnv(opts.env ?? process.env) };
   const p = Bun.spawn(argv, { ...opts, ...(env ? { env } : {}) });
-  onStart?.(p.pid);
+  onStart?.(p.pid, p);
   const code = await p.exited;
   if (!no && code !== 0) {
     const result = await scopeResult(unit);

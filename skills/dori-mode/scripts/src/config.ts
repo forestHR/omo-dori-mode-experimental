@@ -60,6 +60,10 @@ export type HeavyQueue = {
   readonly rl: boolean;
   // a job's files live here while it runs, on every host, and are deleted after (memory-backed, gone at reboot)
   readonly jobDir: string;
+  // as a helper: run other hosts' own commands (dori heavy --kind ... --sync ...) in a bwrap box (heavy-spread.ts)
+  readonly exec: boolean;
+  // as a helper: such a run is stopped after this many minutes
+  readonly execMaxMin: number;
 };
 
 const isArgv = (v: unknown): boolean => Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === "string");
@@ -75,6 +79,8 @@ export const heavyQueueProblem = (q: HeavyQueue): string | undefined => {
   for (const h of q.helpers) if (typeof h.name !== "string" || !/^[\w.-]{1,64}$/.test(h.name) || !isArgv(h.ssh)) return `heavyQueue.helpers: each needs a name (letters, digits, . _ -) and an ssh argv`;
   if (!Array.isArray(q.queue) || !q.queue.every((p) => typeof p === "string")) return "heavyQueue.queue must be a list of strings";
   if (q.queue.length && q.helpers.length) return "heavyQueue: a host is either the queue (helpers) or reaches it (queue), not both";
+  if (typeof q.exec !== "boolean") return "heavyQueue.exec must be true or false";
+  if (!Number.isInteger(q.execMaxMin) || q.execMaxMin < 1) return "heavyQueue.execMaxMin must be a whole number of minutes, 1 or more";
   return undefined;
 };
 
@@ -474,7 +480,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   heavyMaxSlots: 8,
   heavyHeadroomPct: 10,
   heavySettleSec: 120,
-  heavyQueue: { jobs: {}, helpers: [], queue: [], rl: true, jobDir: "/dev/shm/dori-heavy" },
+  heavyQueue: { jobs: {}, helpers: [], queue: [], rl: true, jobDir: "/dev/shm/dori-heavy", exec: false, execMaxMin: 240 },
   deadPanePatterns: ["has stopped", "no suitable jobs"],
   guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },
   hooks: {},

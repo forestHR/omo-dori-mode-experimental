@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // allow: SIZE_OK — existing command dispatcher; command behavior lives in separate modules.
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -33,6 +33,7 @@ import { neverFits, parseMem, readMeminfo, spawnScoped } from "./heavy-mem.ts";
 import { heavyJobCommand, HeavyJobError, heavyServe } from "./heavy-queue.ts";
 import { acquireSlot, pidAlive, releaseSlot, type SlotDeps } from "./heavy-slot.ts";
 import { heavyWorker } from "./heavy-worker.ts";
+import { heavySpread, isKind, spreadPlan, type SpreadJob } from "./heavy-spread.ts";
 import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
 import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
@@ -251,11 +252,17 @@ const USAGE = `dori <command> [options]
                                        elsewhere sent to the queue host (heavyQueue.queue), run here only while it cannot
                                        be reached. Prints the job's stdout, copies its result files to --out, exits with
                                        its code (HEAVY_HELPER / HEAVY_DONE / HEAVY_QUEUE_DOWN lines)
+  heavy <label> [--mem SIZE] --kind cpu|browser|gpu --sync PATH ... [--env NAME ...] -- <command ...>
+                                       run the lane's own command on the less busy PC: a heavyQueue.helpers host when this
+                                       one is more than 15 points busier or refuses it, in a bwrap box with no network,
+                                       the --sync folders copied there at the same paths and changed files copied back
+                                       (HEAVY_SPREAD / HEAVY_BACK / HEAVY_DONE); paths outside --sync run here (HEAVY_LOCAL)
   heavy-serve <label> <name> [--rl] -- [arg ...]
                                        queue host side of a job sent by another host: inputs as tar on stdin, result tar
                                        on stdout
-  heavy-worker                         a helper's forced command for the queue host's key (SSH_ORIGINAL_COMMAND "run
-                                       <label> <name> [arg ...]" or "sweep"); job files live in heavyQueue.jobDir and
+  heavy-worker [--caller ACCOUNT]      a helper's forced command for the queue host's key (SSH_ORIGINAL_COMMAND "run
+                                       <label> <name> [arg ...]", "exec ..." when heavyQueue.exec is
+                                       true, or "sweep"); job files live in heavyQueue.jobDir and
                                        are deleted after each run
   can-launch                           exit 0 if the host has room for a new lane, else print why and exit 4
   state-git [init|commit|log [N]|restore <time|sha> [--file PATH ...]|loop|check|push-check] [--dir DIR ...]
@@ -460,7 +467,7 @@ const flags = parseArgs({
     answer: { type: "string" }, repo: { type: "string", multiple: true }, since: { type: "string" }, until: { type: "string" }, backtest: { type: "boolean" },
     static: { type: "boolean" }, dir: { type: "string", multiple: true }, "no-thread": { type: "string" }, "why-new": { type: "string" },
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
-    job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" },
+    job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
   },
 });
@@ -1191,7 +1198,7 @@ try {
         process.exitCode = await heavyJobCommand({ q: config.heavyQueue, deps: heavyDeps(load) }, { req: { label: jobLabel, kind: jobName, rl: Boolean(flags.values.rl), args: cmd }, files: many("in").map((f) => resolve(f)), ...(out ? { out: resolve(out) } : {}) });
         break;
       }
-      const name = label && label !== "--" && !label.startsWith("-") && cmd.length ? label : die("usage: dori heavy <label> [--mem SIZE] -- <command ...>");
+      const name = label && label !== "--" && !label.startsWith("-") && cmd.length ? label : die("usage: dori heavy <label> [--mem SIZE] [--kind cpu|browser|gpu --sync PATH ... [--env NAME ...]] -- <command ...>");
       const memOpt = opt("mem");
       const needBytes = memOpt === undefined ? undefined : (parseMem(memOpt) ?? die(`dori heavy --mem takes a size like 70G or 200M, not "${memOpt}"`));
       const deps = heavyDeps(load);
@@ -1202,7 +1209,28 @@ try {
         process.exitCode = 2;
         break;
       }
-      const slot = await acquireSlot(deps, name, 15_000, needBytes ? needBytes / 1024 : undefined);
+      // --kind: the command may run on the less busy host (heavy-spread.ts); what it cannot take along keeps it here
+      const kindOpt = opt("kind");
+      const kind = kindOpt === undefined ? undefined : isKind(kindOpt) ? kindOpt : die(`dori heavy --kind takes cpu, browser or gpu, not "${kindOpt}"`);
+      let spreadSlot: string | undefined;
+      if (kind !== undefined) {
+        const badEnv = many("env").find((e) => !/^[A-Za-z_]\w{0,63}$/.test(e));
+        if (badEnv !== undefined) die(`dori heavy --env takes a variable name, not "${badEnv}"`);
+        const env = Object.fromEntries(["LANG", "TZ", ...many("env")].flatMap((k) => (process.env[k] === undefined ? [] : [[k, process.env[k]!]])));
+        const job: SpreadJob = { label: name, kind, cmd, cwd: process.cwd(), sync: many("sync").map((s) => resolve(s)), env, ...(needBytes ? { needBytes } : {}) };
+        const plan = spreadPlan(job, { uid: process.getuid?.() ?? -1, home: homedir() });
+        if (!plan.ok) deps.log?.(`HEAVY_LOCAL ${name}: ${plan.why}`);
+        else if (!config.heavyQueue.helpers.length) deps.log?.(`HEAVY_LOCAL ${name}: no heavyQueue.helpers on this host`);
+        else {
+          const r = await heavySpread({ q: config.heavyQueue, deps }, job, plan);
+          if ("code" in r) {
+            process.exitCode = r.code;
+            break;
+          }
+          spreadSlot = r.slot;
+        }
+      }
+      const slot = spreadSlot ?? (await acquireSlot(deps, name, 15_000, needBytes ? needBytes / 1024 : undefined));
       try {
         process.exitCode = await spawnScoped({ label: name, cmd, free: config.heavyHeadroomPct, ...(needBytes ? { needBytes } : {}), ...(deps.log ? { log: deps.log } : {}) }, { stdout: "inherit", stderr: "inherit", stdin: "inherit" });
       } finally {
@@ -1219,7 +1247,9 @@ try {
     }
     case "heavy-worker": {
       const load = async () => (await sampleHost(run, config.backend)).load1;
-      process.exitCode = await heavyWorker({ q: config.heavyQueue, deps: heavyDeps(load) }, process.env.SSH_ORIGINAL_COMMAND ?? rest.join(" "));
+      const at = rest.indexOf("--caller");
+      const words = at >= 0 ? [...rest.slice(0, at), ...rest.slice(at + 2)] : rest;
+      process.exitCode = await heavyWorker({ q: config.heavyQueue, deps: heavyDeps(load) }, process.env.SSH_ORIGINAL_COMMAND ?? words.join(" "), opt("caller"));
       break;
     }
     case "state-git": {

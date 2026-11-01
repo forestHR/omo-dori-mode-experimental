@@ -176,6 +176,7 @@ Done = command ["bun","test"] stdout~" 0 fail"; file qa/report.json json:.passed
 | `dori signals [--lane K \| --cwd DIR \| --tag T]` | 同一工作领域里以前的 lane 试过什么、结果如何:编号的修复尝试和转去查根因的时刻(也从 `[REPORT]` 行和 lead 的重新指示里读取)、按指标的标记修复、带理由的完成声明驳回、重发和催促次数、结果、该领域的驳回率和返工、警告。重新指示 lane 之前先看它 |
 | `dori scorecard [--date D] [--post]` | 只用记录算出的每日 token 成绩单(不调用模型):每个验证完成的成本和完成声明的驳回率并排，返工最多的 lane、首次回复中位数/p90、lead 的上下文税;保存到 `<stateDir>/scorecard/<日期>.json` 和 `latest.md` 供 lead 查看,`--post` 也发到 Discord(默认关闭;每天保存的 systemd timer 在 Discord + aoe 配置里) |
 | `dori heavy <label> [--mem 70G] -- <cmd>` | 负载低时在带内存上限的独立 scope 中运行构建、测试或 GPU 任务(超出时只停该任务,lane 不受影响);已有任务在跑时,只有 GPU、内存、CPU 各自仍剩 10% 以上才同时运行 |
+| `dori heavy <label> --kind browser\|cpu --sync DIR -- <cmd>` | 在较空闲的那台 PC 上运行同样的任务:helper 主机接收 `--sync` 目录，在无网络的沙箱里运行，再把改动的文件拷回 |
 
 发给 pane 的文字总是作为一个参数传入，从不经过 shell 字符串，并且会确认 Enter 真的生效了。
 
