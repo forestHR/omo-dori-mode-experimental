@@ -61,6 +61,82 @@ test("a report the lane sent to the lead pane is found there, wrapped lines join
   expect(later[1]?.detail).toEndWith("; lead told");
 });
 
+// omo runs in tmux's alternate screen (history_size 0): capture-pane -S -3000 returns only the visible rows, and omo's tail
+// under a turn (cache wait, stall backstop, TPS, the todo list, the status lines) pushes a report off them. 2026-11-01:
+// NO-REPORT for pingpong-analytics every 2 min from 00:22Z to 04:19Z while its reports sat in the lead's transcript.
+const omoTail = [
+  " ⚡ Cache-warm wait · iteration 3",
+  " Stall backstop ready 2026-11-01 04:24 UTC (4m 30s) - the goal resumes as soon",
+  " as a wake source delivers, inside the 1h prompt-cache TTL.",
+  " Prior turn: ~151.6K cache-read/write tokens (cumulative) · est. $0.576",
+  " discount if reused · next cache hit unverified",
+  "",
+  " TPS 148.9 tok/s. Cache hit 98.4%, 3.7s",
+  "",
+  " Todo",
+  " Pre-roll PR",
+  " [✓] Design pre-roll of about 1 s in the recorder",
+  " [•] Replay plays the pre-roll (serve backswing visible)",
+  " [ ] Back-to-back rallies with overlapping pre-roll",
+  " [ ] Report pre-roll results to lead",
+  "─────────────────────────────────────────────",
+  "❯",
+  "─────────────────────────────────────────────",
+  " Claude·acct ▕░░░░░░░░░░░░░░▏ 0% 7d · resets 11/03 08:59 │ pool",
+  "…ngpong-tournament • master • … • 152K/1M (15.2%) (auto)  claude-opus-5-5:medium",
+  "(😺 OmO Native by Q Kim) Pursuing goal (22h 12m) goal continues ...",
+].join("\n");
+const userLine = (at: string, text: string): string => JSON.stringify({ type: "message", timestamp: at, message: { role: "user", content: [{ type: "text", text }] } });
+const noSignals = { signals: async () => ({}) };
+
+test("a lane that reported is not NO-REPORT once its report scrolled off both screens: the thread and the lead get its last report", async () => {
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
+  await deps(T0).registry.write({ ...working, lastReport: "[REPORT] quiet-lane | milestone | recorder guard holds, PR open" });
+  world.screens["w:p7"] = `v6-orig2 is recording.\n${omoTail}`;
+  world.screens["lead:p1"] = omoTail;
+  const acts = await freshnessTick(deps(T0 + 21 * MIN), "/home/test", { ...noSignals, leadTranscript: async () => undefined });
+  expect(acts.map((a) => a.kind)).toEqual(["nudged", "posted"]);
+  expect(sent(world).find((t) => t.startsWith("[DORI] quiet-lane"))).toContain("Last report: [REPORT] quiet-lane | milestone | recorder guard holds, PR open");
+});
+
+test("a lane that never reported is still NO-REPORT", async () => {
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
+  await deps(T0).registry.write(working);
+  world.screens["w:p7"] = omoTail;
+  world.screens["lead:p1"] = omoTail;
+  const transcript = [userLine("2026-01-01T12:05:00.000Z", "[REPORT] other-lane | milestone | not ours"), userLine("2026-01-01T12:06:00.000Z", "[DORI] quiet-lane: 20 min without a new report. Last report: [REPORT] quiet-lane | milestone | quoted, not typed")].join("\n");
+  const acts = await freshnessTick(deps(T0 + 21 * MIN), "/home/test", { ...noSignals, leadTranscript: async () => transcript });
+  expect(acts.map((a) => [a.kind, a.detail])).toContainEqual(["no-report", "pane has no [REPORT] line"]);
+  expect(world.calls.some((c) => c[0] === "notify")).toBe(false);
+});
+
+test("a report typed into the lead is read from its transcript, first line only, and a new one resets the silence", async () => {
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
+  await deps(T0).registry.write({ ...working, lastReport: "[REPORT] quiet-lane | milestone | older step" });
+  world.screens["w:p7"] = omoTail;
+  world.screens["lead:p1"] = omoTail;
+  const transcript = [
+    userLine("2026-01-01T12:01:00.000Z", "[REPORT] quiet-lane | milestone | older step"),
+    JSON.stringify({ type: "message", timestamp: "2026-01-01T12:02:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "[REPORT] quiet-lane | done | the lead's own words are not a report" }] } }),
+    userLine("2026-01-01T12:14:00.000Z", "[REPORT] quiet-lane | working | replay re-run done, second job waits in the core gate\nevidence: run 21631b1, qa/replay.log"),
+  ].join("\n");
+  const acts = await freshnessTick(deps(T0 + 16 * MIN), "/home/test", { ...noSignals, leadTranscript: async () => transcript });
+  expect(acts.map((a) => a.kind)).toEqual([]);
+  const lane = await deps(T0).registry.read("quiet-lane");
+  expect(lane?.lastReport).toBe("[REPORT] quiet-lane | working | replay re-run done, second job waits in the core gate");
+  expect(lane?.lastReplyAt).toBe(T0 + 16 * MIN);
+});
+
+test("a report wrapped on the lane's screen with a status outside the four words and omo's tail under it still counts", async () => {
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
+  await deps(T0).registry.write(working);
+  world.screens["lead:p1"] = omoTail;
+  world.screens["w:p7"] = ` [REPORT] quiet-lane | working | origin 이동(end-sync 머지: 대회\n c6d071a, 비전 21631b1) 기록\n\n${omoTail}`;
+  const acts = await freshnessTick(deps(T0 + 21 * MIN), "/home/test", { ...noSignals, leadTranscript: async () => undefined });
+  expect(acts.map((a) => a.kind)).toEqual([]);
+  expect((await deps(T0).registry.read("quiet-lane"))?.lastReport).toBe("[REPORT] quiet-lane | working | origin 이동(end-sync 머지: 대회 c6d071a, 비전 21631b1) 기록");
+});
+
 test("quietText is the configured words, and postRawReports posts the lane's report as before without telling the lead", async () => {
   const korean = { ...defaultDiscordWords, quietText: "진행 중이야 — 마지막 보고는 {min}분 전. 정리해서 곧 알려 줄게." };
   await depsFor(world, fakeClock(T0), state.dir).registry.write(working);

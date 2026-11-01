@@ -3,7 +3,7 @@ import { type DoriConfig, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { runOwnerCheck } from "./owner-check.ts";
 import { researchCheck, stuckTop } from "./explore.ts";
-import { readScreen, sendVerified } from "./panes.ts";
+import { paneTranscript, readScreen, sendVerified } from "./panes.ts";
 import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { leadAlert } from "./autoturn.ts";
@@ -16,9 +16,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { watchLog } from "./watch-log.ts";
 
+// Any status word counts as hearing from the lane (pingpong-analytics reports "| working |"); the footer's placeholder
+// "| <milestone|...> | <one plain line ..." never does.
+const reportGrammar = (key: string): RegExp => new RegExp(`\\[REPORT\\] ${key.replace(/[.]/g, "\\.")} \\| [a-z]+ \\| (?!<)\\S`);
+
 // A report the agent UI wrapped over several lines continues until the next blank line.
 export const lastReportLine = (screen: string, key: string): string | null => {
-  const grammar = new RegExp(`\\[REPORT\\] ${key.replace(/[.]/g, "\\.")} \\| (milestone|blocker|question|done) \\| (?!<)\\S`);
+  const grammar = reportGrammar(key);
   const lines = screen.split("\n");
   const at = lines.findLastIndex((l) => grammar.test(l));
   if (at < 0) return null;
@@ -28,6 +32,31 @@ export const lastReportLine = (screen: string, key: string): string | null => {
     parts.push(l);
   }
   return parts.map((p) => p.trim()).join(" ").replace(/["'\])\s,]+$/, "");
+};
+
+// A report a lane typed into the lead (dori type) is a user message of the lead's transcript, whole and unwrapped, while
+// the lead's screen is omo's alternate screen: tmux keeps no history there, so a report is gone from it once omo's tail
+// under a turn fills the rows. The newest one counts, its first line only (the evidence sits below it); a line the lead
+// wrote or a [DORI] note quoting a report is not one.
+export const transcriptReport = (lines: readonly string[], key: string): string | null => {
+  const head = `[REPORT] ${key} |`;
+  const grammar = reportGrammar(key);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? "";
+    if (!line.includes(head)) continue;
+    let said = "";
+    try {
+      const o = JSON.parse(line) as { message?: { role?: string; content?: unknown } };
+      if (o.message?.role !== "user") continue;
+      const c = o.message.content;
+      said = typeof c === "string" ? c : Array.isArray(c) ? c.map((p: { text?: string }) => p.text ?? "").join("\n") : "";
+    } catch {
+      continue;
+    }
+    const hit = said.split("\n").findLast((l) => l.trimStart().startsWith(head) && grammar.test(l));
+    if (hit) return hit.trim();
+  }
+  return null;
 };
 
 export const scrubForThread = (line: string, home: string): string =>
@@ -59,6 +88,9 @@ export type RolloverHooks = {
   readonly directiveAudit?: (since: string) => Promise<readonly string[]>;
   // pushes the owner's message links of the local ledger to the other Dori (directives.linkPeers)
   readonly directiveLinks?: () => Promise<readonly string[]>;
+  // the lead's omo transcript, where each report a lane typed into the lead sits (read first, before the screens);
+  // undefined when there is none (backend herdr, no leadPane, no session file)
+  readonly leadTranscript?: () => Promise<string | undefined>;
 };
 
 const pidAlive = (pid: number): boolean => {
@@ -256,11 +288,17 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
   const hooks: RolloverHooks = { taskEnded: (id) => {
     const r = taskRecord(home, id);
     return r !== undefined && !taskOpen(r);
+  }, leadTranscript: async () => {
+    const pane = deps.config.leadPane;
+    if (deps.config.backend !== "aoe" || !pane) return undefined;
+    const path = await paneTranscript(deps.run, deps.config.sessionsDir, pane);
+    return path ? readFileSync(path, "utf8") : undefined;
   }, ...given };
   const acts: SweepAct[] = [];
   const now = deps.clock.now();
   const staged = new Set<string>();
   let leadScreen: string | undefined;
+  let leadLines: readonly string[] | undefined;
   for (const lane of await deps.registry.open()) {
     if (!lane.pane) continue;
     // a lane told "not done" keeps working: it is moved to a new session like a working one (cyto-p2-timers carried 306k
@@ -271,7 +309,11 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
     }
     if (statusOf(lane) !== "working") continue;
     leadScreen ??= deps.config.leadPane ? await readScreen(deps.run, deps.config.backend, deps.config.leadPane, 3000) : "";
-    const report = lastReportLine(leadScreen, lane.key) ?? lastReportLine(await readScreen(deps.run, deps.config.backend, lane.pane, 200), lane.key);
+    leadLines ??= await (hooks.leadTranscript?.() ?? Promise.resolve(undefined)).then((t) => t?.split("\n") ?? [], (e: unknown) => {
+      watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line: `FRESHNESS_WARN lead transcript not read: ${String(e).slice(0, 200)}` });
+      return [];
+    });
+    const report = transcriptReport(leadLines, lane.key) ?? lastReportLine(leadScreen, lane.key) ?? lastReportLine(await readScreen(deps.run, deps.config.backend, lane.pane, 200), lane.key);
     let current = lane;
     if (report && report !== lane.lastReport) {
       current = { ...current, lastReport: report, lastReplyAt: now };
@@ -303,19 +345,21 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
     }
     const hook = deps.config.hooks.threadReply;
     if (silentMin >= deps.config.postAfterMin && hook && lane.thread !== "none" && (current.lastAutoReplyAt ?? 0) < heard) {
-      if (!report) {
+      // a report seen before still stands once it left the screens; only a lane never heard from is NO-REPORT
+      const known = report ?? current.lastReport;
+      if (!known) {
         acts.push({ kind: "no-report", lane: lane.key, detail: "pane has no [REPORT] line" });
         continue;
       }
       // the report is the lane's note to the lead; the owner gets a plain status line and the lead the note to retell
       const words = deps.config.discord;
-      const text = words.postRawReports ? `Progress (from the lane's last report): ${scrubForThread(report, home)}` : words.quietText.replaceAll("{min}", String(silentMin));
+      const text = words.postRawReports ? `Progress (from the lane's last report): ${scrubForThread(known, home)}` : words.quietText.replaceAll("{min}", String(silentMin));
       await deps.run(fill(hook, { thread: lane.thread, text, key: lane.key }));
       await deps.registry.patch(lane.key, { lastAutoReplyAt: now });
       let lead = "";
       if (!words.postRawReports) {
         const pane = deps.config.leadPane;
-        const note = `[DORI] ${lane.key}: ${silentMin} min without a new report, so its thread got a short status line instead of the report. Tell the owner where it stands in plain words. Last report: ${report.replace(/`/g, "'").replaceAll("$(", "$ (")}`;
+        const note = `[DORI] ${lane.key}: ${silentMin} min without a new report, so its thread got a short status line instead of the report. Tell the owner where it stands in plain words. Last report: ${known.replace(/`/g, "'").replaceAll("$(", "$ (")}`;
         lead = !pane ? "; lead not told: leadPane is not configured" : (await sendVerified(deps.run, deps.clock, deps.config, pane, note)) ? "; lead told" : `; lead not told: the note did not reach pane ${pane}`;
       }
       acts.push({ kind: "posted", lane: lane.key, detail: `${text}${lead}` });
