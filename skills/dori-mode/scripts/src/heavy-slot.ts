@@ -50,7 +50,19 @@ const slotMemKb = (deps: SlotDeps, n: number): number => {
   }
 };
 
-const tryTake = (deps: SlotDeps, n: number, label: string, memKb?: number): string | null => {
+// how many seconds a job needs before its load shows, when it said so (dori heavy --kind cpu|browser: a browser test's load
+// shows within seconds); a slot without it waits headroom.settleSec (a GPU job loading a model)
+const SETTLE_FILE = "settle";
+const slotSettleSec = (deps: SlotDeps, n: number): number | undefined => {
+  try {
+    const v = Number(readFileSync(join(deps.dir, `slot.${n}`, SETTLE_FILE), "utf8"));
+    return v > 0 ? v : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+const tryTake = (deps: SlotDeps, n: number, label: string, memKb?: number, settleSec?: number): string | null => {
   const slot = join(deps.dir, `slot.${n}`);
   const claim = (): string | null => {
     try {
@@ -60,6 +72,7 @@ const tryTake = (deps: SlotDeps, n: number, label: string, memKb?: number): stri
     }
     const owner = `${deps.pid} ${label} ${new Date(deps.clock.now()).toISOString()}`;
     if (memKb) writeFileSync(join(slot, MEM_FILE), String(Math.round(memKb)));
+    if (settleSec) writeFileSync(join(slot, SETTLE_FILE), String(settleSec));
     writeFileSync(join(slot, "owner"), owner);
     taken.set(slot, owner);
     return slot;
@@ -183,16 +196,16 @@ const line = (deps: SlotDeps): string[] => {
 };
 
 // One admission try now, for a helper that serves another host's queue: a job waiting in this host's own line goes first.
-export const admitOnce = async (deps: SlotDeps, label: string): Promise<Try | null> => {
+export const admitOnce = async (deps: SlotDeps, label: string, settleSec?: number): Promise<Try | null> => {
   mkdirSync(deps.dir, { recursive: true });
   const waiting = line(deps).length;
   if (waiting) return { wait: "queue", why: `${waiting} job(s) wait in this host's queue` };
-  return withLock(deps, () => tryAdmit(deps, label));
+  return withLock(deps, () => tryAdmit(deps, label, undefined, settleSec));
 };
 
 // memKb: the job's own estimate (dori heavy --mem). With it even the first slot waits until the memory it needs, beside
 // what running jobs said they need and do not use yet, keeps headroom.free percent of the host free.
-const tryAdmit = async (deps: SlotDeps, label: string, memKb?: number): Promise<Try> => {
+const tryAdmit = async (deps: SlotDeps, label: string, memKb?: number, settleSec?: number): Promise<Try> => {
   const load = await deps.load();
   if (load >= deps.maxLoad) return { wait: "load", why: `load ${load.toFixed(0)} >= ${deps.maxLoad}` };
   const h = deps.headroom;
@@ -212,19 +225,20 @@ const tryAdmit = async (deps: SlotDeps, label: string, memKb?: number): Promise<
   }
   if (running.length < deps.slots || !h) {
     for (let n = 1; n <= deps.slots; n++) {
-      const slot = tryTake(deps, n, label, memKb);
+      const slot = tryTake(deps, n, label, memKb, settleSec);
       if (slot) return { slot, why: `${running.length} heavy job(s) running, load ${load.toFixed(0)} < ${deps.maxLoad}${memWhy}` };
     }
     if (!h) return { wait: "full", why: `all ${deps.slots} slot(s) busy: ${heldBy(deps, holders(deps, max))}` };
   }
   if (running.length >= max) return { wait: "full", why: `all ${max} slots busy: ${heldBy(deps, running)}` };
-  const fresh = running.find((r) => deps.clock.now() - r.since < h.settleSec * 1000);
-  if (fresh) return { wait: "settle", why: `slot.${fresh.n} was taken ${Math.round((deps.clock.now() - fresh.since) / 1000)}s ago; its load shows after ${h.settleSec}s` };
+  const settleOf = (r: Holder): number => slotSettleSec(deps, r.n) ?? h.settleSec;
+  const fresh = running.find((r) => deps.clock.now() - r.since < settleOf(r) * 1000);
+  if (fresh) return { wait: "settle", why: `slot.${fresh.n} was taken ${Math.round((deps.clock.now() - fresh.since) / 1000)}s ago; its load shows after ${settleOf(fresh)}s` };
   // a job with its own estimate had memory checked above; the guess from running jobs is for the other resources
   const v = headroomVerdict(await usage(h), h.free, memKb ? ["mem"] : []);
   if (!v.ok) return { wait: `headroom ${v.short.join(",")}`, why: `${running.length} running; ${v.detail}` };
   for (let n = 1; n <= max; n++) {
-    const slot = tryTake(deps, n, label, memKb);
+    const slot = tryTake(deps, n, label, memKb, settleSec);
     if (slot) return { slot, why: `${running.length} running beside it; ${v.detail}${memWhy}` };
   }
   return { wait: "full", why: `all ${max} slots busy: ${heldBy(deps, holders(deps, max))}` };
@@ -243,6 +257,8 @@ export type AcquireOptions<T> = {
   // ask elsewhere also while this host only waits for a just-taken job to show its load (dori heavy --kind: the other
   // PC should not sit idle for heavySettleSec); the GPU line (--job) keeps waiting here then
   readonly elsewhereWhileSettling?: boolean;
+  // seconds this job needs before its load shows (kept in its slot for the next admission); default headroom.settleSec
+  readonly settleSec?: number;
 };
 
 export const acquire = async <T>(deps: SlotDeps, label: string, opts: AcquireOptions<T> = {}): Promise<Acquired<T>> => {
@@ -253,7 +269,7 @@ export const acquire = async <T>(deps: SlotDeps, label: string, opts: AcquireOpt
     for (;;) {
       const names = line(deps);
       const ahead = names.slice(0, Math.max(0, names.indexOf(basename(ticket))));
-      const t: Try | null = ahead.length ? { wait: "queue", why: `${ahead.length} job(s) ahead in the queue` } : await withLock(deps, () => tryAdmit(deps, label, opts.memKb));
+      const t: Try | null = ahead.length ? { wait: "queue", why: `${ahead.length} job(s) ahead in the queue` } : await withLock(deps, () => tryAdmit(deps, label, opts.memKb, opts.settleSec));
       const localOnlyAhead = ahead.length > 0 && ahead.every((n) => ticketKind(deps, n) === "local");
       if (t && "slot" in t) {
         deps.log?.(`HEAVY_ADMIT ${label} ${basename(t.slot)}: ${t.why}`);

@@ -24,6 +24,10 @@ export const isKind = (s: string): s is Kind => (KINDS as readonly string[]).inc
 // percentage points this host must be busier than a helper before a job leaves for it (a short job is not worth the trip
 // when both are about as busy)
 export const SPREAD_MARGIN = 15;
+// seconds a cpu or browser job needs before its load shows, so the next one may start beside it under the headroom rule
+// (heavySettleSec, 120 by default, is for GPU jobs that load a model; browser tests often end before it)
+export const QUICK_SETTLE_SEC = 20;
+const settleFor = (kind: Kind): number | undefined => (kind === "gpu" ? undefined : QUICK_SETTLE_SEC);
 // files a helper run may send back; more and nothing comes back (the run then exits 70)
 export const BACK_MAX_BYTES = 4 * 1024 ** 3;
 const BACK_TOO_BIG_EXIT = 70;
@@ -266,7 +270,7 @@ export const heavySpread = async (ctx: HeavyCtx, job: SpreadJob, plan: Extract<P
   const since = ctx.deps.clock.now();
   for (;;) {
     if (!run) {
-      const got = await acquire<Started>(ctx.deps, job.label, { since, elsewhere: (why) => helpers(100, why), elsewhereWhileSettling: true, ...(job.needBytes ? { memKb: job.needBytes / 1024 } : {}) });
+      const got = await acquire<Started>(ctx.deps, job.label, { since, elsewhere: (why) => helpers(100, why), elsewhereWhileSettling: true, ...(settleFor(job.kind) ? { settleSec: settleFor(job.kind) } : {}), ...(job.needBytes ? { memKb: job.needBytes / 1024 } : {}) });
       if ("slot" in got) return { slot: got.slot };
       run = got.elsewhere;
     }
@@ -397,7 +401,7 @@ export const heavyExec = async (ctx: HeavyCtx, words: readonly string[], d: Exec
       return 75;
     }
   }
-  const t = await admitOnce(ctx.deps, label);
+  const t = await admitOnce(ctx.deps, label, settleFor(kind));
   if (!t || !("slot" in t)) {
     console.error(`WORKER_BUSY ${t?.why ?? "another job is being admitted"}`);
     return 75;

@@ -123,6 +123,26 @@ test("a job waiting here only for a just-started job to show its load goes to a 
   expect(logs.some((l) => l.startsWith("HEAVY_SPREAD t second"))).toBe(true);
 }, 60_000);
 
+test("a browser job starts beside another one 20 s after it, not after the 120 s a GPU job gets", async () => {
+  // Given: two slots allowed, 120 s settle; slot.1 holds a job taken 30 s ago that said its load shows after 20 s
+  const base = ctxWith({});
+  const ctx: HeavyCtx = { ...base, deps: { ...base.deps, headroom: { ...base.deps.headroom!, maxSlots: 2, settleSec: 120 }, clock: { now: () => Date.now(), sleep: async () => { throw new Error("waited"); } } } };
+  const slot1 = join(state.dir, "heavy", "slot.1");
+  mkdirSync(slot1, { recursive: true });
+  writeFileSync(join(slot1, "owner"), `${HOLDER} browser-job ${new Date(Date.now() - 30_000).toISOString()}`);
+  writeFileSync(join(slot1, "settle"), "20");
+  // When
+  const r = await spread(ctx, jobOf(["true"], { kind: "browser" }));
+  // Then: admitted beside it, and its own slot says 20 s for the job after it
+  expect(r).toEqual({ slot: join(state.dir, "heavy", "slot.2") });
+  expect(readFileSync(join(state.dir, "heavy", "slot.2", "settle"), "utf8")).toBe("20");
+  // a slot without its own settle (a GPU job) still holds the next one for 120 s
+  writeFileSync(join(slot1, "owner"), `${HOLDER} gpu-job ${new Date(Date.now() - 30_000).toISOString()}`);
+  Bun.spawnSync(["rm", "-rf", join(slot1, "settle"), join(state.dir, "heavy", "slot.2")]);
+  await expect(spread(ctx, jobOf(["true"], { kind: "browser" }))).rejects.toThrow("waited");
+  expect(logs.some((l) => /HEAVY_WAIT t: slot\.1 was taken 3\ds ago; its load shows after 120s/.test(l))).toBe(true);
+});
+
 test("a host much less busy than a helper keeps the job: the helper is not asked", async () => {
   // Given
   const ctx = ctxWith({ helpers: [{ name: "second", ssh: helperArgv() }] }, 10);
