@@ -33,7 +33,11 @@ const OWNER = "280680578314010625";
 // a restatement that covers the lane's goal under every heading the new session must write
 const RESTATE = "## Goal\n레인에도 적용: ship it\n## Owner's words\nnone\n## Decisions\nnone\n## Next step\ntrain E7\n## Ruled out\nnone\n## Questions\nnone\n";
 
-type Sim = { fromNote?: boolean; arm: { description: string; command: string; filter?: string; pid: number }[]; thinking: string; ackPane: string; ack: boolean; restate?: string; supplement: "fix" | "ignore" | "silent"; handled: string[]; account: string; chainSurvives: boolean; grandchildSurvives?: boolean; doubleRun: boolean; restarted: boolean; endsAfterProbe?: number };
+// keepSeed: the new session keeps what the handover wrote into its restatement and adds its own headings; otherwise it
+// writes restate over it from scratch (wrote: the files it already wrote once)
+// cancel: what the new session does with a HANDOVER_TASKS_CANCEL line: task_cancel each id (its record turns cancelled), or
+// only ack it
+type Sim = { cancel?: "cancel" | "ack-only"; keepSeed?: boolean; wrote?: string[]; fromNote?: boolean; arm: { description: string; command: string; filter?: string; pid: number }[]; thinking: string; ackPane: string; ack: boolean; restate?: string; supplement: "fix" | "ignore" | "silent"; handled: string[]; account: string; chainSurvives: boolean; grandchildSurvives?: boolean; doubleRun: boolean; restarted: boolean; endsAfterProbe?: number };
 
 let state: { dir: string; done: () => void };
 let w: World;
@@ -87,10 +91,23 @@ const simulate = () => {
   if (sim.ack && probe) {
     // the new session writes what it understood, then acks
     const file = /write what you understood to (\S+)/.exec(probe)?.[1];
-    if (file && sim.restate !== "" && !existsSync(file)) writeFileSync(file, sim.restate ?? RESTATE);
+    if (file && sim.restate !== "" && !(sim.wrote ?? []).includes(file)) {
+      sim.wrote = [...(sim.wrote ?? []), file];
+      writeFileSync(file, sim.keepSeed && existsSync(file) ? `${readFileSync(file, "utf8")}\n## Next step\ntrain E7\n## Questions\nnone\n` : (sim.restate ?? RESTATE));
+    }
     ackHandover(state.dir, "n1", sim.ackPane, "2026-10-11T16:40:00Z");
     // a monitor that ran at the first check ends now (a remote tail whose ssh dropped)
     if (sim.endsAfterProbe) live.delete(sim.endsAfterProbe);
+  }
+  for (const line of sent(w)) {
+    const c = /^\[LEAD\] HANDOVER_TASKS_CANCEL (\S+): .*\(task_id ([^)]+)\)/.exec(line);
+    if (!c?.[1] || !c[2] || !sim.cancel || sim.handled.includes(c[1])) continue;
+    sim.handled.push(c[1]);
+    if (sim.cancel === "cancel") for (const id of c[2].split(", ")) {
+      const file = join(state.dir, ".omo", "agent", "projects", "work-1", "senpi-task", "tasks", `${id}.json`);
+      writeFileSync(file, JSON.stringify({ ...(JSON.parse(readFileSync(file, "utf8")) as object), status: "cancelled" }));
+    }
+    ackHandover(state.dir, c[1], NEW, "2026-10-11T16:42:00Z");
   }
   // a supplement round: it adds the items under the headings named ("fix"), acks without adding ("ignore"), or stays silent
   for (const line of sent(w)) {
@@ -896,6 +913,29 @@ test("the owner's words and decisions the restatement leaves out are filled in f
   expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", supplementRounds: 1 });
 });
 
+test("the restatement starts with the goal, the owner's words, the decisions and the tried fixes word for word, so a new session that keeps them and adds its own commits without a supplement round", async () => {
+  // Given: a summary with an owner quote and an English decision, a fix in the ledger, and a new session that keeps the
+  // handover's lines and writes only its next step and questions
+  const deps = await setup();
+  ready(deps, [15], undefined, OLD, `## Owner's words and constraints\n- Owner: "never restart the sleep chain while an old copy runs"\n## Decisions and why\n- Keep the eval seed fixed at three for every rerun. Why: the owner asked\n## Ruled out\nnone\n## In progress\nE7\n## Next step\ntrain E7\n`);
+  await deps.registry.patch("demo", { fixes: [{ at: "2026-10-11T16:00:00Z", metric: "loss", hypothesis: "lr too high", via: "report" }] });
+  sim.keepSeed = true;
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // Then
+  expect(r.code).toBe(0);
+  expect(printed.filter((l) => l.startsWith("HANDOVER_SUPPLEMENT"))).toEqual([]);
+  const understood = readFileSync((r.note ?? "").replace(/\.md$/, ".understood.md"), "utf8");
+  expect(understood).toContain('## Goal\n(carried by the handover, word for word: keep these lines as they are, in their own language; add what you understood below them)\n- "레인에도 적용"');
+  expect(understood).toContain('## Owner\'s words\n(carried by the handover, word for word: keep these lines as they are, in their own language; add what you understood below them)\n- "never restart the sleep chain while an old copy runs"');
+  expect(understood).toContain("- Keep the eval seed fixed at three for every rerun.");
+  expect(understood).toContain("## Ruled out\n(carried by the handover, word for word: keep these lines as they are, in their own language; add what you understood below them)\n- lr too high");
+  expect(missingFrom(understood, JSON.parse(readFileSync((r.note ?? "").replace(/\.md$/, ".json"), "utf8")) as LaneFacts)).toEqual([]);
+  expect(sent(w).some((x) => x.startsWith("[LEAD] HANDOVER_COMMITTED"))).toBe(true);
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done" });
+  expect(readRollovers(state.dir).at(-1)).not.toHaveProperty("supplementRounds");
+});
+
 test("a restatement that still leaves out a tried fix after the supplement rounds fails the check, and everything moves back", async () => {
   // Given
   const deps = await setup();
@@ -949,7 +989,7 @@ test("a new session that does not answer a supplement fails the check", async ()
   expect((await readLane(deps)).pane).toBe(OLD);
 });
 
-test("no restatement means the check fails and everything moves back", async () => {
+test("a new session that writes nothing into the restatement the handover started fails the check, and everything moves back", async () => {
   // Given
   const deps = await setup();
   ready(deps, [15]);
@@ -959,7 +999,8 @@ test("no restatement means the check fails and everything moves back", async () 
   const r = await laneHandover(deps, "demo", "aoe_lead_x", { ...OK, verifyMin: 1 });
   // Then
   expect(r.code).toBe(3);
-  expect(printed.find((l) => l.startsWith("HANDOVER_SUPPLEMENT demo round 1/2: 1 left out (restatement: the restatement file is missing or empty)"))).toBeDefined();
+  // the handover wrote what it carries; the headings the session writes itself are still missing
+  expect(printed.find((l) => l.startsWith("HANDOVER_SUPPLEMENT demo round 1/2: 2 left out (heading: ## Next step; heading: ## Questions)"))).toBeDefined();
   expect(printed.find((l) => l.startsWith("HANDOVER_VERIFY_FAIL"))).toContain("restatement");
   expect((await readLane(deps)).pane).toBe(OLD);
   expect(sigs).toEqual(["SIGSTOP 11", "SIGCONT 11"]);
@@ -1778,4 +1819,66 @@ test("the lead's instructions reach the new session as typed: those of the old c
   expect(sent(w).filter((l) => l.startsWith("[LEAD] HANDOVER_LEAD_LATE 2:"))).toHaveLength(1);
   expect(printed.find((l) => l.startsWith("HANDOVER_LEAD_LATE demo 2: old log line"))).toBeDefined();
   expect(existsSync(join(state.dir, "handover", "quiet", `${OLD}.typed.jsonl`))).toBe(false);
+});
+
+
+test("once the move commits, the old session's tasks in the shared task host are ended through the new session with task_cancel and listed in the note; a task of another session on the same host and one hosted by the closed old agent are left alone", async () => {
+  // Given: GongDori's e7-ledger-replay of 2026-10-27: its tasks ran in the account's shared task host (execution mode
+  // "process"), which neither the freeze nor the close of the old session reaches; another lane's task runs on that host too
+  const deps = { ...(await setup()), home: state.dir };
+  table = [...aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 50, ppid: 1, cmd: "bun /r/dist/bundle/cli.js --mode rpc --multi-session" }];
+  live.add(50);
+  const mine = taskRecordAt(state.dir, "st_01bd9", "running", { host_pid: 50, execution_mode: "process", task_summary: "E7 pilot correctness fix" });
+  taskRecordAt(state.dir, "st_01b36", "running", { host_pid: 11, execution_mode: "in-process" });
+  const other = taskRecordAt(state.dir, "st_01fff", "running", { host_pid: 50, execution_mode: "process", parent_session_id: "other-sid", root_session_id: "other-sid", task_summary: "another lane reads old-sid's log" });
+  sim.cancel = "cancel";
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { ...OK, force: true });
+  // Then
+  expect(r.code).toBe(0);
+  const lines = sent(w);
+  const ask = lines.findIndex((l) => l.startsWith("[LEAD] HANDOVER_TASKS_CANCEL"));
+  expect(lines[ask]).toContain("1 background task(s) of the old session still run after the move: st_01bd9 (E7 pilot correctness fix).");
+  expect(lines[ask]).toContain("(task_id st_01bd9)");
+  expect(lines.findIndex((l) => l.startsWith("[LEAD] HANDOVER_COMMITTED"))).toBeLessThan(ask);
+  expect(printed).toContain(`HANDOVER_TASKS_CANCELLED demo st_01bd9 "E7 pilot correctness fix" -> ${r.note}`);
+  expect(printed.find((l) => l.startsWith("HANDOVER_TASK_ALIVE"))).toBeUndefined();
+  expect(JSON.parse(readFileSync(mine, "utf8"))).toMatchObject({ status: "cancelled" });
+  expect(JSON.parse(readFileSync(other, "utf8"))).toMatchObject({ status: "running" });
+  expect(readFileSync(r.note ?? "", "utf8")).toContain(`## Background tasks of the old session ended at the handover (1)\nAdded after the commit. Each one's record and transcript stay readable; run one again as your own task if its work is still needed.\n- st_01bd9: E7 pilot correctness fix; cancelled; record ${mine}\n`);
+});
+
+test("an old-session task the new session does not end stays a HANDOVER_TASK_ALIVE line and is marked still running in the note", async () => {
+  // Given
+  const deps = { ...(await setup()), home: state.dir };
+  table = [...aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 50, ppid: 1, cmd: "bun /r/dist/bundle/cli.js --mode rpc --multi-session" }];
+  live.add(50);
+  const mine = taskRecordAt(state.dir, "st_01bd9", "running", { host_pid: 50, execution_mode: "process", task_summary: "E7 pilot correctness fix" });
+  sim.cancel = "ack-only";
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { ...OK, force: true });
+  // Then
+  expect(r.code).toBe(0);
+  expect(printed).toContain("HANDOVER_TASK_ALIVE demo st_01bd9: still open after the new session's task_cancel; they can still change files: end each with task_cancel <id> from any session of this account");
+  expect(readFileSync(r.note ?? "", "utf8")).toContain(`- st_01bd9: E7 pilot correctness fix; running (still running); record ${mine}`);
+});
+
+test("an old-session task that finishes by itself before the new session ends it is not called cancelled", async () => {
+  // Given: the task's record says completed by the time the new session acks
+  const deps = { ...(await setup()), home: state.dir };
+  table = [...aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 50, ppid: 1, cmd: "bun /r/dist/bundle/cli.js --mode rpc --multi-session" }];
+  live.add(50);
+  const mine = taskRecordAt(state.dir, "st_01bd9", "running", { host_pid: 50, execution_mode: "process", task_summary: "E7 pilot correctness fix" });
+  sim.cancel = "ack-only";
+  const sendKeys = deps.run;
+  const finishing: LaneHandoverDeps = { ...deps, run: async (argv, opts) => {
+    if (sent(w).some((l) => l.startsWith("[LEAD] HANDOVER_TASKS_CANCEL"))) writeFileSync(mine, JSON.stringify({ ...(JSON.parse(readFileSync(mine, "utf8")) as object), status: "completed" }));
+    return sendKeys(argv, opts);
+  } };
+  // When
+  const r = await laneHandover(finishing, "demo", "aoe_lead_x", { ...OK, force: true });
+  // Then
+  expect(r.code).toBe(0);
+  expect(printed.find((l) => l.startsWith("HANDOVER_TASKS_CANCELLED"))).toBeUndefined();
+  expect(printed).toContain(`HANDOVER_TASKS_ENDED demo st_01bd9 completed: ended by themselves before the cancel -> ${r.note}`);
 });
