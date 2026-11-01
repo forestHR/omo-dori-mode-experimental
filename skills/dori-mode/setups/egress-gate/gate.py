@@ -583,6 +583,9 @@ BATCH_ID = re.compile(r"[0-9a-f]{64}")
 DRIVE_ID = re.compile(r"[A-Za-z0-9_-]{1,200}")
 BATCH_MAX_ITEMS = 5000
 BATCH_HOURS = 24
+# Google may take minutes on a Drive write: on 2026-11-01 folder moves took 14-28 s and many passed 30 s,
+# the old fixed limit, so the gate dropped them as upstream-unavailable while Google was still working.
+GOOGLE_WRITE_TIMEOUT = 300
 BATCH_MERGED = "🔗 묶음 카드로 합침 → "
 
 
@@ -877,7 +880,7 @@ class Gate:
     async def forward_proxy(self, writer, method, target, headers, body) -> None:
         """Keyless mode: only the local caller uid is checked here; the node gate decides the rest."""
         forward = self.config["google_forward"]
-        connection = UnixUpstream(forward["unix"], timeout=forward.get("timeout", 120))
+        connection = UnixUpstream(forward["unix"], timeout=forward.get("timeout", GOOGLE_WRITE_TIMEOUT + 60))
         outgoing = {k: v for k, v in headers.items()
                     if k.lower() not in HOP | {"host", "content-length", "authorization"}}
         outgoing["Connection"] = "close"
@@ -1196,7 +1199,7 @@ class Gate:
         raise Refused("write-not-allowed")
 
     def record(self, uid, api, op, method, path, query, status, response, proof, snapshot, approved_by=None,
-               deleting=False, prepared=None, batch=None) -> dict:
+               deleting=False, prepared=None, batch=None, verified=None) -> dict:
         identity = Path(prepared).stem if prepared else f"{time.time_ns():020d}-{secrets.token_hex(6)}"
         snapname = None
         if prepared is not None:
@@ -1230,6 +1233,8 @@ class Gate:
             row["approved_by"] = approved_by
         if batch:
             row["batch"] = batch
+        if verified:
+            row["verified"] = verified
         if deleting:
             row["delete"] = True
         self.append("changes.jsonl", row)
@@ -1269,6 +1274,16 @@ class Gate:
         url = self.base(host) + "/" + quote(route, safe="/:@!$&'()*+,;=-._~") + ("?" + urlencode(query) if query else "")
         outgoing = google_headers(headers, await self.access_token())
         streaming = writer is not None
+        move = batch_write_key(method, path, query, headers, body, data)
+        move = move if move and move[0] == "move" else None
+        if claimed is not None and move:
+            # A listed move left uncertain (or landed late) is not sent again once Drive shows it done.
+            landed, meta = await self.move_state(move, snapshot)
+            if landed:
+                self.batch_settle(batch, claimed, "done")
+                print(f"GATE_MOVE_READBACK already-moved {move[1]}", file=sys.stderr, flush=True)
+                return 200, {"content-type": "application/json"}, json_bytes(
+                    dict({k: meta[k] for k in ("id", "name", "parents") if k in meta}, alreadyMoved=True))
         prepared = None
         if snapshot is not None:
             prepared = f"snapshots/{time.time_ns():020d}-{secrets.token_hex(6)}.json"
@@ -1276,13 +1291,16 @@ class Gate:
         if claimed is not None:
             self.batch_settle(batch, claimed, "running")
         status = 502
+        headed = False
         try:
-            connection, answer = await self.upstream(method, url, outgoing, body)
+            connection, answer = await self.upstream(
+                method, url, outgoing, body, self.config.get("google_write_timeout_seconds", GOOGLE_WRITE_TIMEOUT))
             status, response_headers = answer.status, dict(answer.getheaders())
             chunks = []
             try:
                 if writer:
                     self.response_head(writer, answer)
+                    headed = True
                 while chunk := await asyncio.to_thread(answer.read, 65536):
                     chunks.append(chunk)
                     if writer:
@@ -1296,11 +1314,27 @@ class Gate:
             finally:
                 connection.close()
         except (Refused, OSError, http.client.HTTPException):
+            # No answer. A move is checked on Drive: its parents tell whether it ran, and sending it
+            # again is harmless. Anything else may have run and is never sent twice.
+            landed, meta = await self.move_state(move) if move else (None, {})
+            if move:
+                print(f"GATE_MOVE_READBACK {({True: 'moved', False: 'not-moved'}).get(landed, 'unclear')} {move[1]}",
+                      file=sys.stderr, flush=True)
+            if landed:
+                response = json_bytes({k: meta[k] for k in ("id", "name", "parents") if k in meta})
+                self.record(uid, api, op, method, path, query, 200, response, link, snapshot, approved_by,
+                            prepared=prepared, batch=batch and batch["id"], verified="read-back-moved")
+                if claimed is not None:
+                    self.batch_settle(batch, claimed, "done", response)
+                if headed:
+                    return None  # the caller already holds Google's own (cut) answer
+                return 200, {"content-type": "application/json"}, response
             self.record(uid, api, op, method, path, query, status, b"{}", link, snapshot,
-                        approved_by, prepared=prepared, batch=batch and batch["id"])
+                        approved_by, prepared=prepared, batch=batch and batch["id"],
+                        verified="read-back-not-moved" if landed is False else None)
             if claimed is not None:
-                self.batch_settle(batch, claimed, "uncertain")  # it may have run: never send it twice
-            raise Refused("upstream-unavailable", 502) from None
+                self.batch_settle(batch, claimed, "open" if landed is False else "uncertain")
+            raise Refused("upstream-unavailable", 502, {"moved": landed} if move else None) from None
         self.record(uid, api, ("restore." if restore else "") + op, method, path, query,
                     status, response, link, snapshot, approved_by,
                     deleting=op == "files.update" and data.get("trashed") is True, prepared=prepared,
@@ -1312,6 +1346,25 @@ class Gate:
         if streaming:
             return None
         return status, response_headers, response
+
+    async def move_state(self, move: tuple, meta: dict | None = None) -> tuple[bool | None, dict]:
+        """Where a move stands on Drive: True landed, False not yet, None unclear (or unreadable)."""
+        _, file, source, target = move
+        try:
+            if meta is None or "parents" not in meta:
+                meta = await self.google_json("/www.googleapis.com/drive/v3/files/" + quote(file, safe="") + "?" +
+                                              urlencode({"fields": "id,name,parents", "supportsAllDrives": "true"}))
+            if "root" in (source, target):
+                root = (await self.google_json("/www.googleapis.com/drive/v3/files/root?fields=id")).get("id")
+                source, target = (root if value == "root" else value for value in (source, target))
+        except (Refused, OSError, http.client.HTTPException):
+            return None, {}
+        parents = set(meta.get("parents") or [])
+        if target in parents and source not in parents:
+            return True, meta
+        if source in parents and target not in parents:
+            return False, meta
+        return None, meta
 
     def pending(self) -> list:
         return [json.loads(path.read_text()) for path in sorted((self.state / "pending").glob("*.json"))]
@@ -1340,12 +1393,13 @@ class Gate:
 
     @staticmethod
     def batch_claim(batch: dict, key) -> int:
-        """The open listed item a write is; a write already done (or uncertain) under the batch never runs again."""
+        """The open listed item a write is; a write already done (or uncertain) under the batch never runs again,
+        except an uncertain move: the caller checks it on Drive first, and a move sent twice changes nothing."""
         used = False
         for index, item in enumerate(batch["items"]):
             if key is None or batch_item_key(item, batch["refs"]) != key:
                 continue
-            if batch["state"][index] == "open":
+            if batch["state"][index] == "open" or batch["state"][index] == "uncertain" and key[0] == "move":
                 return index
             used = True
         raise Refused("batch-item-used" if used else "batch-item-not-listed")

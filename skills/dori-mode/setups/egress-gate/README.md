@@ -235,8 +235,20 @@ SHA-256), or a move (`PATCH /drive/v3/files/<id>?addParents=<to>&removeParents=<
 skips only the owner-message write limit; any other reason (not owned, public, spreadsheet) is
 `batch-write-needs-card`. Other writes are `batch-item-not-listed`, a second run of a done (or uncertain)
 item `batch-item-used`, a wrong id `batch-unknown`, before ✅ or after ⛔/expiry `batch-not-approved`, after
-the day `batch-expired`. A listed write the service refused (non-2xx) can be sent again; one whose answer
-never came is never sent again. Each write is journaled as usual with `approved_by` (the batch card) and
+the day `batch-expired`. A listed write the service refused (non-2xx) can be sent again; a folder create or
+upload whose answer never came is never sent again. A move is different, because sending it twice changes
+nothing: when its answer does not come, the gate reads the file's parents back (`root` is resolved to the
+real My Drive id). If the file sits under the new parent and not the old one, the write is journaled as 200
+with `"verified": "read-back-moved"`, the item is done, and the caller gets 200. If it is still under the
+old parent, the item goes back to open and the caller gets 502 `{"error": "upstream-unavailable",
+"moved": false}`, so it can send the move again. Otherwise the item is uncertain (`"moved": null`). An
+uncertain move can be sent again. The gate checks its parents first, and if the move already landed it
+answers 200 with `"alreadyMoved": true` without writing. The journal line is
+`GATE_MOVE_READBACK moved|not-moved|unclear|already-moved <file id>`.
+
+Google writes wait up to `google_write_timeout_seconds` (default 300) for Google's answer. On 2026-11-01
+Drive folder moves took 14-28 s, and many took longer than the old fixed 30 s. The gate gave up on them as
+`upstream-unavailable` while Google was still working, so 42 PARA moves went uncertain. Each write is journaled as usual with `approved_by` (the batch card) and
 `batch`. `GET /_gate/batch/<batch>` shows the status, each item's state and the ids of folders made so far.
 Writes without the header are judged exactly as before.
 
@@ -329,7 +341,8 @@ both and keep every Google (and vault) credential, every approval card and the j
 ("the node gate"). Without the keys below in the config nothing changes.
 
 **Forward mode** (the keyless gate, on the Dori host). Add
-`"google_forward": {"unix": "/run/dori-gate-node/gate.sock", "timeout": 120}`. The Google port then
+`"google_forward": {"unix": "/run/dori-gate-node/gate.sock"}` (`timeout` defaults to 360 s, longer than the
+node gate's Google write wait). The Google port then
 checks only the caller uid (`clients`) and passes the request (path, query, body,
 `X-Dori-Owner-Message`; never `Authorization`) unchanged to the node gate, which does the owner proof,
 the direct-or-card decision, the card, the write and the journal. The CONNECT allow list and the Discord
