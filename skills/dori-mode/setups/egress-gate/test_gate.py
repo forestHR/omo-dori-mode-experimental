@@ -56,6 +56,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.shared_drive = False
         self.file_mime = "application/vnd.google-apps.document"
         self.file_parents = []
+        self.move_lands = True  # a Drive move PATCH changes file_parents
+        self.write_delay = 0  # seconds the fake Google takes before it answers a write
         self.event = {"id": "e", "summary": "Before", "organizer": {"self": True},
                       "attendees": [{"email": "owner@example.com"}], "etag": "old", "iCalUID": "old"}
         self.response_status = 200
@@ -247,7 +249,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 elif "/permissions/" in path:
                     data = {"type": "user", "emailAddress": "other@example.com"}
                 elif "/drive/v3/files/" in path:
-                    data = {"id": "f", "ownedByMe": self.file_owned, "mimeType": self.file_mime,
+                    data = {"id": "rootid" if path.endswith("/files/root") else "f", "ownedByMe": self.file_owned, "mimeType": self.file_mime,
                             "trashed": False, "name": "Before", "description": "old", "parents": self.file_parents}
                     if self.shared_drive:
                         data["driveId"] = "shared"
@@ -258,6 +260,12 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     data = {"id": "r", "name": "read"}
             else:
+                moved = parse_qs(urlsplit(target).query)
+                if method == "PATCH" and "addParents" in moved and self.move_lands:
+                    removed = {"rootid" if p == "root" else p for p in moved.get("removeParents", [""])[0].split(",")}
+                    self.file_parents = [p for p in self.file_parents if p not in removed] + moved["addParents"][0].split(",")
+                if self.write_delay:
+                    await asyncio.sleep(self.write_delay)
                 status = self.response_status
                 title_key = ("summary" if path.startswith("/calendar/") else
                              "title" if path.startswith(("/tasks/", "/v1/documents")) else "name")
@@ -1119,6 +1127,83 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         status, body = await self.batch_upload(answer["batch"], content=b"HELLO")
         self.assertEqual((status, json.loads(body)["error"]), (403, "batch-item-not-listed"))
         self.assertEqual(len(self.writes()), 1)
+
+    # Yudol 2026-11-02 05:11 KST #dori-pair: PARA moves fell as upstream-unavailable; 32 of batch 6ebe9418 went
+    # uncertain (22 had not moved) and could not be sent again. Google took longer than the gate waited.
+    async def approved_move_batch(self, source="old1"):
+        self.approval()
+        _, answer = await self.submit_batch([{"kind": "move", "file": "m1", "from": source, "to": "new1"}])
+        self.react(self.service.batch(answer["batch"])["message"])
+        await self.service.poll_approvals()
+        return answer["batch"]
+
+    async def listed_move(self, batch, source="old1"):
+        status, body = await self.request("PATCH", "/www.googleapis.com/drive/v3/files/m1?addParents=new1"
+                                          f"&removeParents={source}&fields=id", proof=False,
+                                          headers={"x-dori-batch": batch})
+        return status, json.loads(body), self.service.batch(batch)["state"][0]
+
+    async def test_a_move_whose_answer_never_comes_is_read_back_and_settled_by_its_parents(self):
+        batch = await self.approved_move_batch()
+        self.config["google_write_timeout_seconds"] = 0.3
+        self.write_delay = 1.5
+        self.file_parents = ["old1"]
+        status, body, state = await self.listed_move(batch)
+        self.assertEqual((status, body["parents"], state), (200, ["new1"], "done"))
+        self.assertEqual((self.changes()[-1]["status"], self.changes()[-1]["verified"]), (200, "read-back-moved"))
+
+    async def test_a_move_read_back_as_not_moved_reopens_and_its_resend_runs(self):
+        batch = await self.approved_move_batch()
+        self.config["google_write_timeout_seconds"] = 0.3
+        self.write_delay, self.move_lands, self.file_parents = 1.5, False, ["old1"]
+        status, body, state = await self.listed_move(batch)
+        self.assertEqual((status, body, state), (502, {"error": "upstream-unavailable", "moved": False}, "open"))
+        self.assertEqual(self.changes()[-1]["verified"], "read-back-not-moved")
+        self.write_delay, self.move_lands = 0, True
+        status, _, state = await self.listed_move(batch)
+        self.assertEqual((status, state, self.file_parents), (200, "done", ["new1"]))
+
+    async def test_a_move_out_of_my_drive_root_is_read_back_against_the_root_id(self):
+        batch = await self.approved_move_batch(source="root")
+        self.config["google_write_timeout_seconds"] = 0.3
+        self.write_delay, self.move_lands, self.file_parents = 1.5, False, ["rootid"]
+        status, body, state = await self.listed_move(batch, source="root")
+        self.assertEqual((status, body["moved"], state), (502, False, "open"))
+
+    async def test_a_move_whose_parents_tell_nothing_stays_uncertain(self):
+        batch = await self.approved_move_batch()
+        self.config["google_write_timeout_seconds"] = 0.3
+        self.write_delay, self.move_lands, self.file_parents = 1.5, False, ["elsewhere"]
+        status, body, state = await self.listed_move(batch)
+        self.assertEqual((status, body["moved"], state), (502, None, "uncertain"))
+
+    async def test_an_uncertain_listed_move_is_checked_on_drive_before_it_runs_again(self):
+        for parents, sent in ((["new1"], 0), (["old1"], 1)):
+            with self.subTest(parents=parents):
+                batch = await self.approved_move_batch()
+                saved = self.service.batch(batch)
+                saved["state"][0] = "uncertain"
+                self.service.save_batch(saved)
+                self.file_parents = parents
+                before = len(self.writes())
+                status, body, state = await self.listed_move(batch)
+                self.assertEqual((status, state, body["parents"] if sent == 0 else self.file_parents),
+                                 (200, "done", ["new1"]))
+                self.assertEqual(len(self.writes()) - before, sent)
+                status, body, _ = await self.listed_move(batch)
+                self.assertEqual((status, body["error"]), (403, "batch-item-used"))
+
+    async def test_an_uncertain_folder_create_is_still_never_sent_again(self):
+        self.approval()
+        _, answer = await self.submit_batch()
+        self.react(self.service.batch(answer["batch"])["message"])
+        await self.service.poll_approvals()
+        saved = self.service.batch(answer["batch"])
+        saved["state"][0] = "uncertain"
+        self.service.save_batch(saved)
+        status, body = await self.batch_folder(answer["batch"])
+        self.assertEqual((status, json.loads(body)["error"]), (403, "batch-item-used"))
+        self.assertEqual(self.writes(), [])
 
     async def test_owner_cancel_refuses_the_whole_batch(self):
         self.approval()
