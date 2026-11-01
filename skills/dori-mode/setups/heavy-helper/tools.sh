@@ -20,6 +20,6 @@ curl -fsSL --retry 3 -o "$tmp/sums" "$base/checksums.sha256"
 grep " $name\$" "$tmp/sums" > "$tmp/want" || { echo "TOOLS_FAIL $name is not in checksums.sha256" >&2; exit 3; }
 (cd "$tmp" && sha256sum -c want >/dev/null) || { echo "TOOLS_FAIL $name sha256 does not match" >&2; exit 3; }
 tar -xJf "$tmp/$name" -C "$tmp"
-mkdir -p "$dir/bin"
+mkdir --parents "$dir/bin"
 install -m 755 "$tmp"/ffmpeg-*/bin/ffmpeg "$tmp"/ffmpeg-*/bin/ffprobe "$dir/bin/"
 echo "TOOLS_OK $dir $("$dir/bin/ffmpeg" -hide_banner -version | head -1)"

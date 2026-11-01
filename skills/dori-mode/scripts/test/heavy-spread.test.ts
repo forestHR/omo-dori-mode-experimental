@@ -62,7 +62,7 @@ test("a command this host cannot start now runs on the helper at the same paths,
   const ctx = ctxWith({ helpers: [{ name: "second", ssh: helperArgv() }] });
   const out = join(work, "out");
   // When
-  const r = await spread(ctx, jobOf(["sh", "-c", `mkdir -p ${out} && tr a-z A-Z < in.txt > ${out}/up.txt && pwd > ${out}/where && exit 7`]));
+  const r = await spread(ctx, jobOf(["sh", "-c", `mkdir --parents ${out} && tr a-z A-Z < in.txt > ${out}/up.txt && pwd > ${out}/where && exit 7`]));
   // Then
   expect(r).toEqual({ code: 7 });
   expect(readFileSync(join(out, "up.txt"), "utf8")).toBe("HELLO\n");

@@ -44,7 +44,7 @@ export type SpreadJob = {
   readonly env: Readonly<Record<string, string>>;
   readonly needBytes?: number;
 };
-export type Plan = { readonly ok: true; readonly sync: readonly string[]; readonly pw?: string } | { readonly ok: false; readonly why: string };
+export type Plan = { readonly ok: true; readonly sync: readonly string[]; readonly playwright?: string } | { readonly ok: false; readonly why: string };
 
 // absolute paths inside one argument: the whole argument, or what follows = , or : (not the // of a URL)
 export const pathsIn = (arg: string): string[] => [...arg.matchAll(/(?:^|[=,:])(\/(?!\/)[^\s=,:;"'\]}]*)/g)].map((m) => normalize(m[1]!));
@@ -110,8 +110,8 @@ export const spreadPlan = (job: SpreadJob, who: { readonly uid: number; readonly
     if (!existsSync(s) || !statSync(s).isDirectory()) continue;
     for (const [link, to] of linksIn(s)) if (existsSync(to) && !covered(to)) return no(`the link ${link} points to ${to}, which is not in a --sync path (add it with --sync)`);
   }
-  const pw = job.kind === "browser" ? playwrightVersion(sync.filter((s) => existsSync(s))) : undefined;
-  return { ok: true, sync, ...(pw ? { pw } : {}) };
+  const playwright = job.kind === "browser" ? playwrightVersion(sync.filter((s) => existsSync(s))) : undefined;
+  return { ok: true, sync, ...(playwright ? { playwright } : {}) };
 };
 
 // how busy this host is for a job of this kind, in percent (gpu: the GPU or the CPU, whichever is busier)
@@ -183,7 +183,7 @@ type HelperTry = { readonly kind: "started"; readonly run: Started } | { readonl
 const VERDICT = /^WORKER_(ADMIT|BUSY|REFUSED)\b ?(.*)$/;
 
 const startExec = async (ctx: HeavyCtx, h: HeavyHelper, job: SpreadJob, plan: Extract<Plan, { ok: true }>, below: number): Promise<HelperTry> => {
-  const args = ["exec", job.label, job.kind, String(Math.max(0, Math.min(100, Math.floor(below)))), ...(plan.pw ? [`pw=${plan.pw}`] : []), ...(job.needBytes ? [`mem=${Math.round(job.needBytes)}`] : [])];
+  const args = ["exec", job.label, job.kind, String(Math.max(0, Math.min(100, Math.floor(below)))), ...(plan.playwright ? [`playwright=${plan.playwright}`] : []), ...(job.needBytes ? [`mem=${Math.round(job.needBytes)}`] : [])];
   const p = Bun.spawn([...h.ssh, ...args], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   const lines = linesOf(p.stderr);
   let verdict: RegExpExecArray | null = null;
@@ -281,7 +281,7 @@ export const heavySpread = async (ctx: HeavyCtx, job: SpreadJob, plan: Extract<P
   }
 };
 
-// ---- the helper's side: dori heavy-worker "exec <label> <kind> <below> [pw=<version>] [mem=<bytes>]"
+// ---- the helper's side: dori heavy-worker "exec <label> <kind> <below> [playwright=<version>] [mem=<bytes>]"
 
 type ExecSpec = { readonly argv: string[]; readonly cwd: string; readonly sync: string[]; readonly env: Record<string, string> };
 
@@ -296,7 +296,7 @@ export const specProblem = (x: unknown): string | ExecSpec => {
   return s as ExecSpec;
 };
 
-export type BoxTools = { readonly bunDir?: string; readonly pwDir?: string; readonly toolsDir?: string };
+export type BoxTools = { readonly bunDir?: string; readonly browsersDir?: string; readonly toolsDir?: string };
 export const BOX_TOOLS = "/run/dori-tools";
 
 // the bwrap argv for one run: from = where each --sync path's copy lives in the job folder
@@ -307,7 +307,7 @@ export const sandboxArgv = (kind: Kind, spec: ExecSpec, from: (p: string) => str
     HOME: "/tmp/home",
     TMPDIR: "/tmp",
     LANG: "C.UTF-8",
-    ...(tools.pwDir && existsSync(tools.pwDir) ? { PLAYWRIGHT_BROWSERS_PATH: `${BOX_TOOLS}/ms-playwright` } : {}),
+    ...(tools.browsersDir && existsSync(tools.browsersDir) ? { PLAYWRIGHT_BROWSERS_PATH: `${BOX_TOOLS}/ms-playwright` } : {}),
     ...spec.env,
   };
   return [
@@ -323,7 +323,7 @@ export const sandboxArgv = (kind: Kind, spec: ExecSpec, from: (p: string) => str
     "--tmpfs", "/var/tmp",
     "--tmpfs", "/run",
     ...ro(tools.bunDir, "bun"),
-    ...ro(tools.pwDir, "ms-playwright"),
+    ...ro(tools.browsersDir, "ms-playwright"),
     ...ro(tools.toolsDir, "tools"),
     "--dir", "/tmp/home",
     ...[...spec.sync].sort((a, b) => a.length - b.length).flatMap((p) => ["--bind", from(p), p]),
@@ -342,11 +342,11 @@ export const sandboxArgv = (kind: Kind, spec: ExecSpec, from: (p: string) => str
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // the browsers of the caller's playwright version, installed once into this host's own cache (user space, no sudo)
-const ensurePlaywright = async (version: string, pwDir: string, log: (l: string) => void): Promise<void> => {
-  const mark = join(pwDir, `.dori-pw-${version}`);
+const ensurePlaywright = async (version: string, browsersDir: string, log: (l: string) => void): Promise<void> => {
+  const mark = join(browsersDir, `.dori-playwright-${version}`);
   if (existsSync(mark)) return;
-  mkdirSync(pwDir, { recursive: true });
-  const lock = join(pwDir, ".dori-pw-lock");
+  mkdirSync(browsersDir, { recursive: true });
+  const lock = join(browsersDir, ".dori-playwright-lock");
   for (let waited = 0; ; waited += 2_000) {
     try {
       mkdirSync(lock);
@@ -359,8 +359,8 @@ const ensurePlaywright = async (version: string, pwDir: string, log: (l: string)
   }
   try {
     if (existsSync(mark)) return;
-    log(`HEAVY_PW_INSTALL playwright ${version} browsers into ${pwDir}`);
-    const p = Bun.spawn([process.execPath, "x", `playwright@${version}`, "install", "chromium", "ffmpeg"], { env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: pwDir }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    log(`HEAVY_PW_INSTALL playwright ${version} browsers into ${browsersDir}`);
+    const p = Bun.spawn([process.execPath, "x", `playwright@${version}`, "install", "chromium", "ffmpeg"], { env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersDir, PLAYWRIGHT_SKIP_BROWSER_GC: "1" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     const pump = async (s: ReadableStream<Uint8Array>) => {
       for await (const l of linesOf(s)) process.stderr.write(`W ${l}\n`);
     };
@@ -381,13 +381,13 @@ export const heavyExec = async (ctx: HeavyCtx, words: readonly string[], d: Exec
   if (!NAME.test(label)) return d.refuse("-", `label "${label}" must be letters, digits, . _ -`);
   if (!isKind(kind)) return d.refuse(label, `kind "${kind}" is not cpu, browser or gpu`);
   if (!/^\d{1,3}$/.test(belowS) || Number(belowS) > 100) return d.refuse(label, `"${belowS}" is not a busy percent`);
-  const bad = opts.find((o) => !/^pw=\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(o) && !/^mem=\d{1,15}$/.test(o));
+  const bad = opts.find((o) => !/^playwright=\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(o) && !/^mem=\d{1,15}$/.test(o));
   if (bad !== undefined) return d.refuse(label, `unknown option "${bad}"`);
   if (!ctx.q.exec) return d.refuse(label, "exec is off on this host (heavyQueue.exec)");
   if (!Bun.which("bwrap")) return d.refuse(label, "no bwrap on this host");
   const noScope = await canScope();
   if (noScope) return d.refuse(label, `no memory/CPU/time caps here: ${noScope}`);
-  const pw = opts.find((o) => o.startsWith("pw="))?.slice(3);
+  const playwright = opts.find((o) => o.startsWith("playwright="))?.slice("playwright=".length);
   const mem = Number(opts.find((o) => o.startsWith("mem="))?.slice(4)) || undefined;
   const below = Number(belowS);
   if (below < 100) {
@@ -432,7 +432,7 @@ export const heavyExec = async (ctx: HeavyCtx, words: readonly string[], d: Exec
     }
     cmdName = basename(spec.argv[0]!);
     for (const p of spec.sync) if (!existsSync(join(root, p))) mkdirSync(join(root, p), { recursive: true });
-    if (pw && kind === "browser" && d.tools.pwDir) await ensurePlaywright(pw, d.tools.pwDir, log);
+    if (playwright && kind === "browser" && d.tools.browsersDir) await ensurePlaywright(playwright, d.tools.browsersDir, log);
     const start = join(dir, "start");
     writeFileSync(start, "");
     const pumps: Promise<void>[] = [];
@@ -475,6 +475,6 @@ export const heavyExec = async (ctx: HeavyCtx, words: readonly string[], d: Exec
 
 export const defaultTools = (): BoxTools => ({
   bunDir: dirname(process.execPath),
-  pwDir: process.env.PLAYWRIGHT_BROWSERS_PATH || join(homedir(), ".cache", "ms-playwright"),
+  browsersDir: process.env.PLAYWRIGHT_BROWSERS_PATH || join(homedir(), ".cache", "ms-playwright"),
   toolsDir: join(homedir(), ".local", "share", "dori-heavy", "tools"),
 });
