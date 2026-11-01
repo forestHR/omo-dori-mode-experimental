@@ -240,6 +240,9 @@ export type AcquireOptions<T> = {
   readonly elsewhere?: (wait: string) => Promise<T | null>;
   // the job's own memory estimate in KB (dori heavy --mem)
   readonly memKb?: number;
+  // ask elsewhere also while this host only waits for a just-taken job to show its load (dori heavy --kind: the other
+  // PC should not sit idle for heavySettleSec); the GPU line (--job) keeps waiting here then
+  readonly elsewhereWhileSettling?: boolean;
 };
 
 export const acquire = async <T>(deps: SlotDeps, label: string, opts: AcquireOptions<T> = {}): Promise<Acquired<T>> => {
@@ -260,7 +263,7 @@ export const acquire = async <T>(deps: SlotDeps, label: string, opts: AcquireOpt
         deps.log?.(`HEAVY_WAIT ${label}: ${t.why}`);
         waiting = t.wait;
       }
-      if (t && opts.elsewhere && (localOnlyAhead || (t.wait !== "queue" && t.wait !== "settle"))) {
+      if (t && opts.elsewhere && (localOnlyAhead || (t.wait !== "queue" && (t.wait !== "settle" || opts.elsewhereWhileSettling)))) {
         const got = await opts.elsewhere(t.why);
         if (got !== null) return { elsewhere: got };
       }

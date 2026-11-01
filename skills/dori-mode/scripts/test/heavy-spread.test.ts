@@ -109,6 +109,20 @@ writeFileSync("box.txt", out.join(" "));
   expect(existsSync(probe)).toBe(false);
 }, 60_000);
 
+test("a job waiting here only for a just-started job to show its load goes to a free helper instead of idling", async () => {
+  // Given: this host's one slot is free in count (2 allowed) but its job started 0 s ago, so this host waits to settle
+  holdSlot();
+  const base = ctxWith({ helpers: [{ name: "second", ssh: helperArgv() }] });
+  let polls = 0;
+  const ctx: HeavyCtx = { ...base, deps: { ...base.deps, headroom: { ...base.deps.headroom!, maxSlots: 2, settleSec: 120 }, clock: { now: () => Date.now(), sleep: async () => { if (++polls > 3) throw new Error("stuck waiting to settle"); } } } };
+  // When
+  const r = await spread(ctx, jobOf(["true"]));
+  // Then
+  expect(r).toEqual({ code: 0 });
+  expect(logs.some((l) => l.startsWith("HEAVY_WAIT t: slot.1 was taken"))).toBe(true);
+  expect(logs.some((l) => l.startsWith("HEAVY_SPREAD t second"))).toBe(true);
+}, 60_000);
+
 test("a host much less busy than a helper keeps the job: the helper is not asked", async () => {
   // Given
   const ctx = ctxWith({ helpers: [{ name: "second", ssh: helperArgv() }] }, 10);

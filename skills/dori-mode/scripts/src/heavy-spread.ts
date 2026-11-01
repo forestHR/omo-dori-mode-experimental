@@ -266,7 +266,7 @@ export const heavySpread = async (ctx: HeavyCtx, job: SpreadJob, plan: Extract<P
   const since = ctx.deps.clock.now();
   for (;;) {
     if (!run) {
-      const got = await acquire<Started>(ctx.deps, job.label, { since, elsewhere: (why) => helpers(100, why), ...(job.needBytes ? { memKb: job.needBytes / 1024 } : {}) });
+      const got = await acquire<Started>(ctx.deps, job.label, { since, elsewhere: (why) => helpers(100, why), elsewhereWhileSettling: true, ...(job.needBytes ? { memKb: job.needBytes / 1024 } : {}) });
       if ("slot" in got) return { slot: got.slot };
       run = got.elsewhere;
     }
