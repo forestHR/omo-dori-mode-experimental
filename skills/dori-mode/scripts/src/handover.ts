@@ -5,6 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 
 import { aoeSessions, captureTmux, closeAoeSession, inputLine, laneEnv, openAoeSession, sessionFor } from "./aoe.ts";
+import { strayTasks, taskRecords } from "./background.ts";
 import { type HandoverWatcher } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { type FreezeDeps, type FrozenRecord, freezePane, writeFrozen } from "./frozen.ts";
@@ -17,8 +18,8 @@ import { sendVerified } from "./panes.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso } from "./run.ts";
 import { descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
-import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, ROUND_TRIES, section, words } from "./restatement.ts";
-import { appendRollover, approvalProblem, autoReason, clearQuiet, COMMITTED, decidedBy, inboxMessages, LEAD_PREFIX, lastProposal, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Signals, sessionSignals, setQuiet, type Step, type Supplement } from "./rollover.ts";
+import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, ROUND_TRIES, section, seedRestatement, wholeBullet, words } from "./restatement.ts";
+import { appendRollover, approvalProblem, autoReason, type Candidate, clearQuiet, COMMITTED, decidedBy, inboxMessages, LEAD_PREFIX, lastProposal, limitsFor, ownerQuotes, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Signals, sessionSignals, setQuiet, type Step, type Supplement, userLines } from "./rollover.ts";
 import { watchLog } from "./watch-log.ts";
 
 export type HandoverDeps = FlowDeps & Pick<FreezeDeps, "procs" | "signal"> & {
@@ -95,7 +96,13 @@ export type HandoverFacts = {
   readonly ownerWords: readonly OwnerWord[];
   // the old lead's conversation log, quoted by the supplements
   readonly oldLog?: string;
+  // the quotes in the old conversation's messages (the owner's with proof, else the lead's) that neither the summary nor the
+  // owner's recent messages hold: the audit after the handover looks for the same ones (rollover.ts ownerQuotes)
+  readonly quotes?: readonly Candidate[];
 };
+
+// the newest quotes the note carries
+const QUOTES_MAX = 60;
 
 export type OwnerWord = { readonly at: string; readonly where: string; readonly text: string };
 
@@ -117,6 +124,8 @@ export const LEAD_SUMMARY_TEMPLATE = [
 ].join("\n");
 // The headings of the new lead's restatement, written before it is committed.
 export const LEAD_UNDERSTOOD_HEADINGS = ["Goal", "Owner's words", "Open lanes", "Open work", "Open cards", "Timers", "Promised follow-ups", "Decisions", "Next step", "Questions"] as const;
+// the headings the new lead writes itself; the handover fills the others in before it asks (restatement.ts seedRestatement)
+export const LEAD_OWN = ["Next step", "Questions"] as const;
 // the owner's messages the note carries: those of the last OWNER_HOURS, at most OWNER_MAX, newest last
 const OWNER_HOURS = 24;
 const OWNER_MAX = 8;
@@ -164,8 +173,8 @@ export const missingLeadFrom = (text: string, facts: HandoverFacts): Missing[] =
   if (goal && !quoted(all, goal)) out.push({ kind: "goal", text: goal, under: "Goal", source: "the old session's goal" });
   for (const w of facts.ownerWords) if (flat(w.text).length >= 6 && !quoted(all, w.text)) out.push({ kind: "owner's words", text: w.text, under: "Owner's words", source: `the owner's message at ${w.at} (${w.where}), from the inbox` });
   for (const q of quotesIn(section(facts.leadNote, "Owner's words and constraints"))) if (!quoted(all, q) && !out.some((m) => flat(m.text) === flat(q))) out.push({ kind: "owner's words", text: q, under: "Owner's words", source: "the old lead's summary, Owner's words and constraints" });
-  for (const d of bulletsIn(facts.leadNote, "Decisions and why")) if (!covered(all, d)) out.push({ kind: "decision", text: d, under: "Decisions", source: "the old lead's summary, Decisions and why", byWords: true });
-  for (const d of bulletsIn(facts.leadNote, "Promised follow-ups")) if (!covered(all, d)) out.push({ kind: "promised follow-up", text: d, under: "Promised follow-ups", source: "the old lead's summary, Promised follow-ups", byWords: true });
+  for (const d of bulletsIn(facts.leadNote, "Decisions and why")) if (!covered(all, d)) out.push({ kind: "decision", text: d, under: "Decisions", source: "the old lead's summary, Decisions and why", byWords: true, whole: wholeBullet(facts.leadNote, "Decisions and why", d) });
+  for (const d of bulletsIn(facts.leadNote, "Promised follow-ups")) if (!covered(all, d)) out.push({ kind: "promised follow-up", text: d, under: "Promised follow-ups", source: "the old lead's summary, Promised follow-ups", byWords: true, whole: wholeBullet(facts.leadNote, "Promised follow-ups", d) });
   return out;
 };
 
@@ -464,7 +473,7 @@ export const renderNote = (f: HandoverFacts, at: string): string => [
   "## Do this first",
   "1. Arm every monitor under Monitors again as a persistent monitor, with the same command and filter; one marked LAUNCHES_WORK gets the watch-only monitor its line describes instead, never its own command. Take each command, filter and description from its line under Monitors, where they are JSON strings: put them into the tool call as they are (a JSON string is a valid JS string), not retyped and not from the conversation summary, where a copy can differ. Arm each one once. Start each watcher under Watchers that says how. The handover checks that the monitors run in this session and runs each watcher's check.",
   `2. A line with ${PROBE} <id>, typed into this session or arriving as an inbox event, is a check of this handover: run the dori handover ack command the line gives (with its --state) and nothing else.`,
-  `3. A [LEAD] ${UNDERSTAND} <id> line asks what you understood. Read this whole note first, then write it to the file the line names, under the headings ${LEAD_UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}: under Goal the old session's goal quoted; under Owner's words each of the owner's recent messages and each quote in the old lead's notes, quoted exactly; under Open lanes every lane key of the table with what it waits on; under Open work each todo; under Open cards each card id with its question; under Timers each timer's unit name; under Promised follow-ups what the old lead promised the owner; under Questions only what neither this note nor the old log answers, or none. Then run the ack command the line gives. A [LEAD] HANDOVER_SUPPLEMENT <id> line names a file with what your restatement left out and the old log lines behind it: add those items to the same file, keep the rest, and run the ack command it gives.`,
+  `3. A [LEAD] ${UNDERSTAND} <id> line asks what you understood. Read this whole note first, then write it to the file the line names, under the headings ${LEAD_UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}: under Goal the old session's goal quoted; under Owner's words each of the owner's recent messages and each quote in the old lead's notes, quoted exactly; under Open lanes every lane key of the table with what it waits on; under Open work each todo; under Open cards each card id with its question; under Timers each timer's unit name; under Promised follow-ups what the old lead promised the owner; under Questions only what neither this note nor the old log answers, or none. The handover already wrote into that file, word for word, what its records and the old lead's notes hold under those headings: keep those lines as they are (do not translate, shorten or merge them), add what you understood below them, and write ## ${LEAD_OWN.join(" and ## ")} yourself. Then run the ack command the line gives. A [LEAD] HANDOVER_SUPPLEMENT <id> line names a file with what your restatement left out and the old log lines behind it: add those items to the same file, keep the rest, and run the ack command it gives.`,
   `4. Until a [LEAD] ${COMMITTED} line arrives answer no one, act on no event and change nothing besides that file: the handover can still roll back. The old session stays quiet meanwhile and is closed once the checks pass.`,
   `5. After ${COMMITTED}, carry on: open lanes, owner questions, todos, timers, promised follow-ups and the old lead's notes; answer the owner where his last messages left off. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you or a lane find later that an old session knew something its handover did not carry and it cost something (asking again, redoing, guessing), run dori handover gap <lane key or lead> --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>".`,
   "",
@@ -495,10 +504,26 @@ export const renderNote = (f: HandoverFacts, at: string): string => [
   "## The old lead's notes",
   f.leadNote.trim() || "(none: the old lead wrote no summary (dori handover --template prints its headings, dori handover --note FILE adds it); read the old conversation below before you act on a guess)",
   "",
+  `## Quotes in the old conversation (${f.quotes?.length ?? 0})`,
+  ...(f.quotes?.length
+    ? ["Quoted in the messages the old lead got (its log), oldest first, that the notes above do not hold: the owner's words (his only with proof: his message id in the inbox or a card he answered) and the lead's own words. Carry each one that still holds under Owner's words (his) or Decisions (the lead's) in your restatement; one a later line replaced, or work already done, does not hold.", ...f.quotes.map((q) => `- ${q.at.slice(0, 16)}Z ${q.kind} (old log line ${q.line}): "${q.text}"`)]
+    : ["none"]),
+  "",
   "## The old conversation",
   f.oldLog ? `Its full log is ${f.oldLog} (JSONL; it stays on disk after the old session closes). When this note leaves something out, search it (the owner's words, a lane key, a card id) before you ask.` : "Its log was not found.",
   "",
 ].join("\n");
+
+// The quotes of the old lead's conversation that its summary and the owner's recent messages do not hold, newest QUOTES_MAX:
+// on 2026-10-31 the audit after the lead handover 20261031-070115 found three ("주소는 하나로", "영상 전체 위에 오버레이",
+// "별도의 섹션") only in the old conversation, ten minutes after the commit.
+export const conversationQuotes = (deps: Pick<HandoverDeps, "inbox" | "ownerIds" | "cardDir">, oldLog: string | undefined, held: string): Candidate[] => {
+  if (!oldLog) return [];
+  const inbox = inboxMessages(deps.inbox, deps.ownerIds ?? []);
+  const cards = new QuestionStore(deps.cardDir);
+  const all = flat(held);
+  return ownerQuotes(userLines(oldLog), { message: (id) => inbox.ids.includes(inbox.find(id)?.author ?? "-"), card: (id) => cards.get(id)?.status === "answered" }).filter((q) => !quoted(all, q.text)).slice(-QUOTES_MAX);
+};
 
 // The lanes' footer, their [LEAD] message and the config text all name the lead's pane; moving it is one function, so a
 // rollback is the same call with the two sides swapped.
@@ -614,8 +639,11 @@ const verify = async (deps: HandoverDeps, facts: HandoverFacts, to: Target, veri
   if (problems.length) return { reasons: problems, session };
   // the new lead says what it understood before the old one is gone: a gap is filled in from the records and the old
   // log for supplementRounds rounds, and only a gap that outlasts them rolls the move back
+  // what the handover holds goes into the restatement before the new lead writes, word for word, so it starts there
+  // instead of coming back in supplement rounds
+  if (!existsSync(understood)) writeFileSync(understood, seedRestatement("lead: what the new session understood", LEAD_UNDERSTOOD_HEADINGS, LEAD_OWN, (t) => missingLeadFrom(t, facts)));
   const id = deps.nonce();
-  if (!(await sendVerified(deps.run, deps.clock, deps.config, to.pane, `[LEAD] ${UNDERSTAND} ${id}: write what you understood to ${understood} (${LEAD_UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}) as step 3 of the handover note says, then run ${ack(id)} and nothing else for this line.`)))
+  if (!(await sendVerified(deps.run, deps.clock, deps.config, to.pane, `[LEAD] ${UNDERSTAND} ${id}: write what you understood to ${understood} (${LEAD_UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds what the handover carried word for word: keep it, add yours) as step 3 of the handover note says, then run ${ack(id)} and nothing else for this line.`)))
     return { reasons: [`the restatement request did not reach ${to.pane}`], session };
   emit(`${UNDERSTAND}_SENT ${id} -> ${to.pane}`);
   let by: string | undefined;
@@ -638,6 +666,38 @@ const verify = async (deps: HandoverDeps, facts: HandoverFacts, to: Target, veri
 };
 
 export type HandoverResult = { readonly code: number; readonly note?: string; readonly to?: string };
+
+export const TASKS_CANCEL = "HANDOVER_TASKS_CANCEL";
+export const ENDED_TASKS_HEADING = "Background tasks of the old session ended at the handover";
+
+// Once the move is committed, the old session's tasks that still run (background.ts strayTasks: only that session's own,
+// never another session's on the same task host) are ended by the new session with task_cancel, the tool any session of
+// the account can end a task with (GongDori's lead ended e7-ledger-replay's st_01a17bd9 so on 2026-10-27); dori has no
+// way of its own to reach senpi's task host. What ended goes at the end of the note, with its record, so the new session
+// can read what it found or run it again; one still open is a HANDOVER_TASK_ALIVE line.
+export const endStrayTasks = async (deps: Pick<HandoverDeps, "run" | "clock" | "config" | "home" | "alive" | "nonce">, o: { readonly who: string; readonly session: string; readonly pane: string; readonly note: string; readonly leave?: number; readonly emit: (line: string) => void }): Promise<void> => {
+  const stray = o.session ? strayTasks(deps.home, o.session, deps.alive, o.leave) : [];
+  if (!stray.length) return;
+  const ids = stray.map((t) => t.id);
+  const id = deps.nonce();
+  const ack = `dori handover ack ${id} --state ${deps.config.stateDir}`;
+  const told = await sendVerified(deps.run, deps.clock, deps.config, o.pane, `[LEAD] ${TASKS_CANCEL} ${id}: ${stray.length} background task(s) of the old session still run after the move: ${stray.map((t) => `${t.id}${t.what ? ` (${t.what})` : ""}`).join("; ")}. They can still change the files you work on, and their answers go to the old session. End each one with task_cancel (task_id ${ids.join(", ")}); its record and transcript stay readable, and the note lists them, so run one again as your own task if its work is still needed. Then run ${ack} and nothing else for this line.`).catch(() => false);
+  let acked: string | undefined;
+  for (let j = 0; told && j < ROUND_TRIES && acked === undefined; j++) {
+    await deps.clock.sleep(POLL_MS);
+    acked = ackedBy(deps.config.stateDir, id);
+  }
+  const now = new Map(taskRecords(deps.home, o.session).map((r) => [r.id, r.status]));
+  const left = strayTasks(deps.home, o.session, deps.alive, o.leave).filter((t) => ids.includes(t.id));
+  // ended: cancelled now, or finished by itself while the request was on its way (its record says which)
+  const ended = stray.filter((t) => !left.some((l) => l.id === t.id));
+  const cancelled = ended.filter((t) => now.get(t.id) === "cancelled");
+  const finished = ended.filter((t) => now.get(t.id) !== "cancelled");
+  appendFileSync(o.note, ["", `## ${ENDED_TASKS_HEADING} (${stray.length})`, "Added after the commit. Each one's record and transcript stay readable; run one again as your own task if its work is still needed.", ...stray.map((t) => `- ${t.id}${t.what ? `: ${t.what}` : ""}; ${now.get(t.id) ?? t.status}${left.some((l) => l.id === t.id) ? " (still running)" : ""}; record ${t.file}`), ""].join("\n"));
+  if (cancelled.length) o.emit(`HANDOVER_TASKS_CANCELLED ${o.who} ${cancelled.map((t) => `${t.id}${t.what ? ` "${t.what.slice(0, 80)}"` : ""}`).join(", ")} -> ${o.note}`);
+  if (finished.length) o.emit(`HANDOVER_TASKS_ENDED ${o.who} ${finished.map((t) => `${t.id} ${now.get(t.id) ?? "gone"}`).join(", ")}: ended by themselves before the cancel -> ${o.note}`);
+  if (left.length) o.emit(`HANDOVER_TASK_ALIVE ${o.who} ${left.map((t) => t.id).join(",")}: ${!told ? `the cancel request did not reach ${o.pane}` : acked === undefined ? `${o.pane} did not ack the cancel request` : "still open after the new session's task_cancel"}; they can still change files: end each with task_cancel <id> from any session of this account`);
+};
 
 // One handover at a time per state dir: two would each open a session and repoint the lead to their own.
 export const takeLock = (file: string, alive: (pid: number) => boolean, at: string, what = "handover"): string | undefined => {
@@ -704,7 +764,7 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
   const real = deps.realpath(old.path);
   const cwd = config.handover.cwd || real;
   if (real !== old.path) emit(`HANDOVER_CWD_SYMLINK the old lead runs from ${old.path}, a symlink to ${real}; the new session opens in ${cwd}${config.handover.cwd ? " (handover.cwd)" : " (set handover.cwd to choose another)"}`);
-  const facts: HandoverFacts = {
+  const known: HandoverFacts = {
     from: { pane: config.leadPane, aoeId: old.id, session, title: old.title, cwd: old.path },
     cwd,
     lanes: await deps.registry.open(),
@@ -718,6 +778,8 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
     ownerWords: recentOwnerWords(deps.inbox, deps.ownerIds ?? [], now),
     ...(session && sessionFile(sessionDir, session) ? { oldLog: sessionFile(sessionDir, session) } : {}),
   };
+  const quotes = conversationQuotes(deps, known.oldLog, [known.leadNote, ...known.ownerWords.map((w) => w.text)].join("\n"));
+  const facts: HandoverFacts = { ...known, ...(quotes.length ? { quotes } : {}) };
   const down = await missingWatchers(deps, facts.watchers, { pane: config.leadPane, session });
   if (down.length) return refuse(`configured watchers not running for ${config.leadPane}: ${down.join(", ")}; start them or fix handover.watchers before the handover`);
   if (!facts.monitors.length && !facts.watchers.length && !opts.noMonitors) {
@@ -728,7 +790,7 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
   const note = join(dir, `${stamp}.md`);
   writeFileSync(note, renderNote(facts, at));
   writeFileSync(join(dir, `${stamp}.json`), JSON.stringify(facts, null, 1));
-  emit(`HANDOVER_NOTE ${note}: ${facts.lanes.length} lanes, ${facts.monitors.length} monitors, ${facts.watchers.length} watchers, ${facts.cards.length} open questions, ${facts.todos.length} todos, ${facts.timers.length} timers, ${facts.ownerWords.length} owner messages, old log ${facts.oldLog ? "yes" : "no"}${opts.note ? "" : "; HANDOVER_NO_LEAD_NOTE (pass --note FILE with your summary, dori handover --template)"}`);
+  emit(`HANDOVER_NOTE ${note}: ${facts.lanes.length} lanes, ${facts.monitors.length} monitors, ${facts.watchers.length} watchers, ${facts.cards.length} open questions, ${facts.todos.length} todos, ${facts.timers.length} timers, ${facts.ownerWords.length} owner messages, ${facts.quotes?.length ?? 0} quotes from the old conversation, old log ${facts.oldLog ? "yes" : "no"}${opts.note ? "" : "; HANDOVER_NO_LEAD_NOTE (pass --note FILE with your summary, dori handover --template)"}`);
   const units = config.handover.services.length ? config.handover.services : config.update.services.map((s) => s.unit);
   const model = opts.model || config.handover.model || config.defaultModel;
   const title = opts.title || config.handover.title || `${old.title.replace(/-\d{8}$/, "")}-${stamp.slice(4, 8)}${stamp.slice(9, 13)}`;
@@ -849,6 +911,8 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
     record("done-frozen", []);
     await tell(pane, `[LEAD] ${COMMITTED}: the handover is checked and the old session ${config.leadPane} is frozen (its processes are stopped, its log stays); you are the lead now. Go on with step 5 of the note.`);
     emit(`${COMMITTED} lead ${pane}`);
+    // a task in the frozen agent is stopped with it; one in the shared task host is not
+    await endStrayTasks(deps, { who: "lead", session: facts.from.session, pane, note, leave: ice.agentPid, emit });
     return { code: 0, note, to: pane };
   }
   emit(`HANDOVER_FREEZE_FAIL ${config.leadPane}: ${ice.why ?? "nothing stopped"}${ice.pids.length ? ` (stopped ${ice.pids.join(",")}, resumed)` : ""}; ${opts.keepOld ? "it stays open, told to stay idle" : "closing it instead"}`);
@@ -858,6 +922,7 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
     await tell(pane, `[LEAD] ${COMMITTED}: the handover is checked and ${config.leadPane} stays open but idle; you are the lead now. Go on with step 5 of the note.`);
     emit(`HANDOVER_DONE ${config.leadPane} -> ${pane}; old session kept (--keep-old)`);
     record("done-kept-old", []);
+    await endStrayTasks(deps, { who: "lead", session: facts.from.session, pane, note, emit });
     return { code: 0, note, to: pane };
   }
   emit(`HANDOVER_DONE ${config.leadPane} -> ${pane}; closing ${config.leadPane}`);
@@ -868,5 +933,6 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
   emit(ok ? `HANDOVER_CLOSED ${closed}` : `HANDOVER_CLOSE_FAIL ${closed}`);
   await tell(pane, `[LEAD] ${COMMITTED}: the handover is checked and the old session ${ok ? "is closed" : `${config.leadPane} did not close but stays idle`}; you are the lead now. Go on with step 5 of the note.`);
   emit(`${COMMITTED} lead ${pane}`);
+  await endStrayTasks(deps, { who: "lead", session: facts.from.session, pane, note, emit });
   return { code: ok ? 0 : 1, note, to: pane };
 };

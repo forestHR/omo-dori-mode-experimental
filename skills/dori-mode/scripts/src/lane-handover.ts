@@ -14,7 +14,7 @@ import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./backgrou
 import { aoeSessions, BUSY_MARK, captureTmux, closeAoeSession, envMismatch, inputLine, laneEnv, openAoeSession, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { freezePane, writeFrozen } from "./frozen.ts";
-import { ackFile, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
+import { ackFile, endStrayTasks, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
 import { awaitPrompt } from "./launch.ts";
 import { QuestionStore } from "./messenger/discord-cards.ts";
 import { sendVerified } from "./panes.ts";
@@ -23,7 +23,7 @@ import { iso } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
 import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
-import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section } from "./restatement.ts";
+import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section, seedRestatement, wholeBullet } from "./restatement.ts";
 import { watchLog } from "./watch-log.ts";
 
 export type LaneHandoverDeps = FlowDeps & {
@@ -150,6 +150,8 @@ export const SUMMARY_TEMPLATE = [
 ].join("\n");
 // The headings the new session's restatement needs (written before it acks the probe).
 export const UNDERSTOOD_HEADINGS = ["Goal", "Owner's words", "Decisions", "Next step", "Ruled out", "Questions"] as const;
+// the headings the new session writes itself; the handover fills the others in before it asks (restatement.ts seedRestatement)
+export const LANE_OWN = ["Next step", "Questions"] as const;
 
 // What the new session's restatement left out, measured against what the handover holds: the fix ledger and the lane's
 // goal (independent of the summary), and the owner's quoted words and the decisions of the old session's summary.
@@ -164,7 +166,7 @@ export const missingFrom = (text: string, facts: LaneFacts): Missing[] => {
   for (const h of new Set(sessionFixes(facts.lane).map((x) => x.hypothesis))) if (!ruled.includes(flat(h))) out.push({ kind: "tried fix", text: h, under: "Ruled out", source: "the fix ledger (dori fix-attempt), kept apart from the summary" });
   if (goal && !quoted(all, goal)) out.push({ kind: "owner goal", text: goal, under: "Goal", source: "the lane's registry entry (the owner's words at launch)" });
   for (const q of quotesIn(section(facts.laneNote, "Owner's words and constraints"))) if (!quoted(all, q) && flat(q) !== flat(goal)) out.push({ kind: "owner's words", text: q, under: "Owner's words", source: "the old session's summary, Owner's words and constraints" });
-  for (const d of bulletsIn(facts.laneNote, "Decisions and why")) if (!covered(all, d)) out.push({ kind: "decision", text: d, under: "Decisions", source: "the old session's summary, Decisions and why", byWords: true });
+  for (const d of bulletsIn(facts.laneNote, "Decisions and why")) if (!covered(all, d)) out.push({ kind: "decision", text: d, under: "Decisions", source: "the old session's summary, Decisions and why", byWords: true, whole: wholeBullet(facts.laneNote, "Decisions and why", d) });
   return out;
 };
 
@@ -346,7 +348,7 @@ export const renderLaneNote = (f: LaneFacts, at: string, stateDir: string): stri
   "",
   "## Do this first",
   "1. Arm every monitor under Monitors again as a persistent monitor, with the same command and filter; one marked LAUNCHES_WORK gets the watch-only monitor its line describes instead, never its own command (its work still runs under the old session or already ended). Take each command, filter and description from its line under Monitors, where they are JSON strings: put them into the tool call as they are (a JSON string is a valid JS string), not retyped and not from the conversation summary, where a copy can differ. Arm each one once, all in one call, and print only how many armed and the ones that failed: each monitor's full reply is context the new session carries to its end.",
-  `2. A [LEAD] line with ${PROBE} <id> is a check of this handover. Before you answer it, read this whole note and your brief, then write what you understood to the file the line names, under the headings ${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")} (under Goal and Owner's words, the owner's goal and words quoted exactly as the note gives them; under Questions, only what neither the note nor the old log answers after you searched it, or none). Then run the dori handover ack command it gives (with its --state) and nothing else for that line. A [LEAD] HANDOVER_SUPPLEMENT <id> line names a file with what your restatement left out and the old log lines behind it: add those items to the same file, keep the rest, and run the ack command it gives.`,
+  `2. A [LEAD] line with ${PROBE} <id> is a check of this handover. Before you answer it, read this whole note and your brief, then write what you understood to the file the line names, under the headings ${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")} (under Goal and Owner's words, the owner's goal and words quoted exactly as the note gives them; under Questions, only what neither the note nor the old log answers after you searched it, or none). The handover already wrote into that file, word for word, the owner's goal and quotes, the summary's decisions and the tried fixes: keep those lines as they are (do not translate, shorten or merge them), add what you understood below them, and write ## ${LANE_OWN.join(" and ## ")} yourself. Then run the dori handover ack command it gives (with its --state) and nothing else for that line. A [LEAD] HANDOVER_SUPPLEMENT <id> line names a file with what your restatement left out and the old log lines behind it: add those items to the same file, keep the rest, and run the ack command it gives.`,
   `3. Read your brief ${f.lane.brief} in full. It still holds: same Done, same footer, and reports still go to the lead.`,
   `4. Until a [LEAD] ${COMMITTED} line arrives, do nothing else: change no file, start no process besides the monitors of step 1, post nothing. Until then the handover can still roll back and close this session.`,
   `5. After ${COMMITTED}: ${f.goal ? "register the goal under Goal again with your goal tool, same objective, and rebuild the todo list from Todos." : "rebuild the todo list from Todos."} Then continue the work from where Last reports and the lane's notes leave it. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you find later that the old session knew something this note did not carry and it cost you (you had to ask, redo or guess), run dori handover gap ${f.lane.key} --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>" and tell the lead.`,
@@ -683,8 +685,11 @@ const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string
   if (reasons.length) return { reasons, session, ...(shown.account ? { account: shown.account } : {}) };
   emit(`HANDOVER_STATUS_OK ${pane} ${shown.model}${shown.thinking ? ` thinking ${shown.thinking}` : ""}`);
   if (facts.monitors.length) emit(`HANDOVER_MONITORS_OK ${facts.monitors.length} in ${pane} (session ${session})`);
+  // what the handover holds goes into the restatement before the new session writes, word for word, so it starts there
+  // instead of coming back in supplement rounds
+  if (!existsSync(understood)) writeFileSync(understood, seedRestatement(`${facts.lane.key}: what the new session understood`, UNDERSTOOD_HEADINGS, LANE_OWN, (t) => missingFrom(t, facts)));
   const id = deps.nonce();
-  if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: write what you understood to ${understood} (${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}), then run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
+  if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: write what you understood to ${understood} (${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds the note's quotes, decisions and tried fixes word for word: keep them, add yours), then run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
   emit(`HANDOVER_PROBE_SENT ${id} -> ${pane}`);
   let by: string | undefined;
   for (; i < tries; i++) {
@@ -880,6 +885,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
     await tell(deps, pane, `[LEAD] ${COMMITTED}: the old session ended during the checks, so you are the ${lane.key} lane now although a check failed (${checked.reasons.join("; ")}); tell the lead what you see. ${config.launchKeywords}: go on with step 5 of the note.`);
     record("kept-new-old-gone", checked.reasons);
     await forwardLate(deps, facts, ctx, pane);
+    await endStrayTasks(deps, { who: lane.key, session: from.session, pane, note, emit });
     if (facts.chains.length) await chainsEnded(deps, lane.key, facts.chains, pane, emit);
     return { code: 1, note, to: pane };
   }
@@ -904,6 +910,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
     await tell(deps, pane, `[LEAD] ${COMMITTED}: the handover is checked and the old session ${from.pane} stays open but idle; you are the ${lane.key} lane now. ${config.launchKeywords}: go on with step 5 of the note.`);
     if (facts.chains.length) await tell(deps, pane, `[LEAD] HANDOVER_CHAINS_KEPT: the old session ${from.pane} stays open, so its local chains (${facts.chains.map((c) => c.pid).join(", ")}) still run. Do not start them again.`);
     await forwardLate(deps, facts, ctx, pane);
+    await endStrayTasks(deps, { who: lane.key, session: from.session, pane, note, emit });
     emit(`HANDOVER_DONE ${lane.key} ${from.pane} -> ${pane}; old session kept (--keep-old)`);
     record("done-kept-old", []);
     return { code: 0, note, to: pane };
@@ -926,6 +933,8 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
     await tell(deps, pane, `[LEAD] ${COMMITTED}: the handover is checked; the old session ${from.pane} stays open because work its monitors started still runs there (${list}), and it closes by itself once that work ended. You are the ${lane.key} lane now. Do not start that work again; follow it with the watch-only monitors of step 1. ${config.launchKeywords}: go on with step 5 of the note.`);
     emit(`${COMMITTED} ${lane.key} ${pane}`);
     await forwardLate(deps, facts, ctx, pane);
+    // a task in the frozen agent is stopped with it; one in the shared task host is not
+    await endStrayTasks(deps, { who: lane.key, session: from.session, pane, note, ...(ice.agentPid ? { leave: ice.agentPid } : {}), emit });
     if (facts.chains.length) await tell(deps, pane, `[LEAD] HANDOVER_CHAINS_KEPT: the old session ${from.pane} stays open, so its local chains (${facts.chains.map((c) => c.pid).join(", ")}) still run until it closes. Do not start them again.`);
     if (facts.detached.length) emit(`HANDOVER_DETACHED_ALIVE ${facts.detached.filter((d) => deps.alive(d.pid)).length}/${facts.detached.length} (${facts.detached.map((d) => d.pid).join(",")})`);
     return { code: 0, note, to: pane };
@@ -942,6 +951,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   emit(`${COMMITTED} ${lane.key} ${pane}`);
   // read after the close: a line typed into the frozen old pane is logged only once it is thawed to be closed
   await forwardLate(deps, facts, ctx, pane);
+  await endStrayTasks(deps, { who: lane.key, session: from.session, pane, note, emit });
   if (facts.chains.length) await chainsEnded(deps, lane.key, facts.chains, pane, emit);
   if (facts.detached.length) emit(`HANDOVER_DETACHED_ALIVE ${facts.detached.filter((d) => deps.alive(d.pid)).length}/${facts.detached.length} (${facts.detached.map((d) => d.pid).join(",")})`);
   return { code: ok ? 0 : 1, note, to: pane };

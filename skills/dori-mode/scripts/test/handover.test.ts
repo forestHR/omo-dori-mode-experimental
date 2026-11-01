@@ -21,7 +21,7 @@ const APPROVED = "https://discord.com/channels/1/2/3";
 const OWNER = "280680578314010625";
 const LANES_CMD = "tail -n 0 -F ~/.dori/lanes.log | grep --line-buffered LANE_";
 
-type Sim = { arm: { command: string; description: string; pid: number }[]; ackPane: string; ackReport: boolean; ackInbox: boolean; guardFor: Set<string>; restate: "full" | "omit-lane" | "silent"; supplement: "fix" | "ignore"; handled: Set<string> };
+type Sim = { arm: { command: string; description: string; pid: number }[]; ackPane: string; ackReport: boolean; ackInbox: boolean; guardFor: Set<string>; restate: "full" | "omit-lane" | "silent" | "keep-seed"; supplement: "fix" | "ignore"; handled: Set<string> };
 
 // what the fake new lead understood: every open lane, todo, card and timer of the setup under its own heading
 const RESTATEMENT = (lanes = "- demo: working, half way") =>
@@ -121,10 +121,21 @@ const simulate = () => {
     const ask = /HANDOVER_UNDERSTAND (\S+): write what you understood to (\S+)/.exec(text);
     if (ask?.[1] && ask[2] && !sim.handled.has(ask[1]) && sim.restate !== "silent") {
       sim.handled.add(ask[1]);
-      writeFileSync(ask[2], RESTATEMENT(sim.restate === "omit-lane" ? "none" : undefined));
+      // keep-seed: the new lead keeps what the handover wrote and adds only its next step and questions
+      writeFileSync(ask[2], sim.restate === "keep-seed" ? `${readFileSync(ask[2], "utf8")}\n## Next step\nwatch the lanes\n## Questions\nnone\n` : RESTATEMENT(sim.restate === "omit-lane" ? "none" : undefined));
       ackHandover(state.dir, ask[1], sim.ackPane, at);
     }
     // a supplement round: the fake lead adds each item under the heading named ("fix") or acks without adding ("ignore")
+    // the new lead ends the old session's tasks it is asked to end (their records turn cancelled)
+    const cancel = /HANDOVER_TASKS_CANCEL (\S+): .*\(task_id ([^)]+)\)/.exec(text);
+    if (cancel?.[1] && cancel[2] && !sim.handled.has(cancel[1])) {
+      sim.handled.add(cancel[1]);
+      for (const id of cancel[2].split(", ")) {
+        const file = join(state.dir, ".omo", "agent", "projects", "lead-1", "senpi-task", "tasks", `${id}.json`);
+        writeFileSync(file, JSON.stringify({ ...(JSON.parse(readFileSync(file, "utf8")) as object), status: "cancelled" }));
+      }
+      ackHandover(state.dir, cancel[1], sim.ackPane, at);
+    }
     const sup = /HANDOVER_SUPPLEMENT (\S+) .*Read (\S+), add them to (\S+), then/.exec(text);
     if (sup?.[1] && sup[2] && sup[3] && !sim.handled.has(sup[1])) {
       sim.handled.add(sup[1]);
@@ -730,6 +741,51 @@ test("the owner's recent messages and the old lead's summary go into the note an
   expect(understood).toContain("report the E7 render to the owner by 22:00 KST");
 });
 
+test("the new lead's restatement starts with the open lanes, work, cards, timers, the owner's messages and the summary word for word, so keeping them commits without a supplement round", async () => {
+  // Given
+  const deps = await setup();
+  const withOwner: HandoverDeps = { ...deps, ownerIds: [OWNER, "owner1"] };
+  writeFileSync(join(state.dir, "inbox.jsonl"), `${readFileSync(join(state.dir, "inbox.jsonl"), "utf8")}${JSON.stringify({ ts: "2026-10-11T16:20:00Z", id: "m1", scope: "thread", channel_id: "777", author_id: "owner1", content: "auto rollover loses no context, right?" })}\n`);
+  const summary = join(state.dir, "summary.md");
+  writeFileSync(summary, SUMMARY);
+  sim.restate = "keep-seed";
+  // When
+  const r = await handover(withOwner, { approvedBy: APPROVED, title: "lead2", note: summary });
+  // Then
+  expect(r).toMatchObject({ code: 0, to: NEW });
+  expect(printed.filter((l) => l.startsWith("HANDOVER_SUPPLEMENT"))).toEqual([]);
+  const understood = readFileSync((r.note ?? "").replace(/\.md$/, ".understood.md"), "utf8");
+  expect(understood).toContain('- "auto rollover loses no context, right?"');
+  expect(understood).toContain('- "keep the eval seed fixed at three"');
+  expect(understood).toContain("- moved the digest to the morning because the owner reads it then");
+  expect(understood).toContain("- report the E7 render to the owner by 22:00 KST");
+  expect(understood).toMatch(/## Open lanes\n.*\n- demo \(the lane registry: /);
+  expect(understood).toContain("- Q1 (the open question cards:");
+  const last = readRollovers(state.dir).at(-1);
+  expect(last).toMatchObject({ result: "done-frozen" });
+  expect(last).not.toHaveProperty("supplementRounds");
+});
+
+test("the quotes in the old lead's conversation that its summary does not hold go into the note, the owner's only with proof", async () => {
+  // Given: the old lead got a line quoting the owner without a message id, and one quoting the summary's own words
+  const deps = await setup();
+  const log = join(sessionDirFor(join(state.dir, "sessions"), CWD), "2026-10-08T08-13-21-349Z_old-sid.jsonl");
+  writeFileSync(log, `${readFileSync(log, "utf8")}\n${[
+    { type: "message", timestamp: "2026-10-11T12:45:00Z", message: { role: "user", content: '[REPORT] pingpong | milestone | 형이 말한 "영상 전체 위에 오버레이" 그대로 두고 고침' } },
+    { type: "message", timestamp: "2026-10-11T12:46:00Z", message: { role: "user", content: 'owner said "keep the eval seed fixed at three" again' } },
+  ].map((x) => JSON.stringify(x)).join("\n")}`);
+  const summary = join(state.dir, "summary.md");
+  writeFileSync(summary, SUMMARY);
+  // When
+  const r = await handover(deps, { approvedBy: APPROVED, title: "lead2", note: summary });
+  // Then
+  expect(r).toMatchObject({ code: 0, to: NEW });
+  const note = readFileSync(r.note ?? "", "utf8");
+  expect(note).toContain("## Quotes in the old conversation (1)\n");
+  expect(note).toMatch(/- 2026-10-11T12:45Z lead's words \(old log line \d+\): "영상 전체 위에 오버레이"/);
+  expect(printed.find((l) => l.startsWith("HANDOVER_NOTE"))).toContain("1 quotes from the old conversation");
+});
+
 test("an old lead's summary without its headings is refused before anything opens", async () => {
   // Given
   const deps = await setup();
@@ -758,4 +814,30 @@ test("work a monitor of the old lead started is not stopped with it: the old lea
   expect(stopped()).toBe(false);
   expect(printed).toContain(`HANDOVER_WORK_KEPT ${OLD}: the work its monitors started still runs (chain: 104); those monitors are left running and the old session closes once that work ended`);
   expect(readFrozen(state.dir)).toMatchObject([{ pane: OLD, agentPid: 11, pids: [11, 12, 13], keepFor: [104] }]);
+});
+
+test("once the lead's move commits, the old lead's tasks in the shared task host are ended through the new lead; a task in the frozen old agent is stopped with it and left alone, and another session's task on the same host too", async () => {
+  // Given
+  // the task records live under the home: the fake new lead arms its monitors with ~ there too
+  const deps: HandoverDeps = { ...(await setup()), home: state.dir };
+  sim.arm = sim.arm.map((m) => (m.description === "lanes" ? { ...m, command: LANES_CMD.replace("~/", `${state.dir}/`) } : m));
+  live.add(11);
+  live.add(50);
+  const dir = join(state.dir, ".omo", "agent", "projects", "lead-1", "senpi-task", "tasks");
+  mkdirSync(dir, { recursive: true });
+  const rec = (id: string, extra: Record<string, unknown>) => {
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ task_id: id, status: "running", parent_session_id: "old-sid", root_session_id: "old-sid", ...extra }));
+    return join(dir, `${id}.json`);
+  };
+  const shared = rec("st_01aaa", { host_pid: 50, execution_mode: "process", task_summary: "survey the lane logs" });
+  const frozen = rec("st_01bbb", { host_pid: 11, execution_mode: "in-process" });
+  const other = rec("st_01ccc", { host_pid: 50, execution_mode: "process", parent_session_id: "lane-sid", root_session_id: "lane-sid", task_summary: "read old-sid's log for the lane" });
+  // When
+  const r = await handover(deps, { approvedBy: APPROVED, title: "lead2" });
+  // Then
+  expect(r).toMatchObject({ code: 0, to: NEW });
+  expect(sent(w).find((l) => l.startsWith("[LEAD] HANDOVER_TASKS_CANCEL"))).toContain("1 background task(s) of the old session still run after the move: st_01aaa (survey the lane logs).");
+  expect(printed).toContain(`HANDOVER_TASKS_CANCELLED lead st_01aaa "survey the lane logs" -> ${r.note}`);
+  expect([shared, frozen, other].map((f) => (JSON.parse(readFileSync(f, "utf8")) as { status: string }).status)).toEqual(["cancelled", "running", "running"]);
+  expect(readFileSync(r.note ?? "", "utf8")).toContain(`- st_01aaa: survey the lane logs; cancelled; record ${shared}`);
 });

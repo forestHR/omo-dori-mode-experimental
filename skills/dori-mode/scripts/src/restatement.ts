@@ -8,7 +8,8 @@ import type { Supplement } from "./rollover.ts";
 
 // What a restatement left out: the item, the heading it goes under ("" for the whole file) and where the handover got it.
 // Items matched by words (a decision, a promise) are found in the old log by their longest words, the others by their text.
-export type Missing = { readonly kind: string; readonly text: string; readonly under: string; readonly source: string; readonly byWords?: boolean };
+// whole: the bullet as the summary wrote it, its "Why: ..." tail included (text is what the check looks for)
+export type Missing = { readonly kind: string; readonly text: string; readonly under: string; readonly source: string; readonly byWords?: boolean; readonly whole?: string };
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -27,6 +28,9 @@ export const words = (s: string): string[] => [...new Set(s.toLowerCase().match(
 // the bullets under a heading without their "Why: ..." tail; one with fewer than 3 words is too short to check
 export const bulletsIn = (text: string, heading: string): string[] =>
   section(text, heading).split("\n").map((l) => /^\s*[-*]\s+(.*)$/.exec(l)?.[1]?.split(/\s+why:|\s+because\s/i)[0]?.trim() ?? "").filter((d) => words(d).length >= 3);
+// the whole bullet under a heading that bulletsIn cut to `cut`
+export const wholeBullet = (text: string, heading: string, cut: string): string | undefined =>
+  section(text, heading).split("\n").map((l) => /^\s*[-*]\s+(.*)$/.exec(l)?.[1]?.trim() ?? "").find((l) => l.startsWith(cut));
 // a long quote counts when its first 80 characters are there
 export const quoted = (all: string, s: string): boolean => all.includes(flat(s).slice(0, 80));
 // a bullet counts when at least half of its words are there
@@ -95,6 +99,31 @@ const renderSupplement = (who: string, round: number, rounds: number, items: rea
       "",
     ]),
   ].join("\n");
+
+// The restatement as the handover starts it, before the new session writes: under each heading the items its own check
+// asks for (from the handover's records and the old session's summary), word for word. A new session that restated from
+// scratch translated and shortened them: GongDori's e7-ledger-replay (2026-10-27) wrote its restatement in Korean over a
+// summary whose 31 decisions were English, and 35 decisions and owner quotes came back in two supplement rounds. The new
+// session keeps these lines, adds what it understood and writes the headings left to it (own: its next step, its questions).
+export const SEEDED = "(carried by the handover, word for word: keep these lines as they are, in their own language; add what you understood below them)";
+const LISTED = new Set(["open lane", "open card", "timer"]);
+const QUOTED = new Set(["owner's words", "owner goal", "goal"]);
+export const seedRestatement = (title: string, headings: readonly string[], own: readonly string[], check: (text: string) => Missing[]): string => {
+  const items = check(headings.map((h) => `## ${h}\n`).join("\n")).filter((m) => m.under && m.kind !== "heading");
+  // quotes stay quoted; the rest is a bullet, an open lane, card or timer with what the records say of it
+  const line = (m: Missing): string => (QUOTED.has(m.kind) ? `- "${m.text}"` : `- ${m.whole ?? m.text}${LISTED.has(m.kind) ? ` (${m.source})` : ""}`);
+  return [
+    `# ${title}`,
+    "",
+    ...headings.flatMap((h) => {
+      if (own.includes(h)) return [];
+      const here = items.filter((m) => m.under === h);
+      return [`## ${h}`, ...(here.length ? [SEEDED, ...here.map(line)] : ["(nothing in the handover's records; add yours)"]), ""];
+    }),
+    `(write ${own.map((h) => `## ${h}`).join(" and ")} yourself)`,
+    "",
+  ].join("\n");
+};
 
 export const fmtMissing = (items: readonly Missing[]): string => items.map((it) => `${it.kind}: ${it.text.replace(/\s+/g, " ").slice(0, 80)}`).join("; ");
 

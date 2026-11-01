@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import type { Question } from "./messenger/discord-cards.ts";
 import type { FixAttempt, Lane } from "./registry.ts";
 import type { DoriConfig } from "./config.ts";
+import { flat } from "./restatement.ts";
 import { parseWatchLine } from "./watch-log.ts";
 
 // stuck: the highest rung of the stuck ladder the lane reached in its current session (rung 4 makes a rollover due);
@@ -621,3 +622,45 @@ const MACHINE = /^\[LEAD\]\s*(your work thread has had no update|Handover of|An 
 
 // The lead's own instructions among a log's user lines (the [LEAD] lines that are not machinery), from since (ms) on.
 export const leadLines = (said: readonly Said[], since: number): Said[] => said.filter((s) => s.text.startsWith("[LEAD]") && !MACHINE.test(s.text) && (Date.parse(s.at) || 0) >= since);
+
+// --- quotes in a conversation: the owner's (proved by his message id or an answered card) or the lead's ---
+
+export const QUOTE = /"((?:[^"\\\n]|\\.){6,})"|“([^”\n]{6,})”|「([^」\n]{6,})」/g;
+// the quote is the owner's when the words just before it name him: 형(17:43 KST, <id>): "...", owner 10-18 "...", 형 Q281: "..."
+const OWNER_BEFORE = /(형|owner|오너)[^"“「\n]{0,60}$/i;
+const HANGUL = /\p{Script=Hangul}/u;
+// a command, a path or a config line is no instruction in words; a single token is one when it is a name the owner chose on
+// a card (Q257 "zzangdori-ops"), not a short word
+const words = (q: string): boolean => (HANGUL.test(q) ? /\s/.test(q.trim()) || q.length >= 6 : !/[=<>{}$`]|\/\w+\//.test(q.trim()) && q.trim().length >= 6);
+
+export type Candidate = { readonly kind: "owner's words" | "lead's words" | "lead instruction"; readonly text: string; readonly at: string; readonly line: number; readonly context: string };
+
+// What proves a quote is the owner's own: a message id or link next to it that the inbox holds as his, or the question card
+// it answers (Q257 "zzangdori-ops"), answered. A quote the lead wrote to him ("형에게 ...라고 했어") or one without proof is
+// the lead's words.
+export type OwnerProof = { readonly message: (id: string) => boolean; readonly card: (id: string) => boolean };
+const MESSAGE_ID = /discord(?:app)?\.com\/channels\/[\d@me]+\/\d+\/(\d{15,22})|(?<![\w])(\d{17,22})(?![\w])/;
+const CARD_ID = /(?<![\w])(Q\d{1,5})(?![\w])/;
+const TO_OWNER = /(형|owner|오너)\s*(에게|한테|께|to)\b|(형|오너)(에게|한테|께)/i;
+
+export const ownerQuotes = (said: readonly Said[], proof: OwnerProof): Candidate[] => {
+  const seen = new Set<string>();
+  const out: Candidate[] = [];
+  for (const s of said) {
+    let end = 0;
+    for (const m of s.text.matchAll(QUOTE)) {
+      const q = (m[1] ?? m[2] ?? m[3] ?? "").replace(/\\"/g, '"').trim();
+      const at = m.index ?? 0;
+      const before = s.text.slice(Math.max(end, at - 80), at);
+      end = at + m[0].length;
+      if (!q || !words(q) || !OWNER_BEFORE.test(before) || seen.has(flat(q))) continue;
+      seen.add(flat(q));
+      const near = `${before} ${s.text.slice(end, end + 40).split(/["“「]/)[0] ?? ""}`;
+      const id = MESSAGE_ID.exec(near);
+      const card = CARD_ID.exec(before)?.[1];
+      const owner = !TO_OWNER.test(before) && ((!!id && proof.message(id[1] ?? id[2] ?? "")) || (!!card && proof.card(card)));
+      out.push({ kind: owner ? "owner's words" : "lead's words", text: q, at: s.at, line: s.line, context: s.text.slice(Math.max(0, at - 200), at + q.length + 300).replace(/\s+/g, " ") });
+    }
+  }
+  return out;
+};
