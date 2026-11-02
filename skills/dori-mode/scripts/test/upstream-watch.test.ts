@@ -274,6 +274,9 @@ test("a dependency added to a skills package.json goes to the owner whatever its
     53: midBlock("git+https://github.com/x/b.git"),
     54: midBlock("file:../b"),
     55: `@@ -1,6 +1,6 @@\n {\n-  "version": "1.0.0",\n+  "version": "1.1.0",\n   "scripts": {\n-    "build": "tsc"\n+    "build": "tsc -b"\n   }`,
+    // hunks that start below the dependencies header: the block cannot be told from the patch, so the owner checks it
+    56: `@@ -20,5 +20,6 @@\n     "m": "^1.0.0",\n     "n": "^2.0.0",\n+    "helper": "latest",\n     "o": "^3.0.0"\n   }`,
+    57: `@@ -1,3 +1,3 @@\n {\n-  "version": "1.0.0",\n+  "version": "1.1.0",\n@@ -30,4 +30,5 @@\n     "p": "^1.0.0",\n+    "later": "github:x/later",\n     "q": "^2.0.0"`,
   };
   const numbers = Object.keys(patches).map(Number);
   json("prs.json", numbers.map((n) => ({ number: n, title: "chore: package tidy", url: `${UP}/pull/${n}`, mergedAt: "2026-11-02T00:00:00Z", mergeCommit: { oid: `${n}`.padStart(40, "7") }, body: "" })));
@@ -282,7 +285,9 @@ test("a dependency added to a skills package.json goes to the owner whatever its
   writeFileSync(join(gh, "commits.jsonl"), "");
   expect((await run()).code).toBe(0);
   const rows = inbox().filter((x) => x.kind === "upstream-change");
-  expect(rows.map((x) => [x.item, x.class])).toEqual([["pr:50", "3"], ["pr:51", "3"], ["pr:52", "3"], ["pr:53", "3"], ["pr:54", "3"], ["pr:55", "4"]]);
+  expect(rows.map((x) => [x.item, x.class])).toEqual([["pr:50", "3"], ["pr:51", "3"], ["pr:52", "3"], ["pr:53", "3"], ["pr:54", "3"], ["pr:55", "4"], ["pr:56", "3"], ["pr:57", "3"]]);
   expect(rows.find((x) => x.item === "pr:50")!.reason).toContain(`${pkg}에 left`);
   expect(rows.find((x) => x.item === "pr:51")!.reason).toContain(`${pkg}에 b`);
+  expect(rows.find((x) => x.item === "pr:56")!.reason).toContain(`${pkg}에 helper, 블록을 패치로 못 가림`);
+  expect(rows.find((x) => x.item === "pr:57")!.reason).toContain(`${pkg}에 later, 블록을 패치로 못 가림`);
 });

@@ -242,8 +242,9 @@ def outbound(added: dict[str, list[str]]) -> str | None:
 def new_deps(diff: str) -> str | None:
     # An added "name": "<any spec>" line inside a dependency block of skills/**/package.json (latest, *, npm:, git, file:
     # count too). The block is followed through the patch's own context and added lines; when a hunk starts below its
-    # block header, only a numeric version still marks a dependency.
+    # block header the block cannot be told from the patch, so any added entry but "version" goes to the owner as unsure.
     found: dict[str, list[str]] = {}
+    unsure: dict[str, list[str]] = {}
     path, blocks = None, []
     for line in diff.splitlines():
         if line.startswith("diff --git "):
@@ -260,15 +261,21 @@ def new_deps(diff: str) -> str | None:
         body = line[1:]
         if m := JSON_BLOCK.match(body):
             blocks.append(m.group(1))
+        elif body.strip() == "{":
+            blocks.append("")
         elif body.strip().startswith("}"):
             if blocks:
                 blocks.pop()
         elif line.startswith("+") and (m := JSON_ENTRY.match(body)):
             inside = blocks[-1] if blocks else None
-            if inside in DEP_KEYS or (inside is None and m.group(1) != "version" and DEP_LINE.match(body)):
+            if inside in DEP_KEYS:
                 found.setdefault(path, []).append(m.group(1))
+            elif inside is None and m.group(1) != "version":
+                unsure.setdefault(path, []).append(m.group(1))
     for path, names in found.items():
         return f"{path}에 {', '.join(names[:3])}"
+    for path, names in unsure.items():
+        return f"{path}에 {', '.join(names[:3])}, 블록을 패치로 못 가림, 손으로 확인"
     return None
 
 
