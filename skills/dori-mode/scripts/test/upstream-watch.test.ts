@@ -30,6 +30,16 @@ beforeEach(() => {
   sh(["git", "add", "."], src);
   sh(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "root"], src);
   ourRoot = sh(["git", "rev-parse", "HEAD"], src);
+  sh(["git", "checkout", "-q", "-b", "upstream-side"], src);
+  mkdirSync(join(src, "docs"));
+  for (let i = 0; i < 100; i++) writeFileSync(join(src, "docs", `page-${String(i).padStart(3, "0")}.md`), `${i}\n`);
+  mkdirSync(join(src, "skills"));
+  writeFileSync(join(src, "skills", "zz-late.ts"), "x\n");
+  sh(["git", "add", "."], src);
+  sh(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "big"], src);
+  const bigMerge = sh(["git", "rev-parse", "HEAD"], src);
+  sh(["git", "checkout", "-q", "-"], src);
+  sh(["git", "remote", "add", "upstream", src], src);
   const pr = (number: number, title: string, paths: string[], extra: object = {}) => ({
     number, title, url: `${UP}/pull/${number}`, mergedAt: "2026-11-02T00:00:00Z", files: paths.map((path) => ({ path })),
     mergeCommit: { oid: `${number}`.padStart(40, "c") }, body: "", ...extra,
@@ -42,6 +52,8 @@ beforeEach(() => {
     pr(23, "feat(loop): hourly loop that keeps picking up the next backlog item", ["src/loop.ts"]),
     pr(25, "fix(dori-mode): skip report templates", ["skills/dori-mode/scripts/src/freshness.ts"], { body: "Fixes #22" }),
     pr(30, "fix(dori-mode): keep reports in reports.jsonl", ["skills/dori-mode/scripts/src/cli.ts"]),
+    // gh returns the first 100 files only; the skills/ change is the 101st
+    pr(40, "fix: rename the docs pages", Array.from({ length: 100 }, (_, i) => `docs/page-${String(i).padStart(3, "0")}.md`), { changedFiles: 101, mergeCommit: { oid: bigMerge } }),
   ]);
   writeFileSync(join(gh, "diff-21.txt"), "diff --git a/src/telemetry.ts b/src/telemetry.ts\n+++ b/src/telemetry.ts\n+  const res = await fetch(url);\n");
   writeFileSync(join(gh, "diff-30.txt"), "diff --git a/skills/dori-mode/scripts/src/cli.ts b/skills/dori-mode/scripts/src/cli.ts\n+// see https://github.com/x/y\n");
@@ -88,6 +100,7 @@ test("only owner decisions and port candidates reach the inbox; what we already 
     ["pr:21", "3"],
     ["pr:23", "3"],
     ["pr:30", "4"],
+    ["pr:40", "4"],
     ["issue:29", "4"],
     [`commit:${"b".repeat(40)}`, "4"],
   ]);
@@ -95,8 +108,9 @@ test("only owner decisions and port candidates reach the inbox; what we already 
   expect(classes).toMatchObject({ "pr:7": "1", "pr:25": "1", "issue:22": "1", [`commit:${ourRoot}`]: "1", [`commit:${"a".repeat(40)}`]: "1", "pr:16": "2", "pr:17": "2", "issue:27": "2", "issue:31": "2" });
   const weekly = rows.filter((x) => x.kind === "upstream-weekly");
   expect(weekly).toHaveLength(1);
+  expect(weekly[0]!.thread).toBe("discord:42");
   expect(weekly[0]!.content).toContain("① 이미 있음 5건");
-  expect(r.out).toContain("inbox_lines=5 weekly=True");
+  expect(r.out).toContain("inbox_lines=6 weekly=True");
 });
 
 test("a second run and a seeded run write nothing more", async () => {
@@ -106,7 +120,7 @@ test("a second run and a seeded run write nothing more", async () => {
   expect(inbox()).toHaveLength(before);
   rmSync(join(root, "state"), { recursive: true });
   rmSync(join(root, "inbox.jsonl"));
-  expect((await run(["--seed"])).out).toContain("new=14 inbox_lines=0");
+  expect((await run(["--seed"])).out).toContain("new=15 inbox_lines=0");
   expect(inbox()).toHaveLength(0);
   expect((await run()).out).toContain("new=0 inbox_lines=0");
 });
@@ -167,6 +181,7 @@ test("lists longer than one page are read in full, and a commit of a PR the watc
   const commits = [
     ...Array.from({ length: 120 }, (_, i) => ({ sha: `${i + 1}`.padStart(40, "e"), commit: { message: `fix: case (#${i + 1})` } })),
     { sha: "f".repeat(40), commit: { message: "fix: a PR this watch never listed (#999)" } },
+    { sha: "9".repeat(40), commit: { message: "fix: squashed without a PR number" } },
   ];
   writeFileSync(join(root, "prs.json"), JSON.stringify(prs));
   writeFileSync(join(root, "commits.jsonl"), commits.map((c) => JSON.stringify(c)).join("\n"));
@@ -183,7 +198,7 @@ elif a[:2] == ["pr", "diff"]:
 elif a[0] == "api" and a[1] == "--paginate":
     print(open("${join(root, "commits.jsonl")}").read())
 elif a[0] == "api" and a[1].endswith("/pulls"):
-    print("[]")
+    print(json.dumps([{"number": 999 if "${"f".repeat(40)}" in a[1] else 5, "merged_at": "2026-11-02T00:00:00Z"}]))
 elif a[0] == "api" and "/commits/" in a[1]:
     print(json.dumps({"files": [{"filename": "skills/dori-mode/scripts/src/sweeps.ts", "patch": "+x"}]}))
 else:
@@ -198,4 +213,28 @@ else:
   expect(items).not.toContain("pr:22");
   expect(items).toContain(`commit:${"f".repeat(40)}`);
   expect(items.filter((i) => i.startsWith("commit:"))).toHaveLength(1);
+  expect(seen()[`commit:${"9".repeat(40)}`]!.class).toBe("2");
+});
+
+test("a list that reaches its limit records nothing and tells the lead on that run, once", async () => {
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "gh"), `#!/usr/bin/python3
+import json, sys
+a = sys.argv[1:]
+if a[:2] == ["pr", "list"]:
+    n = int(a[a.index("--limit") + 1])
+    print(json.dumps([{"number": i + 1, "title": "t", "url": "u", "files": [], "body": ""} for i in range(n)]))
+else:
+    print("[]")
+`);
+  chmodSync(join(bin, "gh"), 0o755);
+  const cut = () => run([], { UPSTREAM_WATCH_GH_DIR: "", UPSTREAM_WATCH_THREAD: "discord:42", PATH: `${bin}:/usr/bin:/bin` });
+  const first = await cut();
+  expect(first.code).toBe(3);
+  expect(first.err).toContain("UPSTREAM-WATCH-FAIL Incomplete");
+  expect(seen()).toEqual({});
+  expect(inbox().map((x) => [x.kind, x.thread])).toEqual([["upstream-watch-fail", "discord:42"]]);
+  expect((await cut()).code).toBe(3);
+  expect(inbox()).toHaveLength(1);
 });

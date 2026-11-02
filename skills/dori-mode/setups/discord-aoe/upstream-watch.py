@@ -78,6 +78,10 @@ class GhError(Exception):
     pass
 
 
+class Incomplete(GhError):
+    pass
+
+
 def gh(args: list[str]) -> str:
     try:
         return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120, check=True).stdout
@@ -113,18 +117,24 @@ def upstream_repo() -> tuple[str, set[str]]:
     return named, {a.lower() for a in aliases}
 
 
+def whole(kind: str, items: list[dict]) -> list[dict]:
+    if len(items) >= int(LIST_LIMIT):
+        raise Incomplete(f"{kind} list reached --limit {LIST_LIMIT}; older items would be missed, raise LIST_LIMIT")
+    return items
+
+
 def merged_prs(repo: str) -> list[dict]:
     if FIXTURE:
         return json.loads(fixture("prs.json"))
-    fields = "number,title,url,mergedAt,mergeCommit,files,body"
-    return json.loads(gh(["pr", "list", "--repo", repo, "--state", "merged", "--limit", LIST_LIMIT, "--json", fields]))
+    fields = "number,title,url,mergedAt,mergeCommit,files,changedFiles,body"
+    return whole("PR", json.loads(gh(["pr", "list", "--repo", repo, "--state", "merged", "--limit", LIST_LIMIT, "--json", fields])))
 
 
 def issues(repo: str) -> list[dict]:
     if FIXTURE:
         return json.loads(fixture("issues.json"))
     fields = "number,title,url,state,createdAt"
-    return json.loads(gh(["issue", "list", "--repo", repo, "--state", "all", "--limit", LIST_LIMIT, "--json", fields]))
+    return whole("issue", json.loads(gh(["issue", "list", "--repo", repo, "--state", "all", "--limit", LIST_LIMIT, "--json", fields])))
 
 
 def commits(repo: str) -> list[dict]:
@@ -246,9 +256,21 @@ def classify_pr(repo: str, pr: dict, here: Here) -> tuple[str, str]:
         return "1", f"우리 코드가 이 PR이 닫은 이슈 #{cited[0]}를 인용"
     if here.has_commit(sha):
         return "1", "우리 이력에 이미 있음"
-    paths = [f["path"] for f in pr.get("files") or []]
     diff = "" if PR_HARNESS.search(pr["title"]) else pr_diff(repo, n)
+    paths = [f["path"] for f in pr.get("files") or []]
+    if (pr.get("changedFiles") or 0) > len(paths):
+        paths = changed_paths(sha, n)
     return classify_change(pr["title"], paths, diff)
+
+
+def changed_paths(sha: str | None, n: int) -> list[str]:
+    # gh lists at most 100 files of a PR: read the whole list from the merge commit, fetched by id (no ref moves)
+    if not sha or git(["fetch", "--quiet", "--no-tags", "upstream", sha]).returncode != 0:
+        raise GhError(f"PR #{n} lists more files than gh returned and its merge commit {sha} could not be fetched")
+    out = git(["diff", "--name-only", f"{sha}^1", sha])
+    if out.returncode != 0:
+        raise GhError(f"git diff of PR #{n} merge commit {sha} failed: {out.stderr.strip()[:200]}")
+    return out.stdout.split()
 
 
 def classify_issue(issue: dict, here: Here, closed_by: dict[int, int]) -> tuple[str, str]:
@@ -330,8 +352,8 @@ def gather(repo: str, here: Here) -> list[dict]:
         def classify_commit(sha=sha, first=first, ours=ours) -> tuple[str, str]:
             if ours or here.cites_commit(sha):
                 return "1", "우리 이력에 이미 있음"
-            if any(p.get("merged_at") for p in commit_prs(repo, sha)):
-                return "2", "머지된 PR에 들어 있음(그 PR로 판단)"
+            if covered := [p["number"] for p in commit_prs(repo, sha) if p.get("merged_at") and p.get("number") in merged]:
+                return "2", f"머지된 PR #{covered[0]}에 들어 있음(그 PR로 판단)"
             detail = commit_detail(repo, sha)
             files = detail.get("files") or []
             diff = "".join(f"diff --git a/{f['filename']} b/{f['filename']}\n{f.get('patch', '')}\n" for f in files)
@@ -353,6 +375,7 @@ def weekly_record(repo: str, minor: list[dict], now: datetime) -> dict:
         "id": f"upstream-weekly-{now.strftime('%Y%m%d%H%M')}",
         "kind": "upstream-weekly",
         "repo": repo,
+        **({"thread": THREAD} if THREAD else {}),
         "content": f"원본 {repo} 지난 묶음(기록만, 할 일 없음) · " + " · ".join(parts),
     }
 
@@ -392,14 +415,21 @@ def main(argv: list[str]) -> int:
             item["cls"], item["why"] = ("0", "seed") if seed else item["classify"]()
     except (GhError, ValueError, KeyError) as error:
         state["fails"] += 1
-        alert = state["fails"] == FAILS_BEFORE_ALERT
+        # a list cut short would lose items quietly: say so on the first such run, not after three
+        incomplete = isinstance(error, Incomplete) and not state.get("incomplete_alerted")
+        alert = state["fails"] == FAILS_BEFORE_ALERT or incomplete
+        if incomplete:
+            state["incomplete_alerted"] = True
         if alert:
-            append_inbox({"ts": stamp(now), "id": f"upstream-watch-fail-{now.strftime('%Y%m%d%H%M')}", "kind": "upstream-watch-fail",
-                          "content": f"upstream-watch가 {FAILS_BEFORE_ALERT}번 연속 원본을 못 읽음: {one_line(error)} · journalctl --user -u dori-upstream-watch"})
+            append_inbox({"ts": stamp(now), "id": f"upstream-watch-fail-{now.strftime('%Y%m%d%H%M')}", "kind": "upstream-watch-fail", **({"thread": THREAD} if THREAD else {}),
+                          "content": (f"upstream-watch: 원본 목록을 끝까지 못 읽어 이번 회차를 기록하지 않음: {one_line(error)}" if incomplete
+                                      else f"upstream-watch가 {FAILS_BEFORE_ALERT}번 연속 원본을 못 읽음: {one_line(error)}")
+                                     + " · journalctl --user -u dori-upstream-watch"})
         save_state(state_path, state)
         print(f"UPSTREAM-WATCH-FAIL {type(error).__name__}: {one_line(error, 300)} fails={state['fails']} alerted={alert}", file=sys.stderr)
         return 3
     state["fails"] = 0
+    state.pop("incomplete_alerted", None)
     notified = 0
     counts = {"1": 0, "2": 0, "3": 0, "4": 0}
     for item in fresh:
