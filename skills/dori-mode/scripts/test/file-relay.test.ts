@@ -63,7 +63,7 @@ test("a file in to-<dori> reaches the other's inbox/from-<me>, wakes its lead on
   expect(mode(got)).toBe(0o600);
   expect(mode(home("yo", "inbox", "from-moodori"))).toBe(0o700);
   expect(mode(home("yo", "inbox", "from-moodori", "deck"))).toBe(0o700);
-  expect(existsSync(home("mo", "outbox", "to-yoodori", "deck"))).toBe(false);
+  expect(readdirSync(home("mo", "outbox", "to-yoodori", "deck"))).toEqual([]);
   expect(readFileSync(home("mo", "outbox", "sent", kst(), "to-yoodori", "deck", "a b.pdf"), "utf8")).toBe(body);
 
   const rows = inbox("yo");
@@ -77,6 +77,22 @@ test("a file in to-<dori> reaches the other's inbox/from-<me>, wakes its lead on
   expect((await serve(2)).code).toBe(0); // nothing is sent twice
   expect(inbox("yo")).toHaveLength(1);
   expect(inbox("za")).toHaveLength(0);
+});
+
+test("the subfolder a sent or set-aside file came from stays, so the next file can be copied into it", async () => {
+  await serve(1);
+  const dir = home("mo", "outbox", "to-yoodori", "nst", "case6");
+  put(join(dir, "6.pdf"), "six");
+  await serve(2);
+  expect(readFileSync(home("yo", "inbox", "from-moodori", "nst", "case6", "6.pdf"), "utf8")).toBe("six");
+  expect(readdirSync(dir)).toEqual([]);
+
+  writeFileSync(join(dir, "7.pdf"), "seven", { mode: 0o600 }); // no mkdir: the folder the owner's Dori used before is still there
+  symlinkSync("/etc/passwd", join(dir, "7-link"));
+  await serve(2);
+  expect(readFileSync(home("yo", "inbox", "from-moodori", "nst", "case6", "7.pdf"), "utf8")).toBe("seven");
+  expect(readdirSync(dir)).toEqual([]);
+  expect(existsSync(home("mo", "outbox", "to-yoodori", ".failed", "nst", "case6", "7-link.why"))).toBe(true);
 });
 
 test("a symlink, a hard link, a fifo and a file over the cap are set aside in .failed with the reason, never delivered", async () => {

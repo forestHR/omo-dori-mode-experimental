@@ -337,11 +337,8 @@ def main():
         w = os.open(final + ".why", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dfd)
         os.write(w, why)
         os.close(w)
-    for i in range(len(ps) - 1, 0, -1):  # folders the file emptied, never to-<dori> itself
-        try:
-            os.rmdir(ps[i - 1], dir_fd=chain[i - 1])
-        except OSError:
-            break
+    # The subfolders the file came from stay, even empty: the sender may copy its next file into the same
+    # folder, and a folder removed under it fails that copy (2026-11-02, nst-crc23043).
     sys.stderr.write("MOVED %s\n" % "/".join(ps[:-1] + [final]))
 
 run(main)
