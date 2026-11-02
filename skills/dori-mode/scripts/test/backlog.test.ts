@@ -581,7 +581,9 @@ test("a card-approved todo's lane is told the gate proof for its todo; an answer
   // Then
   expect(sentBrief("todo-pb-121212121212-1")).toContain(todoProofRule("pb-121212121212-1"));
   expect(sentBrief("todo-pb-121212121212-1")).toContain("X-Dori-Owner-Todo: pb-121212121212-1 ");
+  expect(sentBrief("todo-pb-121212121212-1")).toContain("--origin-todo pb-121212121212-1 ");
   expect(sentBrief("todo-pb-131313131313-1")).not.toContain("X-Dori-Owner-Todo");
+  expect(sentBrief("todo-pb-131313131313-1")).not.toContain("--origin-todo");
   const decided = { id: "z2", title: "z", brief, done: "file /tmp/x", priority: 5, by: "feed", status: "open" as const, addedAt: "t", log: [], source: "pb-141414141414-1", feedHash: "h", approval: { at: "t", hash: "h", by: "decide" as const } };
   expect(launchRules(decided)).toContain(APPROVED_RULE);
   expect(launchRules(decided)).not.toContain("X-Dori-Owner-Todo");
