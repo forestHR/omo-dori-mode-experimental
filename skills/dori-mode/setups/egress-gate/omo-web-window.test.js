@@ -58,6 +58,9 @@ describe("omo-web-window", () => {
 		expect(seen[0]).toEqual(expect.objectContaining({ method: "GET", path: "/fetch", query: { url: "https://arxiv.org/abs/1" } }));
 		expect(seen[0].headers["x-dori-owner-order"]).toBe("17");
 		expect(seen[0].headers["x-dori-owner-message"]).toBeUndefined();
+		await tools.get("webfetch").execute("1", { url: "https://arxiv.org/abs/1", owner_message: "todo:pb-0123456789ab-1" });
+		expect(seen[1].headers["x-dori-owner-todo"]).toBe("pb-0123456789ab-1");
+		expect([seen[1].headers["x-dori-owner-order"], seen[1].headers["x-dori-owner-message"]]).toEqual([undefined, undefined]);
 	});
 
 	test("the window's refusal reaches the model as an error with its reason and message", async () => {
