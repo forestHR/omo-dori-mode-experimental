@@ -585,3 +585,36 @@ test("a feed entry never changes an item the lead added by hand under the same i
   expect(lines).toEqual(["BACKLOG_FEED_CLASH todo-x9: held by an item lead added, not feed entry x9; left alone"]);
   expect(readItem(state, "todo-x9")?.status).toBe("open");
 });
+
+test("approval keeps a question the lead added when fixing a draft: the item still waits for decide", async () => {
+  // Given: a feed draft the lead replaced with a question for the owner
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  await sweep([{ todo_id: "pb-121212121212-1", title: "w", status: "진행" }]);
+  addItem(state, { id: "todo-pb-121212121212-1", title: "w (고침)", brief, done: "file /tmp/x", ask: "어느 폴더를 고칠까?" }, { registered: false, at: "2026-11-02T16:00:00Z" });
+  // When: the owner approves the todo, then a pass runs
+  const approved = await sweep([{ todo_id: "pb-121212121212-1", title: "w", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
+  const pass = await backlogTick(deps(), { force: true });
+  const item = readItem(state, "todo-pb-121212121212-1");
+  // Then
+  expect(approved).toEqual(["BACKLOG_FEED_APPROVED todo-pb-121212121212-1: the owner approved it; it now works within its scope"]);
+  expect([item?.ask, item?.draftOnly, item?.title]).toEqual(["어느 폴더를 고칠까?", undefined, "w (고침)"]);
+  expect(readFileSync(item?.brief ?? "", "utf8")).toContain("[쓰기 범위]");
+  expect(pass).toContain("BACKLOG_ASK todo-pb-121212121212-1: in the lead's inbox; not started before dori backlog decide");
+  expect(launched).toEqual([]);
+});
+
+test("an item whose key another lane already holds is held, never started or tied to that lane", async () => {
+  // Given: an ordinary open lane todo-q1 and a backlog item with the same key
+  lanes.push(lane("todo-q1"));
+  add("todo-q1");
+  // When
+  const pass = await backlogTick(deps());
+  lanes = [lane("todo-q1", true)];
+  const after = await backlogTick(deps(), { force: true });
+  // Then
+  expect(pass).toEqual(["BACKLOG_HELD todo-q1: lane todo-q1 is already registered (another lane holds this key); add it again under a new id"]);
+  expect(launched).toEqual([]);
+  expect(readItem(state, "todo-q1")?.status).toBe("open");
+  expect(after.some((l) => l.startsWith("BACKLOG_DONE"))).toBe(false);
+});

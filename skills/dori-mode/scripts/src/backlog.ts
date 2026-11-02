@@ -486,6 +486,14 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
       continue;
     }
     if (old && !upgrade && !(followUp && !taken)) continue;
+    if (upgrade && old) {
+      // the item as it is (the lead's brief, its question, a decision already recorded) gets the approval added, never rewritten
+      appendFileSync(old.brief, `\n\n## 형 승인 (${at})\n형이 승인 카드로 받은 할 일이 됐다. 아래 [쓰기 범위]가 위의 '읽기와 초안까지만'을 대신한다. 이 항목에 남은 질문이 있으면 그 답이 먼저다.\n\n${feedBrief(todo, id, true).split("\n").filter((l) => l.startsWith("[쓰기 범위]")).join("\n")}\n`);
+      const { draftOnly: _draft, ...rest } = old;
+      save(d.stateDir, logged({ ...rest, by: "feed:approved" }, at, "approved by the owner's card: no longer draft only"));
+      lines.push(`BACKLOG_FEED_APPROVED ${id}: the owner approved it; it now works within its scope`);
+      continue;
+    }
     const itemId = followUp ?? id;
     const brief = join(dir(d.stateDir), "intake", `${itemId}.md`);
     writeAtomic(brief, feedBrief(todo, itemId, approved) + (followUp ? `\n[앞 단계] 승인 전 초안 레인 ${id}이 이미 끝났다. 그 보고서(${old?.done ?? "?"})의 초안을 먼저 읽고 이어서 한다.\n` : ""));
@@ -638,6 +646,13 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
       }
       const item = readItem(d.stateDir, queued.id);
       if (!item || item.status !== "open" || item.ask || item.held) continue;
+      if (laneOf(item.id)) {
+        const why = `lane ${item.id} is already registered (another lane holds this key); add it again under a new id`;
+        save(d.stateDir, logged(item, at, `held: ${why}`, { held: why }));
+        d.inbox("backlog-held", `backlog-held-${item.id}-${at}`, `BACKLOG_HELD ${item.id} (${item.title}): ${why}`);
+        lines.push(`BACKLOG_HELD ${item.id}: ${why}`);
+        continue;
+      }
       const full = await hostReserve(d.host, item.id, d.now());
       if (full) {
         quiet.push(`BACKLOG_HOLD ${full}; ${waiting.length - tried} item(s) wait`);
@@ -657,7 +672,7 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
         const why = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 300);
         // a launch that registered the lane before failing (a startup error) still runs as that lane
         const lane = (await d.lanes()).find((l) => l.key === item.id);
-        if (lane && isOpenLane(lane)) {
+        if (lane && isOpenLane(lane) && Date.parse(lane.openedAt) >= Date.parse(at)) {
           save(d.stateDir, logged(item, at, `started with an error: ${why}`, { status: "running", pane: lane.pane ?? "?" }));
           d.inbox("backlog-start", `backlog-start-${item.id}-${at}`, `BACKLOG_STARTED ${item.id} (${item.title}) in ${lane.pane ?? "?"} with an error: ${why}`);
           lines.push(`BACKLOG_STARTED ${item.id} p${item.priority} ${lane.pane ?? "?"} with an error: ${why}`);
