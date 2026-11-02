@@ -423,7 +423,7 @@ In the Dori's own session, arm these as persistent monitors (`references/setup.m
 |---|---|---|
 | owner messages and answers | `tail -n 0 -F ~/.dori/state/discord/inbox.jsonl` | `^\{` |
 | sessions waiting on a human | `tail -n 0 -F ~/.dori/state/session-events.jsonl` | `^\{` |
-| lane sweeps | `tail -n 0 -F ~/.dori/dori-lanes.log` | `LANE_\|DEAD_PANE\|HOST_GUARD ALERT\|NUDGED\|POSTED\|NO-REPORT\|FAIL\|STUCK\|OWNER_CHECK\|ROLLOVER_\|RESEARCH_NOT_STARTED\|NOT_SUBMITTED\|SAME_FIX` |
+| lane sweeps | `tail -n 0 -F ~/.dori/dori-lanes.log` | `LANE_\|DEAD_PANE\|HOST_GUARD ALERT\|NUDGED\|POSTED\|NO-REPORT\|FAIL\|STUCK\|INTENT_CHECK\|ROLLOVER_\|RESEARCH_NOT_STARTED\|NOT_SUBMITTED\|SAME_FIX` |
 | listener health | `tail -n 0 -F ~/.dori/inbound.log ~/.dori/session-watch.log` | `FATAL\|_FAIL\|SESSION-WATCH-FAIL` |
 | KakaoTalk (only with `DORI_KAKAO_SELF_ID`) | `PATH=/absolute/node/bin:$PATH bun <fork>/skills/dori-mode/setups/discord-aoe/kakao-watch.ts` | `KAKAO_(MSG\|NEW_ROOM\|WATCH_OFF\|[A-Z_]*FAIL)` |
 

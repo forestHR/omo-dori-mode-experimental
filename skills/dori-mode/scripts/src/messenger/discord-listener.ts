@@ -87,10 +87,6 @@ export type InboxMessage = {
   // with the message even when no lane brief carries them; directives_error when the ledger could not be read
   readonly directives?: readonly string[];
   readonly directives_error?: string;
-  // the owner's message: the lead's own memory notes it points at (path and description), memory_error when the memory
-  // repo could not be read
-  readonly memory?: readonly string[];
-  readonly memory_error?: string;
 };
 
 export type InboxAnswer = {
@@ -137,8 +133,6 @@ export type ListenerDeps = {
   readonly transcribe?: (url: string, filename: string) => Promise<string>;
   // the ledger lines an owner message is about (dori inbound discord: textDirectives, at most HINT_LIMIT); it may throw
   readonly hints?: (text: string) => readonly string[];
-  // the lead's memory notes an owner message points at (dori inbound discord: recallNotes, at most RECALL_LIMIT); it may throw
-  readonly recall?: (text: string) => readonly string[];
 };
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 200);
@@ -308,7 +302,6 @@ export class DiscordListener {
     const said = (transcript ?? m.content ?? "").trim();
     const owners = Boolean(said) && scope !== "pair-bot" && scope !== "watch" && !unknownRecording;
     const hints = this.d.hints && owners ? this.hintsFor(m.id, said) : {};
-    const recalled = this.d.recall && owners ? this.memoryFor(m.id, said) : {};
     const note = open.length ? `card ${open.join(", ")} still open, owner replied in text: resolve it with dori resolve ${open[0]} --answer "<the answer, short>" so the card folds` : "";
     this.append({
       ts: m.timestamp,
@@ -326,7 +319,6 @@ export class DiscordListener {
       ...(scope === "mention" ? { note: MENTION_NOTE, link: `https://discord.com/channels/${this.d.guild}/${m.channel_id}/${m.id}` } : {}),
       ...(scope === "watch" ? { note: WATCH_NOTE, link: `https://discord.com/channels/${this.d.guild}/${m.channel_id}/${m.id}` } : {}),
       ...hints,
-      ...recalled,
     });
     if (newer(m.id, this.cursor)) this.cursor = m.id;
     this.d.log(`INBOUND discord-${scope} ${m.channel_id} ${m.id} ${viaWebhook ? `${this.d.owner} via=owner-webhook` : m.author.id} ${JSON.stringify((transcript ?? m.content).slice(0, 200))}`);
@@ -342,17 +334,6 @@ export class DiscordListener {
     } catch (e) {
       this.d.log(`DISCORD_DIRECTIVES_FAIL ${id} ${errText(e)}`);
       return { directives_error: `${errText(e)}; read the ledger with dori directives` };
-    }
-  }
-
-  // like hintsFor: a memory that cannot be read never holds the message back
-  private memoryFor(id: string, text: string): { memory?: readonly string[]; memory_error?: string } {
-    try {
-      const lines = this.d.recall?.(text) ?? [];
-      return lines.length ? { memory: lines } : {};
-    } catch (e) {
-      this.d.log(`DISCORD_MEMORY_FAIL ${id} ${errText(e)}`);
-      return { memory_error: errText(e) };
     }
   }
 

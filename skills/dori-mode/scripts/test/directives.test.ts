@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
+import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
 import { APPLIED_HEADING, briefGaps, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
@@ -327,7 +327,7 @@ const laneOf = async (deps: Awaited<ReturnType<typeof ledgerDeps>>, key: string,
   return lane;
 };
 
-test("directives apply: a lane launched before the ledger gets what its brief lacks, sent and added to the brief once; owner-check then reads no gap", async () => {
+test("directives apply: a lane launched before the ledger gets what its brief lacks, sent and added to the brief once; the audit then reads no gap", async () => {
   const deps = await ledgerDeps({ backend: "aoe" });
   const ledger = loadLedger(deps.config);
   const blocks = { "eight-steps": await eightSteps(), "ui-steps": await uiSteps() };
@@ -352,7 +352,7 @@ test("directives apply: a lane launched before the ledger gets what its brief la
   expect(text.indexOf(APPLIED_HEADING)).toBeLessThan(text.indexOf("## Past signals"));
   expect(text.endsWith("## Lane footer (written by dori launch)\n- Key: old.\n")).toBe(true);
   expect(count(text, directiveText(options))).toBe(1);
-  // owner-check's gap check reads the section as part of the brief; the scope did not change with the added words
+  // the audit's gap check reads the section as part of the brief; the scope did not change with the added words
   expect(briefGaps(lane, text, ledger, "hr35-isaac", blocks)).toEqual([]);
   expect(scopeContext(text, ledger, { repo: "hr35-isaac" }).kinds).toEqual(scopeContext(old, ledger, { repo: "hr35-isaac" }).kinds);
   // words of a directive added there are not the lane's work: a section full of UI words does not make it UI work
@@ -404,7 +404,7 @@ test("directives check: a reviewer of another family reads each new prompt again
     asked.push(argv.at(-1) ?? "");
     return { code: 0, out: reply, err: "" };
   };
-  const deps = { ...base, run, config: { ...base.config, defaultModel: "anthropic/claude-opus-5-5", reviewers: { ...base.config.reviewers, models: ["anthropic/claude-x", "openai/gpt-6"] }, explore: { ...base.config.explore, modelsCommand: [] }, autoSignals: { ...base.config.autoSignals, ownerCheck: { ...base.config.autoSignals.ownerCheck, first: "" } } } };
+  const deps = { ...base, run, config: { ...base.config, defaultModel: "anthropic/claude-opus-5-5", reviewers: { ...base.config.reviewers, models: ["anthropic/claude-x", "openai/gpt-6"], first: "" }, explore: { ...base.config.explore, modelsCommand: [] } } };
   const ledger = loadLedger(deps.config);
   const owner = ledger.entries.filter((e) => e.by === "owner" && e.words && e.prompt);
   const ok = await checkMeaning(deps, ledger);
@@ -507,6 +507,11 @@ test("directive links live in one place: the local ledger's links of fork ids ar
   expect(peer.entries.some((e) => e.id === "not-merged-here")).toBe(false);
   // the fork ledger itself still holds no link
   expect(await Bun.file(COMMON_LEDGER).text()).not.toMatch(/discord(?:app)?\.com/);
+});
+
+test("the memory repo of a lead is its own account's: <cwd name>-<sha256(cwd) 8>/repo under that home", () => {
+  expect(memoryRepoFor("/home/moodori/Documents/moodori", "/home/moodori")).toBe("/home/moodori/.omo/memory/agents/moodori-c8186be9/repo");
+  expect(memoryRepoFor("/home/oriclaw/Documents/zzangdori", "/home/oriclaw")).toBe("/home/oriclaw/.omo/memory/agents/zzangdori-eccee897/repo");
 });
 
 test("directive-audit: a line of the lead's memory that keeps a ledger directive a second time, not as a pointer 장부:<id>, is DIRECTIVE_DUPLICATE", async () => {

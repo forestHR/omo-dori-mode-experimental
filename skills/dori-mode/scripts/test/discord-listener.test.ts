@@ -41,7 +41,7 @@ const fakeTimers = () => {
 let state: ReturnType<typeof withState>;
 afterEach(() => state?.done());
 
-const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?: string; transcribe?: (url: string) => Promise<string>; respond?: (req: HttpRequest) => HttpResponse | undefined; autoUnEye?: boolean; ownerWebhook?: string; pairChannel?: string; pairBots?: readonly string[]; watchChannels?: string[]; watchBots?: string[]; watchMatch?: RegExp; shadow?: boolean; mentionRoleIds?: string[]; gate?: (req: HttpRequest) => Promise<void> | undefined; hints?: (text: string) => readonly string[]; recall?: (text: string) => readonly string[] } = {}) => {
+const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?: string; transcribe?: (url: string) => Promise<string>; respond?: (req: HttpRequest) => HttpResponse | undefined; autoUnEye?: boolean; ownerWebhook?: string; pairChannel?: string; pairBots?: readonly string[]; watchChannels?: string[]; watchBots?: string[]; watchMatch?: RegExp; shadow?: boolean; mentionRoleIds?: string[]; gate?: (req: HttpRequest) => Promise<void> | undefined; hints?: (text: string) => readonly string[] } = {}) => {
   state = withState();
   const seen: HttpRequest[] = [];
   const http: Http = async (req) => {
@@ -69,7 +69,7 @@ const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?
   const t = fakeTimers();
   const logs: string[] = [];
   const fatal: number[] = [];
-  const deps: ListenerDeps = { dc, cards, open: () => gw.conn, token: "BOT", guild: GUILD, channel: CHANNEL, owner: OWNER, ...(opts.ownerWebhook !== undefined ? { ownerWebhook: opts.ownerWebhook } : {}), ...(opts.pairChannel ? { pairChannel: opts.pairChannel, pairBots: opts.pairBots ?? [] } : {}), ...(opts.watchChannels ? { watchChannels: opts.watchChannels, watchBots: opts.watchBots ?? [] } : {}), ...(opts.watchMatch ? { watchMatch: opts.watchMatch } : {}), ...(opts.shadow ? { shadow: true } : {}), words, inboxFile, timers: t.timers, now: () => Date.parse("2026-01-02T03:04:00Z"), log: (l) => logs.push(l), fatal: (c) => fatal.push(c), ...(opts.transcribe ? { transcribe: opts.transcribe } : {}), ...(opts.hints ? { hints: opts.hints } : {}), ...(opts.recall ? { recall: opts.recall } : {}) };
+  const deps: ListenerDeps = { dc, cards, open: () => gw.conn, token: "BOT", guild: GUILD, channel: CHANNEL, owner: OWNER, ...(opts.ownerWebhook !== undefined ? { ownerWebhook: opts.ownerWebhook } : {}), ...(opts.pairChannel ? { pairChannel: opts.pairChannel, pairBots: opts.pairBots ?? [] } : {}), ...(opts.watchChannels ? { watchChannels: opts.watchChannels, watchBots: opts.watchBots ?? [] } : {}), ...(opts.watchMatch ? { watchMatch: opts.watchMatch } : {}), ...(opts.shadow ? { shadow: true } : {}), words, inboxFile, timers: t.timers, now: () => Date.parse("2026-01-02T03:04:00Z"), log: (l) => logs.push(l), fatal: (c) => fatal.push(c), ...(opts.transcribe ? { transcribe: opts.transcribe } : {}), ...(opts.hints ? { hints: opts.hints } : {}) };
   const listener = new DiscordListener(deps);
   const inbox = () => (existsSync(inboxFile) ? readFileSync(inboxFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
   const calls = () => seen.map((r) => `${r.method} ${r.url.replace("https://discord.com/api/v10", "")}`);
@@ -214,25 +214,6 @@ test("the owner's message carries the directives its words call; a pair-bot post
     ["1004", null, "ledger.json is not readable JSON; read the ledger with dori directives"],
   ]);
   expect(logs).toContain("DISCORD_DIRECTIVES_FAIL 1004 ledger.json is not readable JSON");
-});
-
-test("the owner's message carries the lead's memory notes it points at; a pair-bot post does not; a memory that cannot be read still writes the row", async () => {
-  let broken = false;
-  const recall = (text: string) => {
-    if (broken) throw new Error("memory repo /x does not exist");
-    return text.includes("카드") ? ["reference/kimm-card-ai-billing.md: 카드 미결재 중 Claude·GPT 건 결재문서 정리 절차"] : [];
-  };
-  const { listener, inbox, logs } = setup(() => ({}), { pairChannel: "900000000000000009", pairBots: [OTHER_BOT], recall });
-  await listener.onMessage(msg("1001", { content: "그리고 카드처리해 서류 준비하고 있어" }));
-  await listener.onMessage(msg("1003", { channel_id: "900000000000000009", author: { id: OTHER_BOT, bot: true }, content: "카드 건 넘겨" }));
-  broken = true;
-  await listener.onMessage(msg("1004", { content: "카드 다시" }));
-  expect(inbox().map((r) => [r.id, r.memory ?? null, r.memory_error ?? null])).toEqual([
-    ["1001", ["reference/kimm-card-ai-billing.md: 카드 미결재 중 Claude·GPT 건 결재문서 정리 절차"], null],
-    ["1003", null, null],
-    ["1004", null, "memory repo /x does not exist"],
-  ]);
-  expect(logs).toContain("DISCORD_MEMORY_FAIL 1004 memory repo /x does not exist");
 });
 
 test("a message in a thread under the channel counts, one under another channel does not, and DMs count", async () => {

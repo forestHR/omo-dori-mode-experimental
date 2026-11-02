@@ -20,13 +20,12 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-import { ChallengeError, checkReviewers, reviewers } from "./challenge.ts";
+import { ChallengeError, checkReviewers, reviewerOrder, reviewers } from "./challenge.ts";
 import { fill } from "./config.ts";
 import { laneDirectiveWords } from "./directive-audit.ts";
 import { ackFile, launchOf, LEAD_UNDERSTOOD_HEADINGS, manifestPath, type MonitorSpec, openGoal, readManifest, sameCommand } from "./handover.ts";
 import { type LaneFacts, type LaneHandoverDeps, missingFrom, UNDERSTOOD_HEADINGS } from "./lane-handover.ts";
 import { launchLedger } from "./launch.ts";
-import { ownerModels } from "./owner-check.ts";
 import { sendVerified } from "./panes.ts";
 import { covered, fillGaps, flat, type Missing, quoted, section, words as wordsIn } from "./restatement.ts";
 import { type Candidate, inboxMessages, leadLines, type OwnerProof, ownerQuotes, QUOTE, readRollovers, type Said, userLines } from "./rollover.ts";
@@ -309,14 +308,14 @@ export const parseVerdicts = (reply: string, n: number): (Verdict | undefined)[]
   return out;
 };
 
-// The reviewer models of the owner check (another family than the session's), in order, until one answers for at least
+// The reviewer models (reviewers.first first, another family than the session's), in order, until one answers for at least
 // half of the items; an item it skipped counts as STANDING MEDIUM.
 export const reviewerClassify = (deps: LaneHandoverDeps): Classify => async (items, ctx) => {
-  const cfg = deps.config.autoSignals.ownerCheck;
+  const cfg = deps.config.reviewers;
   const failures: string[] = [];
   let checks: Awaited<ReturnType<typeof checkReviewers>> = [];
   try {
-    checks = await checkReviewers(deps, reviewers(ctx.model, ownerModels(deps.config.reviewers.models, cfg.first)));
+    checks = await checkReviewers(deps, reviewers(ctx.model, reviewerOrder(cfg.models, cfg.first)));
   } catch (e) {
     if (!(e instanceof ChallengeError)) throw e;
     failures.push(e.message);

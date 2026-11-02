@@ -16,7 +16,7 @@ import type { Lane } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { watchLog } from "./watch-log.ts";
 
-// dori directive-audit and owner-check: a launched lane's brief and the lead's actions against the directive ledger.
+// dori directive-audit and intent-check: a launched lane's brief and the lead's actions against the directive ledger.
 
 export const blockTexts = async (): Promise<Record<DirectiveBlock, string>> => ({ "eight-steps": await eightSteps(), "ui-steps": await uiSteps() });
 
@@ -28,7 +28,7 @@ const readBrief = async (path: string): Promise<string> => {
   return (await f.exists()) ? await f.text() : "";
 };
 
-// The lead's [LEAD] lines typed into the lane since it opened, read as owner-check reads them: from the lane's own session
+// The lead's [LEAD] lines typed into the lane since it opened, read as intent-check reads them: from the lane's own session
 // files (those that carry its reports; the lead's sessions, which get every lane's reports, are not its own).
 const laneRelays = async (deps: Pick<FlowDeps, "config">, lane: Lane, files?: readonly string[]): Promise<ReportLine[]> => {
   const lead = new Set(leadSessionFiles(deps.config.scorecard.leadSessions, deps.config.stateDir));
@@ -119,7 +119,7 @@ export const enteredAt = async (deps: Pick<FlowDeps, "run" | "config">, ledger: 
   return out;
 };
 
-// The directives in scope for a lane, as the owner's words: owner-check reads them next to the brief.
+// The directives in scope for a lane, as the owner's words: intent-check reads them next to the brief.
 export const laneDirectiveWords = async (deps: Pick<FlowDeps, "run" | "config">, lane: Lane, ledger: Ledger): Promise<string[]> => {
   const brief = await readBrief(briefOf(lane, deps.config.defaultCwd));
   const ctx = scopeContext(brief, ledger, { ui: lane.ui, repo: await laneRepo(deps, lane.cwd ?? deps.config.defaultCwd) });
@@ -146,7 +146,7 @@ export const applyMessage = (brief: string, texts: readonly string[]): string =>
 
 export type ApplyResult = { readonly lines: readonly string[]; readonly added: readonly string[]; readonly ok: boolean; readonly message?: string };
 
-// The directives in scope the lane's brief lacks now (scope judged again from its brief, cwd repo and --ui, as owner-check
+// The directives in scope the lane's brief lacks now (scope judged again from its brief, cwd repo and --ui, as intent-check
 // does), in launch's format: an owner directive as [형 지침 id, date] and its prompt, a lead rule as [리드 규칙 id] and its
 // rule, a built-in block as its text. They are typed into the lane as one [LEAD] message; once it is SUBMITTED the same
 // texts go into the brief under APPLIED_HEADING and DIRECTIVES_APPLIED into the watch log. A require directive (the four
@@ -217,7 +217,7 @@ type MeaningCache = Record<string, { readonly id: string; readonly model: string
 export const meaningCachePath = (stateDir: string): string => join(stateDir, "directives", "meaning.json");
 
 // Every owner entry with a prompt, against his words, by a reviewer of another family than the lead's model (reviewers.models,
-// ownerCheck.first first, the ownerCheck command). A SAME verdict is kept per (id, original, words, prompt) in the state
+// reviewers.first first, the reviewers command). A SAME verdict is kept per (id, original, words, prompt) in the state
 // directory, so only a new or changed prompt is read again. Lines: DIRECTIVES_MEANING_OK, DIRECTIVES_BAD (meaning changed),
 // DIRECTIVES_MEANING_FAILED (no reviewer answered: not checked, and the check fails).
 export const checkMeaning = async (deps: Pick<FlowDeps, "run" | "config" | "clock">, ledger: Ledger): Promise<{ readonly lines: readonly string[]; readonly ok: boolean }> => {
@@ -228,7 +228,7 @@ export const checkMeaning = async (deps: Pick<FlowDeps, "run" | "config" | "cloc
   const fresh = todo.filter((e) => !cache[meaningKey(e)]);
   const lines: string[] = todo.filter((e) => cache[meaningKey(e)]).map((e) => `DIRECTIVES_MEANING_OK ${e.id} (read before by ${cache[meaningKey(e)]?.model})`);
   if (!fresh.length) return { lines, ok: true };
-  const oc = deps.config.autoSignals.ownerCheck;
+  const oc = deps.config.reviewers;
   const listed = reviewers(deps.config.defaultModel, oc.first ? [oc.first, ...deps.config.reviewers.models.filter((m) => m !== oc.first)] : deps.config.reviewers.models);
   let calls: string[] = [];
   try {
@@ -341,6 +341,13 @@ export const leadThreadGaps = (map: ThreadMap, lanes: readonly Pick<Lane, "threa
     out.push({ lane: `thread:${id}`, id: "-", line: `DIRECTIVE_LEAD thread:${id} -: the lead's thread "${t.title}" (${new Date(at).toISOString()}) was opened without reading the directive ledger and no lane works in it; dori thread open reads it now, or open such work as a lane` });
   }
   return out;
+};
+
+// The omo memory repo of a session in cwd, under that account's home: <cwd name>-<sha256(cwd) 8>/repo (dori directive-audit
+// reads the lead's for DIRECTIVE_DUPLICATE when directives.memory is not set).
+export const memoryRepoFor = (cwd: string, home: string): string => {
+  const slug = basename(cwd).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "cwd";
+  return join(home, ".omo", "memory", "agents", `${slug}-${createHash("sha256").update(cwd).digest("hex").slice(0, 8)}`, "repo");
 };
 
 // The lead memory files where his standing directives were kept before the ledger: system/*.md and reference/*.md, not

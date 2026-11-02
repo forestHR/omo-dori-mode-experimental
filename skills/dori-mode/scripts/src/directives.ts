@@ -18,7 +18,7 @@ export type DirectiveMode = (typeof DIRECTIVE_MODES)[number];
 export const DIRECTIVE_BLOCKS = ["eight-steps", "ui-steps"] as const;
 export type DirectiveBlock = (typeof DIRECTIVE_BLOCKS)[number];
 // what a lead directive checks: the lane opened with a work thread; the owner's standing directives of the window are in the
-// ledger; none: on record for the lead and owner-check, with no machine check
+// ledger; none: on record for the lead and intent-check, with no machine check
 export const LEAD_CHECKS = ["thread", "ledger", "none"] as const;
 export type LeadCheck = (typeof LEAD_CHECKS)[number];
 
@@ -552,7 +552,7 @@ export const missingLines = (key: string, plan: DirectivePlan): string[] =>
   plan.missing.map(({ e, patterns, why }) => `LAUNCH_DIRECTIVE_MISSING ${key} ${e.id}: ${e.name} applies (${why}) and the brief does not have it (${patterns.map((p) => `/${p}/`).join(", ")}); write it in, or launch with --waive ${e.id} "<reason>"`);
 export const waivedLines = (key: string, plan: DirectivePlan): string[] => plan.waived.map(({ e, reason }) => `LAUNCH_DIRECTIVE_WAIVED ${key} ${e.id}: ${e.name} left out on the lead's word: ${reason}`);
 
-// --- after the launch: owner-check and the daily audit ---
+// --- after the launch: intent-check and the daily audit ---
 
 export type Gap = { readonly lane: string; readonly id: string; readonly line: string };
 
@@ -658,7 +658,7 @@ export const promptTable = (ledger: Ledger): string => {
 export const ledgerTable = (ledger: Ledger): string => {
   const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
   const scope = (s: DirectiveScope) => [s.all ? "모든 lane" : "", s.ui ? "UI" : "", ...(s.kinds ?? []), ...(s.repos ?? []).map((r) => `저장소 ${r}`), ...(s.keywords ?? []).map((k) => `낱말 /${k}/`)].filter(Boolean).join(", ");
-  const how = (e: Directive) => (e.mode === "inject" ? (e.block ? `주입(${e.block})` : e.via ? `주입(포인터 ${e.via}로)` : "주입") : e.mode === "require" ? "브리프 확인(없으면 멈춤)" : e.check === "none" ? "리드 행동(기계 확인 없음, owner-check가 읽음)" : `리드 행동 확인(${e.check})`);
+  const how = (e: Directive) => (e.mode === "inject" ? (e.block ? `주입(${e.block})` : e.via ? `주입(포인터 ${e.via}로)` : "주입") : e.mode === "require" ? "브리프 확인(없으면 멈춤)" : e.check === "none" ? "리드 행동(기계 확인 없음, intent-check가 읽음)" : `리드 행동 확인(${e.check})`);
   const words = (e: Directive) => (e.words ? `"${e.words}"` : e.block ? `(블록 원문: ${e.block === "eight-steps" ? "references/sessions.md 1. 조사 … 8. 보고" : "references/ui-work.md [UI 지침] 1)…7)"})` : e.by === "lead" ? "-" : "(원문 없음)");
   return [
     "| id | 이름 | 누가 | 판단 근거 | 형 원문(지침 문장) | 지침문(브리프에 들어감) | 계기가 된 형 말 | 규칙 | 날짜 | 출처 | 적용 범위 | 강제 방식 | 층 | 폐기 |",

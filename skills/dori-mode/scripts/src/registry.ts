@@ -42,7 +42,7 @@ export type ExplorationRecord = { readonly at: string; readonly metric: string; 
 // result is set once the check decided (RESEARCH_STARTED or RESEARCH_NOT_STARTED)
 // signal: the failed attempts on that metric when it was sent (the stuck count at rung 3)
 export type ResearchSent = { readonly at: string; readonly sentAt: number; readonly probe: string; readonly metric: string; readonly signal: number; readonly result?: "started" | "not-started" };
-// the rung one metric (or "@context", the owner check) reached on the stuck ladder, at count n, in the session of pane;
+// the rung one metric (or "@context", the intent check) reached on the stuck ladder, at count n, in the session of pane;
 // report: for "@context", the report the last finding rested on (one report moves the rung once)
 export type StuckMark = { readonly rung: number; readonly n: number; readonly at: string; readonly pane?: string; readonly report?: string };
 
@@ -123,9 +123,9 @@ export type Lane = {
   readonly inferred?: { readonly at: string; readonly counts: Readonly<Record<string, number>>; readonly cycles?: Readonly<Record<string, readonly string[]>>; readonly passedAt?: Readonly<Record<string, string>>; readonly baseline?: Readonly<Record<string, number>>; readonly lastEventAt?: string };
   // the stuck ladder: the rung each metric reached, so each rung change alerts once
   readonly stuck?: Readonly<Record<string, StuckMark>>;
-  // the last dori owner-check: when, up to which report, how many today, by which reviewer, what it found (finding: the first
-  // finding, for the re-read the lead may send)
-  readonly ownerCheck?: { readonly at: string; readonly lastReportAt: string; readonly day: string; readonly today: number; readonly model: string; readonly kinds: readonly string[]; readonly finding?: string; readonly rereadAt?: string };
+  // the last dori intent-check: when, up to which report, by which reviewer, what it found (finding: the first finding, for
+  // the re-read the lead may send)
+  readonly intentCheck?: { readonly at: string; readonly lastReportAt: string; readonly model: string; readonly kinds: readonly string[]; readonly finding?: string; readonly rereadAt?: string };
   readonly receipt?: unknown;
   // the last LANE_DIED for this pane (lane-death.ts): reason for the lead, why for the log, told once the lead had it
   readonly died?: LaneDied;
@@ -146,6 +146,16 @@ export const withStatus = (lane: Lane, status: LaneStatus, note: string, at: str
   history: [...(lane.history ?? []), { at, status, note }],
 });
 
+// A lane recorded before 2026-11-02 keeps its last check under ownerCheck (the periodic owner check, removed then; dori
+// intent-check wrote there too): it is read as intentCheck, so a pending finding can still be re-read and a confirmed
+// re-read still makes the next finding rung 4. The old field is not written back.
+type Recorded = Lane & { readonly ownerCheck?: Lane["intentCheck"] };
+const loaded = (raw: Recorded): Lane => {
+  const { ownerCheck: old, ...lane } = raw;
+  if (!old || lane.intentCheck) return lane;
+  return { ...lane, intentCheck: { at: old.at, lastReportAt: old.lastReportAt, model: old.model, kinds: old.kinds, ...(old.finding ? { finding: old.finding.replace(/^OWNER_CHECK /, "INTENT_CHECK ") } : {}), ...(old.rereadAt ? { rereadAt: old.rereadAt } : {}) } };
+};
+
 export class Registry {
   readonly dir: string;
   constructor(stateDir: string) {
@@ -158,7 +168,7 @@ export class Registry {
 
   async read(key: string): Promise<Lane | null> {
     const f = Bun.file(this.path(key));
-    return (await f.exists()) ? ((await f.json()) as Lane) : null;
+    return (await f.exists()) ? loaded((await f.json()) as Recorded) : null;
   }
 
   // temp file + rename so a concurrent reader never sees a half-written lane
@@ -179,7 +189,7 @@ export class Registry {
   async list(): Promise<Lane[]> {
     mkdirSync(this.dir, { recursive: true });
     const lanes: Lane[] = [];
-    for (const f of readdirSync(this.dir)) if (f.endsWith(".json")) lanes.push((await Bun.file(join(this.dir, f)).json()) as Lane);
+    for (const f of readdirSync(this.dir)) if (f.endsWith(".json")) lanes.push(loaded((await Bun.file(join(this.dir, f)).json()) as Recorded));
     return lanes;
   }
 
