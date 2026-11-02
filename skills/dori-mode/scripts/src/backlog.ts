@@ -202,7 +202,7 @@ const knownItem = (stateDir: string, id: string): BacklogItem => {
 
 export const dropItem = (stateDir: string, id: string, why: string, at: string): BacklogItem => {
   const item = knownItem(stateDir, id);
-  if (item.status === "running") throw new BacklogError(`item ${id} is running as a lane (${item.pane ?? "?"}); close the lane first (dori close ${id})`);
+  if (item.status === "running") throw new BacklogError(`item ${id} is running as a lane (${item.pane ?? "?"}); close the lane first (dori close ${item.lane ?? laneKeyOf(id)})`);
   const dropped = logged(item, at, `dropped: ${why}`, { status: "dropped" });
   save(stateDir, dropped);
   return dropped;
@@ -599,7 +599,7 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     const itemId = followUp ?? id;
     const brief = join(dir(d.stateDir), "intake", `${itemId}.md`);
     writeAtomic(brief, feedBrief(todo, itemId) + (followUp ? `\n[앞 단계] 승인 전 초안 레인 ${id}이 이미 끝났다. 그 보고서(${old?.done ?? "?"})의 초안을 먼저 읽고 이어서 한다.\n` : ""));
-    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: card ? "4" : "6", by: "feed", source: ref, feedSnapshot: snapshot, feedHash: hash, ...(card && (!followUp || followApproved) ? { approval: { at, hash, by: "card" as const } } : {}), ...(followUp ? { followUpOf: id } : {}), noThread: "대시보드에서 온 할 일(진행은 대시보드에서 봄)" }, { registered: false, at });
+    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: card ? "4" : "6", by: "feed", source: ref, ...(followUp && afterDraft?.readOnly ? { readOnly: true } : {}), feedSnapshot: snapshot, feedHash: hash, ...(card && (!followUp || followApproved) ? { approval: { at, hash, by: "card" as const } } : {}), ...(followUp ? { followUpOf: id } : {}), noThread: "대시보드에서 온 할 일(진행은 대시보드에서 봄)" }, { registered: false, at });
     if (followUp && !followApproved) {
       // the card was given for content that has changed since: the follow-up asks him about the content as it is now
       const made = readItem(d.stateDir, itemId);

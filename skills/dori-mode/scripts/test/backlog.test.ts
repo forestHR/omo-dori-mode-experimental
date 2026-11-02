@@ -783,3 +783,31 @@ test("a launch whose session failed after it opened the work thread is tried aga
   expect(opened.length).toBe(1);
   expect((await ld.registry.read("bl-thr1"))?.thread).toBe("discord:100000000000000101");
 });
+
+test("a draft the lead made read-only stays read-only in its approved follow-up", async () => {
+  // Given: a feed draft replaced --read-only runs, the owner's card comes, the lane closes
+  const entry = (approved: boolean) => ({ todo_id: "pb-676767676767-1", title: "ro", status: "진행", ...(approved ? { approved_at: "2026-11-02T15:00:00Z", auto_applied: false } : {}) });
+  await feedSweep([entry(false)]);
+  addItem(state, { id: "todo-pb-676767676767-1", title: "ro", brief, done: "file /tmp/x", readOnly: true }, { registered: false, at: "2026-11-02T16:00:00Z" });
+  await backlogTick(deps(), { force: true });
+  await feedSweep([entry(true)]);
+  lanes = [lane(laneKeyOf("todo-pb-676767676767-1"), true)];
+  await backlogTick(deps(), { force: true });
+  // When
+  await feedSweep([entry(true)]);
+  await backlogTick(deps(), { force: true });
+  // Then
+  expect(readItem(state, "appr-pb-676767676767-1")?.readOnly).toBe(true);
+  expect(sentBrief("appr-pb-676767676767-1")).toContain(READ_ONLY_RULE);
+  expect(sentBrief("appr-pb-676767676767-1")).not.toContain(APPROVED_RULE);
+});
+
+test("dropping a running item names the lane to close by its real key", async () => {
+  // Given
+  add("dr1");
+  await backlogTick(deps());
+  // When
+  const msg = (() => { try { dropItem(state, "dr1", "lead", "t"); return "dropped"; } catch (e) { return String(e); } })();
+  // Then
+  expect(msg).toContain("dori close bl-dr1");
+});
