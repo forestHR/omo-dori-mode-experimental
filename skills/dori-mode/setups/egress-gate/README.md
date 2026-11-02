@@ -298,7 +298,8 @@ owner-message link, pre-change snapshot where applicable, and approval-card link
 when approved. A write on a dashboard order has the order link as `owner_message` and
 `owner_order` `{id, url, body_sha256, created_at, device}` (`url` is `owner_order.link` with `{id}`
 filled in, else the API address), next to the written resource's title, so each change can be
-matched with the order's text. Logs exclude request bodies, authorization and query credentials;
+matched with the order's text. A write on a card-approved todo has the todo link as `owner_message` and
+`owner_todo` `{id, url, approved_at, card}` (`card` the approval card's Discord link). Logs exclude request bodies, authorization and query credentials;
 snapshots and parked bodies are confidential state, not diagnostic logs.
 New-resource creation has no previous state, so its snapshot is null.
 
