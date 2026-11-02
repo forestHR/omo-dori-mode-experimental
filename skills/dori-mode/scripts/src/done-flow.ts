@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { closeAoeSession, paneActivity, paneLife } from "./aoe.ts";
 import { autoturnTick } from "./autoturn.ts";
 import { laneBackground } from "./background.ts";
-import { type DoriConfig, fill } from "./config.ts";
+import { BACKUP_REMOTE, type DoriConfig, fill } from "./config.ts";
 import type { Question } from "./messenger/discord-cards.ts";
 import { laneDeathTick } from "./lane-death.ts";
 import { leadDownTick } from "./lead-down.ts";
@@ -248,6 +248,16 @@ const GIT_REPO_ENV_CLEARED: Readonly<Record<string, undefined>> = Object.fromEnt
   ["GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"].map((k) => [k, undefined]),
 );
 
+// owner/name of a GitHub URL in its https, ssh or scp-like form (git@github.com:owner/name.git), lower case
+const githubRepo = (url: string): string | undefined => /^(?:https:\/\/|ssh:\/\/)?(?:[^@/]+@)?github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/i.exec(url.trim())?.[1]?.toLowerCase();
+
+// the backup remote counts only when this Dori names a backup repo and the remote's configured URL is that repo
+const isBackupRemote = async (git: Runner, wt: string, repo: string): Promise<boolean> => {
+  if (!repo) return false;
+  const url = await git(["git", "-C", wt, "config", "--get", `remote.${BACKUP_REMOTE}.url`]);
+  return url.code === 0 && githubRepo(url.out) === repo.toLowerCase();
+};
+
 export const unpushedWork = async (deps: FlowDeps, lane: Lane): Promise<string[]> => {
   const exists = deps.exists ?? existsSync;
   const reasons: string[] = [];
@@ -300,13 +310,19 @@ export const unpushedWork = async (deps: FlowDeps, lane: Lane): Promise<string[]
     // a cwd checkout with no remote at all (a Dori's own Documents repository) has nowhere to push its commits, so they
     // are not unpushed work; its uncommitted changes still are. Its history is still walked, so one git cannot read
     // stays unreadable. A lane's own worktree is checked as before.
+    // This Dori's stateGit backup remote (named backup, its URL this Dori's stateGit.backup.repo) takes only snapshots of
+    // HEAD on their own history, so it is no place to push either: a checkout with only that remote is one with no
+    // remote, and with a real remote besides, the commits are counted against the real one, never the snapshot refs.
     const remotes = own.length ? undefined : await git(["git", "-C", wt, "remote"]);
     if (remotes && remotes.code !== 0) {
       reasons.push(`unpushed work in ${wt} (git state unreadable)`);
       continue;
     }
-    const noRemote = remotes !== undefined && !remotes.out.trim();
-    let ahead = await git(["git", "-C", wt, "rev-list", "--count", "HEAD", ...(noRemote ? [] : ["--not", "--remotes"])]);
+    const names = remotes ? remotes.out.split("\n").map((n) => n.trim()).filter(Boolean) : [];
+    const snapshotOnly = names.includes(BACKUP_REMOTE) && (await isBackupRemote(git, wt, deps.config.stateGit.backup.repo));
+    const noRemote = remotes !== undefined && !names.some((n) => !(snapshotOnly && n === BACKUP_REMOTE));
+    const notPushed = noRemote ? [] : ["--not", ...(snapshotOnly ? [`--exclude=${BACKUP_REMOTE}/*`] : []), "--remotes"];
+    let ahead = await git(["git", "-C", wt, "rev-list", "--count", "HEAD", ...notPushed]);
     if (noRemote && ahead.code === 0) ahead = { code: 0, out: "0", err: "" };
     // a fresh repository's branch has no commit yet (an unborn HEAD): rev-list fails, but there is nothing to push;
     // it is unborn only when HEAD names a branch that resolves to no commit. A HEAD that resolves but cannot be read
