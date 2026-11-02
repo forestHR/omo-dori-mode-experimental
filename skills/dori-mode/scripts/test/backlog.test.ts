@@ -305,3 +305,22 @@ test("the day report comes once a day after backlog.dayReportAt in its time zone
   expect(after).toStartWith("BACKLOG_DAY 2026-11-02:");
   expect(twice).toBeUndefined();
 });
+
+test("a feed entry the owner approved by card runs within its own scope; one without approved_at only drafts", async () => {
+  // Given
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const todos = [
+    { todo_id: "pb-aaaaaaaaaaaa-1", title: "시뮬레이터 문제 3건 회신", status: "진행", approved_at: "2026-10-30T01:00:00Z" },
+    { todo_id: "pb-bbbbbbbbbbbb-1", title: "회의록에서 뽑힌 일", status: "진행" },
+  ];
+  // When
+  const lines = await feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  const approved = readItem(state, "todo-pb-aaaaaaaaaaaa-1");
+  const draft = readItem(state, "todo-pb-bbbbbbbbbbbb-1");
+  // Then
+  expect(lines).toEqual(["BACKLOG_INTAKE todo-pb-aaaaaaaaaaaa-1 (feed, owner-approved): 시뮬레이터 문제 3건 회신", "BACKLOG_INTAKE todo-pb-bbbbbbbbbbbb-1 (feed, draft only): 회의록에서 뽑힌 일"]);
+  expect([approved?.draftOnly, approved?.by, approved?.ask]).toEqual([undefined, "feed:approved", undefined]);
+  expect(readFileSync(approved?.brief ?? "", "utf8")).toContain("[쓰기 범위]");
+  expect([draft?.draftOnly, draft?.by]).toEqual([true, "feed"]);
+  expect(readFileSync(draft?.brief ?? "", "utf8")).toContain("[넘으면 안 되는 선] 읽기와 초안까지만");
+});

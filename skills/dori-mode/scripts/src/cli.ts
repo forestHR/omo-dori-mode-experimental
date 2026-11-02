@@ -115,7 +115,8 @@ const USAGE = `dori <command> [options]
                                        comes in (other Doris' #dori-pair posts by backlog.pairRepairPattern /
                                        pairRequestPattern, a request only with an owner message link that holds; the owner's
                                        orders by backlog.orderKinds; at each backlog.everyMin sweep the backlog.feedCommand
-                                       list as draft-only items), a running item whose lane closed is done (BACKLOG_DONE), an
+                                       list: an entry the owner approved by card works within its own scope, any other only
+                                       drafts), a running item whose lane closed is done (BACKLOG_DONE), an
                                        item with --ask puts one backlog-ask row in the lead's inbox and never starts before
                                        decide (BACKLOG_ASK), and the next open items start at once by priority through dori
                                        launch (its directives, eight steps and work thread; --thread new by default) while
