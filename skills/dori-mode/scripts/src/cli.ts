@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
-import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, readItem, takeRow, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree, tailOf } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
@@ -109,7 +109,7 @@ const USAGE = `dori <command> [options]
                                        stops the launch (LAUNCH_DIRECTIVE_MISSING, exit 4, nothing opened) unless
                                        --waive <id> "<reason>" (repeatable) leaves it out: LAUNCH_DIRECTIVE_WAIVED in the
                                        watch log and the registry, and discord.waiveText to the owner
-  backlog [list [--all]|add <id> --title T --brief FILE --done "..." [--priority 1-9] [--cwd DIR] [--thread REF|new | --no-thread "<reason>"] [--why-new R] [--goal "owner words"] [--tag T ...] [--ask "<question for the owner>"] [--read-only] [--owner-link URL] [--by owner|lead]|drop <id> [--reason R]|decide <id> [--question Q --hash H] --text "<the owner's answer>"|tick [--force]]
+  backlog [list [--all]|add <id> --title T --brief FILE --done "..." [--priority 1-9] [--cwd DIR] [--thread REF|new | --no-thread "<reason>"] [--why-new R] [--goal "owner words"] [--tag T ...] [--ask "<question for the owner>"] [--read-only] [--owner-link URL] [--by owner|lead]|drop <id> [--reason R]|decide <id> [--question Q --hash H] --text "<the owner's answer>"|tick [--force]|take <inbox row id>]
                                        the list of work the owner or the lead put by hand (no GitHub import): with
                                        config backlog.enabled, the freshness loop of dori-lanes runs a pass every tick: a
                                        running item whose lane closed is done (BACKLOG_DONE), an item with --ask puts one
@@ -823,7 +823,7 @@ const backlogDeps = (): TickDeps => ({
         return [];
       }
     });
-    const orders = orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows, now: realClock.now, inbox: backlogInbox });
+    const orders = orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows, now: realClock.now });
     if (!sweep || !config.backlog.feedCommand.length) return orders;
     const feed = async (): Promise<{ readonly todos: readonly FeedTodo[] } | { readonly why: string }> => {
       const r = await run(config.backlog.feedCommand.map((p) => p.replace(/^~(?=\/)/, homedir())), { timeoutMs: 120_000 });
@@ -1605,7 +1605,12 @@ try {
         } else if (sub === "show") {
           const item = readItem(config.stateDir, id ?? die("usage: dori backlog show <id>")) ?? die(`no backlog item ${id}`);
           console.log(JSON.stringify(item, null, 1));
-        } else die(`backlog: unknown step ${sub} (list, add, drop, decide, tick, show)`);
+        } else if (sub === "take") {
+          const rowId = id ?? die("usage: dori backlog take <inbox row id>");
+          const r = await withBacklogLock(config.stateDir, 120, () => takeRow(config.stateDir, rowId, at));
+          if (r.lane) die(`BACKLOG_IS_LANES ${r.lane.id}: the backlog has it (${r.lane.status}${r.lane.pane ? ` in ${r.lane.pane}` : ""}); leave it to that lane`, 3);
+          console.log(`BACKLOG_TAKEN_BY_LEAD ${r.lead?.id}: no lane is opened for ${rowId}; you do it`);
+        } else die(`backlog: unknown step ${sub} (list, add, drop, decide, tick, show, take)`);
       } catch (e) {
         if (e instanceof BacklogError) die(`BACKLOG_REFUSED ${e.message}`, 2);
         throw e;
