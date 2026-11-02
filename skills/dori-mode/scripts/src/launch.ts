@@ -10,6 +10,7 @@ import { iso } from "./run.ts";
 import { checkDone, doneSyntaxErrors, weakDone } from "./done-signals.ts";
 import { laneArea, loadTree, treeSection } from "./explore.ts";
 import { watchLog } from "./watch-log.ts";
+import { StartRefused } from "./backlog.ts";
 import { relatedLines, relatedThreads, type RelatedThread } from "./related-thread.ts";
 import { addedLine, checkedLedger, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
 import { join } from "node:path";
@@ -40,9 +41,22 @@ export type LaunchInput = {
   readonly ui?: boolean;
   // directive id -> the lead's reason: dori launch --waive <id> "<reason>" leaves that directive of the ledger out
   readonly waive?: Readonly<Record<string, string>>;
+  // started by the backlog pass (dori backlog), the only launch that may use a "bl-" key
+  readonly backlog?: boolean;
 };
 
 export class LaunchError extends Error {}
+// The session could not be opened (the terminal backend failed): worth another try, unlike every other LaunchError, which
+// the launch input itself causes and which no retry changes.
+export class LaunchFailed extends LaunchError {
+  // the work thread this launch had already opened (--thread new): the next try continues there instead of opening another
+  constructor(message: string, readonly thread?: string) {
+    super(message);
+  }
+}
+
+/** A launch error as the backlog pass sees it: a refusal holds the item at once, an operational failure is tried again. */
+export const asStartFailure = (e: unknown): unknown => (e instanceof LaunchError && !(e instanceof LaunchFailed) ? new StartRefused(e.message) : e);
 
 // --thread new: dori launch opens the lane's work thread in this Dori's own channel (deps.openThread), named for --title
 export const NEW_THREAD = "new";
@@ -64,6 +78,8 @@ const STARTUP_FAILURE = /Cannot find module|All fallback models failed|No API ke
 
 export const validateLaunch = async (deps: FlowDeps, input: LaunchInput): Promise<void> => {
   if (!LANE_KEY.test(input.key)) throw new LaunchError(`key must match ${LANE_KEY}`);
+  // backlog lanes are bl-<item>: no other launch takes such a key, so an ordinary lane never shares one with the backlog
+  if (input.key.startsWith("bl-") && !input.backlog) throw new LaunchError(`key ${input.key}: keys starting with bl- belong to the backlog (dori backlog); pick another key`);
   if (await deps.registry.read(input.key)) throw new LaunchError(`lane ${input.key} is already registered`);
   if (input.thread !== undefined && input.thread !== NO_THREAD && input.thread !== NEW_THREAD) {
     const problem = threadRefProblem(input.thread);
@@ -443,8 +459,10 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   }
   if (missing.length) throw new DirectiveMissingError(missing);
   // opened only once nothing else can stop the launch, so a refused launch leaves no empty thread behind
+  let openedThread: string | undefined;
   if (input.thread === NEW_THREAD && deps.openThread) {
     const ref = await deps.openThread(input.title);
+    openedThread = ref;
     const line = `THREAD_OPENED ${input.key} ${ref}: the lane's work thread, new in this Dori's channel (--thread ${NEW_THREAD})`;
     warn(line);
     watchLog(deps.config.watchLog, deps.clock, { source: "launch", line });
@@ -452,7 +470,9 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   }
   await Bun.write(input.brief, text);
   const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane; report as the brief's footer says.`;
-  const opened = deps.config.backend === "aoe" ? await openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : await openHerdr(deps, input.key, cwd, model, prompt);
+  const opened = await (deps.config.backend === "aoe" ? openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : openHerdr(deps, input.key, cwd, model, prompt)).catch((e: unknown) => {
+    throw e instanceof LaunchFailed && openedThread ? new LaunchFailed(e.message, openedThread) : e;
+  });
   const lane: Lane = { ...draft, pane: opened.pane, ...(opened.tab ? { tab: opened.tab } : {}) };
   await deps.registry.write(lane);
   // registered first, so the queue counts this lane as working in the thread; a thread --thread new just opened is 🔄 already
@@ -489,7 +509,7 @@ type Opened = { readonly pane: string; readonly tab?: string; readonly failure?:
 
 const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string): Promise<Opened> => {
   const created = await deps.run(["herdr", "tab", "create", ...(deps.config.laneWorkspace ? ["--workspace", deps.config.laneWorkspace] : []), "--cwd", cwd, "--label", key, "--no-focus"]);
-  if (created.code !== 0) throw new LaunchError(`herdr tab create failed: ${created.err || created.out}`);
+  if (created.code !== 0) throw new LaunchFailed(`herdr tab create failed: ${created.err || created.out}`);
   const made = (JSON.parse(created.out) as { result: { root_pane: { pane_id: string; tab_id?: string }; tab_id?: string } }).result;
   const pane = made.root_pane.pane_id;
   const tab = made.tab_id ?? made.root_pane.tab_id;
@@ -502,7 +522,7 @@ const openAoe = async (deps: FlowDeps, key: string, cwd: string, model: string, 
   try {
     pane = await openAoeSession(deps.run, deps.clock, { title: key, cwd, tool: deps.config.agentCommand[0] ?? "omo", model, env });
   } catch (e) {
-    if (e instanceof AoeError) throw new LaunchError(e.message);
+    if (e instanceof AoeError) throw new LaunchFailed(e.message);
     throw e;
   }
   const failure = await awaitPrompt(deps, pane);
