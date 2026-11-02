@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -432,4 +432,27 @@ test("dropping a running item names the lane to close by its real key", async ()
   const msg = (() => { try { dropItem(state, "dr1", "lead", "t"); return "dropped"; } catch (e) { return String(e); } })();
   // Then
   expect(msg).toContain("dori close bl-dr1");
+});
+
+test("a fresh host slot another account's umask made unreadable still counts toward hostMaxLanes, and our own slots are written readable", async () => {
+  // Given: one live slot of another Dori that this account cannot read, hostMaxLanes 1
+  const host = join(root, "host");
+  mkdirSync(host, { recursive: true });
+  chmodSync(host, 0o1777);
+  writeFileSync(join(host, "other.ab12cd34.x.json"), JSON.stringify({ at: "2026-11-02T14:00:00Z" }));
+  chmodSync(join(host, "other.ab12cd34.x.json"), 0o000);
+  utimesSync(join(host, "other.ab12cd34.x.json"), T0 / 1000, T0 / 1000);
+  add("um1");
+  // When
+  const full = await backlogTick(deps({}, { hostMaxLanes: 1 }));
+  rmSync(join(host, "other.ab12cd34.x.json"));
+  const old = process.umask(0o077);
+  try {
+    await backlogTick(deps({}, { hostMaxLanes: 1 }), { force: true });
+  } finally {
+    process.umask(old);
+  }
+  // Then
+  expect(full[0]).toStartWith("BACKLOG_HOLD the host has 1 backlog lane(s)");
+  expect(lstatSync(join(host, "me.i1.um1.json")).mode & 0o777).toBe(0o644);
 });

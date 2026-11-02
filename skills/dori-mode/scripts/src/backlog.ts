@@ -234,12 +234,20 @@ export const hostLanes = (h: HostSlots, now: number): { readonly name: string; r
   return readdirSync(h.dir)
     .filter((f) => f.endsWith(".json"))
     .flatMap((name) => {
+      const file = join(h.dir, name);
+      let mtime: number;
       try {
-        const file = join(h.dir, name);
-        if (!regularFile(file) || now - lstatSync(file).mtimeMs >= HOST_STALE_MS) return [];
-        return [{ name, at: String((JSON.parse(readFileSync(file, "utf8")) as { at?: string }).at ?? "") }];
+        if (!regularFile(file)) return [];
+        mtime = lstatSync(file).mtimeMs;
       } catch {
         return [];
+      }
+      if (now - mtime >= HOST_STALE_MS) return [];
+      // a fresh slot counts even when it cannot be read (another account's file under a strict umask): its time then orders it
+      try {
+        return [{ name, at: String((JSON.parse(readFileSync(file, "utf8")) as { at?: string }).at ?? new Date(mtime).toISOString()) }];
+      } catch {
+        return [{ name, at: new Date(mtime).toISOString() }];
       }
     })
     .sort((a, b) => a.at.localeCompare(b.at) || a.name.localeCompare(b.name));
@@ -266,6 +274,8 @@ export const hostReserve = async (h: HostSlots, key: string, now: number): Promi
     const live = hostLanes(h, now).filter((l) => l.name !== `${mine(h)}${key}.json`);
     if (live.length >= h.max) return `the host has ${live.length} backlog lane(s) of all Doris (backlog.hostMaxLanes ${h.max}): ${live.map((l) => l.name.slice(0, -5)).join(", ")}`;
     writeAtomic(slotFile(h, key), JSON.stringify({ user: h.user, instance: h.instance, key, at: new Date(now).toISOString() }));
+    // readable by every account whatever this process's umask, so other Doris can count it
+    chmodSync(slotFile(h, key), 0o644);
     return undefined;
   } finally {
     await held.release();
