@@ -1237,7 +1237,7 @@ test("startup failure scope: failure words a working lane only quotes are no STA
   const running = [" $ cat rate.log", " Error: 429 rate limit reached for requests", " quota exceeded for this account", " │ the brief: STARTUP_ERROR ...: rate limit, usage limit", "── • Working (0s • esc to interrupt) ──────────", "❯ ", "────", STATUS].join("\n");
   expect(await scoped("q1", running)).toBe(`STARTUP_OK q1 aoe_q1_${NEW_AOE_ID.slice(0, 8)}`);
   // qa50d-e: an idle lane whose words sit in its goal card, a tool box and the status lines, none on an error line of its own
-  const idle = [" update_goal → complete", "   qa quoted rate limit", " │ usage limit reached, retry later", "   All fallback models failed (quoted)", BOX, " Error: usage bar unavailable (429 rate limit)", STATUS].join("\n");
+  const idle = [" update_goal → complete", " quota accounting is done per account", " Error handling rate limits lives in submit.ts", "   qa quoted rate limit", " │ usage limit reached, retry later", "   All fallback models failed (quoted)", BOX, " Error: usage bar unavailable (429 rate limit)", STATUS].join("\n");
   expect(await scoped("q2", idle)).toBe(`STARTUP_OK q2 aoe_q2_${NEW_AOE_ID.slice(0, 8)}`);
 });
 
@@ -1246,14 +1246,17 @@ test("startup failure scope: once the model answered the lane in its own session
   const session = sessionFiles(sessions, "/tmp/w");
   world.ps = `10 1 /bin/bash /dev/fd/4\n11 10 /home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js -e /x/pi-aoe-session-id.js --model m --session-id ${ID}`;
   const deps: FlowDeps = { ...at(T0), config: { ...at(T0).config, sessionsDir: sessions } };
-  const reply = (stopReason: string, errorMessage?: string) => {
+  const reply = (stopReason: string, errorMessage?: string, at = T0 + 5_000) => {
     session(ID, "QA scratch. Read and execute the lane brief");
     const file = join(sessions, "--tmp-w--", `2026-01-01T12-00-01-000Z_${ID}.jsonl`);
-    appendFileSync(file, `${JSON.stringify({ type: "message", timestamp: iso(T0 + 5_000), message: { role: "assistant", stopReason, ...(errorMessage ? { errorMessage } : {}) } })}\n`);
+    appendFileSync(file, `${JSON.stringify({ type: "message", timestamp: iso(at), message: { role: "assistant", stopReason, ...(errorMessage ? { errorMessage } : {}) } })}\n`);
   };
   const screen = [" Error: rate limit (quoted from a log)", " done", BOX, STATUS].join("\n");
   reply("stop");
   expect(await scoped("q3", screen, deps)).toBe(`STARTUP_OK q3 aoe_q3_${NEW_AOE_ID.slice(0, 8)}`);
+  // a resumed session (herdr --session) holds a good reply from before this launch: it is no answer to this one
+  reply("stop", undefined, T0 - 60 * MIN);
+  expect(await scoped("q5", [" Error: No API key found for groq.", BOX].join("\n"), deps)).toBe(`STARTUP_ERROR q5 aoe_q5_${NEW_AOE_ID.slice(0, 8)}: No API key`);
   reply("error", "429 Rate limit reached for requests");
   expect(await scoped("q4", screen, deps)).toBe(`STARTUP_ERROR q4 aoe_q4_${NEW_AOE_ID.slice(0, 8)}: rate limit`);
 });
