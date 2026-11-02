@@ -353,6 +353,14 @@ systemctl --user enable --now dori-update.path
 
 The shipped unit watches `.git/HEAD`, `refs/heads`, `packed-refs`, and specifically `PathChanged=%h/.dori/src/.git/refs/heads/main`: fast-forward pulls update the branch ref, not HEAD. Replace `main` with the checked-out branch in the installed unit, and set the same name in `update.branch`: a run on any other branch, a detached HEAD, or a HEAD behind the applied commit logs `UPDATE_SKIPPED` and restarts nothing. These paths are for an ordinary clone, not a linked worktree with a `.git` file. Use `dori update --pull` to pull and apply explicitly; its pull also starts the path unit, and the second run waits on `state/update.lock` and prints `UPDATE_SKIP` instead of restarting and announcing again. Restart results and new config-key notices land in `watchLog`; update command output also lands in `~/.dori/update.log`. The lead gets one change summary and the `update.announce` instruction after each applied HEAD; first-run sends nothing.
 
+To take merges without anyone running `dori update --pull`, also install the pull timer. Every 10 minutes it runs `dori update --pull`: off `update.branch` it logs `UPDATE_SKIPPED off-main` before any pull, and `git pull --ff-only` refuses rather than overwrite uncommitted changes, logging and alerting `UPDATE_FAIL`. Its output is in `journalctl --user -u dori-update-pull`.
+
+```sh
+ln -s $S/systemd/dori-update-pull.service $S/systemd/dori-update-pull.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now dori-update-pull.timer
+```
+
 ## Switching an existing listener over
 
 To move from another listener to `dori-inbound` without losing or doubling a message, run the new one as a shadow beside the old one, compare what both wrote message by message, and only then swap them. The old listener keeps serving the owner until the swap, and the rollback is one line.
