@@ -78,10 +78,16 @@ export const steeringQueued = (screen: string, text: string): boolean => {
 export const editorText = (screen: string): string =>
   inputBox(screen).lines.map((line) => line.replace(/^\s*❯/, "")).join(" ").replace(/\s+/g, " ").trim();
 
-// The running-turn mark sits on or just above the input box; the transcript higher up may quote it
+// omo draws the running-turn mark ("── • Working (4s • esc to interrupt) ──") on the input box's top border, right above
+// the ❯ line (15 real captures, omo 5.1.51). Only that border and the 3 lines above it are read: the transcript higher
+// up may quote the words, and so may the status lines under the box (a session title omo made from the prompt, the goal
+// objective, the cwd), which once kept an idle lane's first turn "on" (STARTUP_PENDING_GOAL) with no goal set. A screen
+// without the box's borders shows no such line between the box and the status lines, so there it is read to the end
 export const turnRunning = (screen: string): boolean => {
   const lines = screen.split("\n");
-  return lines.slice(Math.max(0, inputBox(screen).top - 3)).some((line) => line.toLowerCase().includes(BUSY_MARK));
+  const top = inputBox(screen).top;
+  const end = isBorder(lines[top] ?? "") ? top + 1 : lines.length;
+  return lines.slice(Math.max(0, top - 3), end).some((line) => line.toLowerCase().includes(BUSY_MARK));
 };
 
 // A text the Enters did not submit stays in the box, and the next text typed there lands after it (dori-superagent issue

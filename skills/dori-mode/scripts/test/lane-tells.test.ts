@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { LANE_TELL_LEAD_AFTER_MS, laneTellsFile, leadMovedText, noteLaneTell, retryLaneTells } from "../src/lane-tells.ts";
 import type { Lane } from "../src/registry.ts";
-import { depsFor, fakeClock, newWorld, RUNNING, sent, withState, type World } from "./fakes.ts";
+import { depsFor, fakeClock, newWorld, sent, withState, type World } from "./fakes.ts";
 
 const PANE = "aoe_analytics_801ad431";
 const NEW = "aoe_lead2_b1bc2f63";
@@ -11,6 +11,8 @@ const AT = "2026-10-31T07:01:48.000Z";
 const BORDER = "────────────────────────────────────────";
 // the lane's main turn waits on its children: an empty box and no running turn
 const IDLE = ["transcript", BORDER, "❯ ", BORDER, " ⠏ child · category:quick · running"].join("\n");
+// a turn runs: omo draws its mark on the box's top border
+const BUSY = ["transcript", `── • Working (2s • esc to interrupt) ${BORDER}`, "❯ ", BORDER, " ⠏ child · category:quick · running"].join("\n");
 
 let state: { dir: string; done: () => void };
 let w: World;
@@ -33,7 +35,7 @@ const setup = async (minutesLater: number, delivered = false) => {
 test("a lane that took no lead notice is told again once a turn runs in it, and the wait ends", async () => {
   // Given
   const deps = await setup(3);
-  w.screens[PANE] = `${IDLE}\n${RUNNING}`;
+  w.screens[PANE] = BUSY;
   // When
   const lines = await retryLaneTells(deps);
   // Then
@@ -62,7 +64,7 @@ test("while the lane's main turn only waits on its children nothing is typed, an
 test("a held copy that reached the lane's transcript later counts as told: nothing is typed again", async () => {
   // Given
   const deps = await setup(5, true);
-  w.screens[PANE] = `${IDLE}\n${RUNNING}`;
+  w.screens[PANE] = BUSY;
   // When
   const lines = await retryLaneTells(deps);
   // Then
