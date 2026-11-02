@@ -38,6 +38,9 @@ export type FlowDeps = {
   // asks the thread status queue for a status on a discord:<id> work thread; the queue keeps it working while a lane there
   // still works. Resolves with the queue's outcome (cli wires it when DORI_DISCORD_TOKEN is set)
   readonly requestThreadStatus?: (ref: string, status: "working" | "waiting") => Promise<string>;
+  // a discord:<id> thread marked standing (dori thread set <ref> standing, threads.json): the place a kind of work always
+  // lives, so its last lane closing leaves it waiting instead of done and archived (cli reads threads.json)
+  readonly standingThread?: (ref: string) => boolean;
   // a lane put on an existing discord:<id> thread (dori launch --thread, adopt, set-thread) works there now: asks the queue
   // for working (unarchived, 🔄) and puts its threads.json record back if a done mark dropped it. Resolves with the
   // queue's outcome (cli wires it when DORI_DISCORD_TOKEN is set)
@@ -281,7 +284,12 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
   // reply, and the thread is not marked done, renamed or archived. The last lane to close it marks it done.
   const sharing = hasThread(lane) ? (await deps.registry.open()).filter((l) => l.key !== lane.key && l.thread === lane.thread).map((l) => l.key) : [];
   const cards = hasThread(lane) ? (deps.openCards?.(lane.thread) ?? []) : [];
-  const holders = [...(sharing.length ? [`open lane ${sharing.join(", ")} uses it too`] : []), ...(cards.length ? [`open card ${cards.join(", ")}`] : [])];
+  const standing = hasThread(lane) && lane.thread.startsWith("discord:") && Boolean(deps.standingThread?.(lane.thread));
+  const holders = [
+    ...(sharing.length ? [`open lane ${sharing.join(", ")} uses it too`] : []),
+    ...(cards.length ? [`open card ${cards.join(", ")}`] : []),
+    ...(standing ? ["standing thread"] : []),
+  ];
   if (already) {
     if (holders.length) cleanup.push(`thread left open: ${holders.join("; ")}; result already posted (${already})`);
     else if (deps.markThreadDone && lane.thread.startsWith("discord:")) cleanup.push(`result already posted (${already})`);
@@ -348,7 +356,7 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
   // still ours (the lead decides), so then the mark is left alone. Read again here, since a card answered during the
   // cleanup gives the thread back to work.
   const left = holders.length ? (await deps.registry.open()).filter((l) => l.key !== lane.key && l.thread === lane.thread) : [];
-  const ownersTurn = holders.length && left.every((l) => statusOf(l) === "paused") && (left.length > 0 || (deps.openCards?.(lane.thread) ?? []).length > 0);
+  const ownersTurn = holders.length && left.every((l) => statusOf(l) === "paused") && (left.length > 0 || standing || (deps.openCards?.(lane.thread) ?? []).length > 0);
   if (ownersTurn && deps.requestThreadStatus && lane.thread.startsWith("discord:")) {
     const status = await deps.requestThreadStatus(lane.thread, "waiting").then(
       (outcome) => `waiting requested: ${outcome}`,

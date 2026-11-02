@@ -232,6 +232,28 @@ test("a card answered while the lane's close cleans up gives the thread back to 
   expect(asked).toEqual(["waiting"]);
 });
 
+// lead 2026-11-02 23:15 KST: the upstream-port thread stays open between ports; a lane closing there must not archive it
+test("a standing thread is left waiting, not done and archived, when its last lane closes; the result is still posted", async () => {
+  const f = fakeThread("🔄 upstream ports", false);
+  const emoji = { ...defaultDiscordWords, statusStyle: "emoji" as const };
+  const requestThreadStatus = async (ref: string, status: "working" | "waiting") => String(await setThreadStatus(f.dc, discordThreadId(ref), status, emoji));
+  const r = await closeLane(at(T0, { ...f.close, requestThreadStatus, standingThread: (ref) => ref === lane.thread }), lane, "closed", SUMMARY);
+  expect(r.closed).toBe(true);
+  expect(f.calls().filter((c) => c.startsWith(`POST ${T}/messages`))).toHaveLength(1);
+  expect(f.marks()).toEqual([`GET ${T}`, `PATCH ${T} {"name":"⏸️ upstream ports"}`]);
+  expect(JSON.stringify((await read()).receipt)).toContain("thread left open: standing thread; summary posted");
+});
+
+test("a standing thread another lane still works in keeps its working mark when one lane closes", async () => {
+  const f = fakeThread("🔄 upstream ports", false);
+  const asked: string[] = [];
+  const deps = at(T0, { ...f.close, requestThreadStatus: async (_ref, status) => (asked.push(status), "applied"), standingThread: () => true });
+  await deps.registry.write({ ...lane, key: "fix-b", title: "fix-b", pane: "aoe_fix-b_00000000" });
+  expect((await closeLane(deps, lane, "closed", SUMMARY)).closed).toBe(true);
+  expect(asked).toEqual([]);
+  expect(f.marks()).toEqual([]);
+});
+
 // owner 2026-10-19 23:53 KST "왜 안알려주고 닫아?": two lanes closed with only "done, I'll sum it up for you" and archived
 test("a lane with a thread and nothing to write a summary from is not closed: CLOSE_SUMMARY_MISSING, nothing posted, no done mark", async () => {
   const f = fakeThread("🔄 fix login", false);

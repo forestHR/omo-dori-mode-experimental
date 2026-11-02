@@ -64,7 +64,7 @@ import { openCardIds, QuestionCards, QuestionError, QuestionStore } from "./mess
 import { DiscordListener } from "./messenger/discord-listener.ts";
 import { bareThreadName, discordThreadId, postInThread, postLaneStart, progressText, threadHook, threadName, ThreadRefError, type ThreadStatus, type ThreadVerb, VERB_STATUS } from "./messenger/discord-thread.ts";
 import { duplicateLine, sendKey, sendOnce } from "./send-dedupe.ts";
-import { mapThread, threads } from "./messenger/thread-map.ts";
+import { mapThread, standThread, threads } from "./messenger/thread-map.ts";
 import { archiveDoneThreads } from "./messenger/thread-archive.ts";
 import { ThreadStatusQueue } from "./messenger/thread-status-queue.ts";
 import { realTimers } from "./messenger/typing.ts";
@@ -397,7 +397,7 @@ const USAGE = `dori <command> [options]
   thread map discord:<id> <session|none>
                                        set the mapped session, preserving the title
   thread list                          print mapped thread ids, sessions and titles
-  thread set discord:<id> working|waiting|done [--open-card]
+  thread set discord:<id> working|waiting|done|standing [--open-card]
                                        queue its status; done archives it and removes its mapping
   thread <reply|wait|done> discord:<id> <text> | --text-file FILE
                                        post in a work thread and set its status (working, waiting, done); done archives it
@@ -430,6 +430,7 @@ const deps: FlowDeps = {
         },
         postInThread: async (ref: string, text: string) => postInThread(ownDiscord(discordToken), ref, text),
         requestThreadStatus: async (ref: string, status: "working" | "waiting") => String(await threadStatuses(ownDiscord(discordToken)).request(discordThreadId(ref), status)),
+        standingThread: (ref: string) => threads(cardDir())[discordThreadId(ref)]?.standing === true,
         reopenThread: async (ref: string, title: string) => {
           const id = discordThreadId(ref);
           const outcome = String(await threadStatuses(ownDiscord(discordToken)).request(id, "working"));
@@ -1654,7 +1655,7 @@ try {
       await quietGuard();
       const [verb, ref, text] = flags.positionals;
       if (verb === "list") {
-        for (const [id, entry] of Object.entries(threads(cardDir()))) console.log(`${id} ${entry.session ?? "none"} ${entry.title}`);
+        for (const [id, entry] of Object.entries(threads(cardDir()))) console.log(`${id} ${entry.session ?? "none"} ${entry.title}${entry.standing ? " [standing]" : ""}`);
         break;
       }
       if (verb === "map") {
@@ -1696,7 +1697,14 @@ try {
         return [...(sharing.length ? [`open lane ${sharing.join(", ")} uses it`] : []), ...(cards.length ? [`open card ${cards.join(", ")}`] : [])].join("; ");
       };
       if (verb === "set") {
-        if (!ref || (text !== "working" && text !== "waiting" && text !== "done")) die("usage: dori thread set discord:<id> working|waiting|done [--open-card] [--force]");
+        if (!ref || (text !== "working" && text !== "waiting" && text !== "done" && text !== "standing")) die("usage: dori thread set discord:<id> working|waiting|done|standing [--open-card] [--force]");
+        if (text === "standing") {
+          const id = discordThreadId(ref ?? "");
+          standThread(cardDir(), id);
+          // waiting unless a lane works there (the queue keeps working then); a later close leaves it waiting too
+          console.log(`THREAD_STANDING discord:${id} ${await threadStatuses(discordClient()).request(id, "waiting")}`);
+          break;
+        }
         const status = text === "done" ? "done" : flags.values["open-card"] ? "waiting" : text === "waiting" ? "waiting" : "working";
         const id = discordThreadId(ref ?? "");
         const holders = status === "done" ? await holdersOf(`discord:${id}`) : "";
