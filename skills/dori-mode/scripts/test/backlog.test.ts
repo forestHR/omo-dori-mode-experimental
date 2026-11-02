@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, readItem, StartRefused, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
+import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, inboxReader, type InboxRow, orderIntake, readLines, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 import { briefGaps, COMMON_LEDGER, loadLedger } from "../src/directives.ts";
 import { asStartFailure, eightSteps, LaunchError, LaunchFailed, launchLane, uiSteps, validateLaunch } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld } from "./fakes.ts";
 
-const SETTINGS: BacklogSettings = { enabled: true, everyMin: 60, maxLanes: 3, maxStarts: 1, hostMaxLanes: 2, hostDir: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], dayReportAt: "", timeZone: "UTC" };
+const SETTINGS: BacklogSettings = { enabled: true, everyMin: 60, maxLanes: 3, maxStarts: 1, hostMaxLanes: 2, hostDir: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" };
 const T0 = Date.parse("2026-11-02T15:00:00Z");
 
 let root: string;
@@ -222,7 +222,7 @@ test("the backlog is off unless a Dori's config turns it on", async () => {
   // Then
   expect(off.backlog.enabled).toBe(false);
   expect(on.backlog).toMatchObject({ enabled: true, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, writeNeedsOwnerLink: false });
-  expect(Object.keys(on.backlog).sort()).toEqual(["dayReportAt", "enabled", "everyMin", "feedCommand", "hostDir", "hostMaxLanes", "intakeDone", "maxLanes", "maxStarts", "timeZone", "writeNeedsOwnerLink"]);
+  expect(Object.keys(on.backlog).sort()).toEqual(["dayReportAt", "enabled", "everyMin", "feedCommand", "hostDir", "hostMaxLanes", "intakeDone", "maxLanes", "maxStarts", "orderKinds", "timeZone", "writeNeedsOwnerLink"]);
 });
 
 test("two Doris of one account keep their own host slots: one Dori's pass never removes the other's", async () => {
@@ -832,4 +832,378 @@ test("a feed list with a bad entry is not read at all, and a failing intake neve
   expect(readItem(state, "todo-pb-0123456789ab-1")?.status).not.toBe("dropped");
   expect(pass[0]).toBe("BACKLOG_INTAKE_FAILED feed blew up");
   expect(launched.sort()).toEqual(["hand1", "todo-pb-0123456789ab-1"]);
+});
+
+// an order row as the board writes it to YooDori's inbox (cytoplasm automation/project_board)
+const orderRow = (n: number, ts: string, todo = "pb-0123456789ab-1"): InboxRow => ({ ts, id: `dashboard-order-${n}`, kind: "dashboard-order", order: n, todo_id: todo, url: `https://board/#order/${n}`, content: `[대시보드 지시 #${n}] 이거 한거 아니야?\n관련: 할 일 「보안교육」 (id ${todo})\n형이 대시보드에 쓴 지시다. 할 일·일정·메일 일이면 유돌이 바로 처리하고, 나머지는 도리 방에 넘긴다. 진행은 order-status로 적는다.` });
+const orderSettings = { ...SETTINGS, orderKinds: ["dashboard-order"] };
+const orderPass = (list: InboxRow[]) => orderIntake({ stateDir: state, settings: orderSettings, rows: () => list, now: () => now });
+
+// a pass as the dori-lanes loop runs it: the inbox file read from where the last pass stopped, kept once the orders are taken
+const inboxFile = (): string => join(root, "inbox.jsonl");
+const filePass = (): string[] => {
+  const inbox = inboxReader(state, inboxFile());
+  const lines = orderIntake({ stateDir: state, settings: orderSettings, rows: inbox.rows, now: () => now });
+  inbox.commit();
+  return lines;
+};
+const otherRows = (bytes: number): string => {
+  const one = `${JSON.stringify({ ts: "2026-11-02T16:00:00.000Z", id: "watch-x", kind: "watch", content: "x".repeat(900) })}\n`;
+  return one.repeat(Math.ceil(bytes / one.length));
+};
+
+test("an order the backlog has not read is taken behind more than 2 MB of other inbox rows written while it did not run, and read once", () => {
+  // Given: the start is set; then an order comes in, and 3 MB of other rows after it before the next pass
+  writeFileSync(inboxFile(), otherRows(64 * 1024));
+  filePass();
+  appendFileSync(inboxFile(), `${JSON.stringify(orderRow(70, new Date(now + 60_000).toISOString()))}\n`);
+  appendFileSync(inboxFile(), otherRows(3 * 1024 * 1024));
+  // When
+  const lines = filePass();
+  const again = filePass();
+  // Then
+  expect(lines).toEqual([expect.stringMatching(/^BACKLOG_INTAKE dashboard-order-70 \(owner order\)/)]);
+  expect(readItem(state, "dashboard-order-70")?.status).toBe("open");
+  expect(again).toEqual([]);
+});
+
+test("an order written between the first pass's start and its commit is the next pass's: the commit keeps only what was read before the start", () => {
+  // Given: the first pass reads the inbox, sets the start, and an order lands before it commits
+  writeFileSync(inboxFile(), otherRows(4 * 1024));
+  const inbox = inboxReader(state, inboxFile());
+  const first = orderIntake({ stateDir: state, settings: orderSettings, rows: inbox.rows, now: () => now });
+  appendFileSync(inboxFile(), `${JSON.stringify(orderRow(73, new Date(now + 60_000).toISOString()))}\n`);
+  inbox.commit();
+  // When
+  const next = filePass();
+  // Then
+  expect(first[0]).toStartWith("BACKLOG_ORDERS_FROM");
+  expect(next.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-73"]);
+});
+
+test("reading an inbox that got shorter after its size was taken ends with what was read, never waits on bytes that are gone", () => {
+  // Given: two whole lines and a size that still counts 1 MB the file no longer has (cut while it was read)
+  writeFileSync(inboxFile(), '{"id":"a"}\n{"id":"b"}\n');
+  const fd = openSync(inboxFile(), "r");
+  // When
+  const read = (() => {
+    try {
+      return readLines(fd, 0, 22 + 1024 * 1024);
+    } finally {
+      closeSync(fd);
+    }
+  })();
+  // Then
+  expect(read).toEqual({ lines: ['{"id":"a"}', '{"id":"b"}', ""], at: 22 });
+});
+
+test("an inbox rotated between a pass's read and its commit is read from its start by the next pass", () => {
+  // Given: the start is set; an order is read by a pass; the file is rotated before that pass commits
+  writeFileSync(inboxFile(), "");
+  filePass();
+  appendFileSync(inboxFile(), `${JSON.stringify(orderRow(74, new Date(now + 60_000).toISOString()))}\n`);
+  const inbox = inboxReader(state, inboxFile());
+  const read = orderIntake({ stateDir: state, settings: orderSettings, rows: inbox.rows, now: () => now });
+  writeFileSync(join(root, "inbox.new"), `${JSON.stringify(orderRow(75, new Date(now + 120_000).toISOString()))}\n`);
+  renameSync(join(root, "inbox.new"), inboxFile());
+  inbox.commit();
+  // When
+  const next = filePass();
+  // Then
+  expect(read.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-74"]);
+  expect(next.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-75"]);
+});
+
+test("the inbox read leaves a line not yet ended for the next pass, and reads a new (rotated) inbox file from its start", () => {
+  // Given: the start is set; then half of an order's line is written
+  writeFileSync(inboxFile(), "");
+  filePass();
+  const line = `${JSON.stringify(orderRow(71, new Date(now + 60_000).toISOString()))}\n`;
+  appendFileSync(inboxFile(), line.slice(0, 40));
+  // When: a pass, the line is ended, a pass; then the file is replaced by a new one holding another order, a pass
+  const half = filePass();
+  appendFileSync(inboxFile(), line.slice(40));
+  const whole = filePass();
+  writeFileSync(join(root, "inbox.new"), `${JSON.stringify(orderRow(72, new Date(now + 120_000).toISOString()))}\n`);
+  renameSync(join(root, "inbox.new"), inboxFile());
+  const rotated = filePass();
+  // Then
+  expect(half).toEqual([]);
+  expect(whole.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-71"]);
+  expect(rotated.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-72"]);
+});
+
+test("the owner's orders (backlog.orderKinds) become items at once; rows before the first pass stay the lead's", () => {
+  // Given: an order before the first pass
+  const list: InboxRow[] = [orderRow(8, "2026-10-29T14:20:51.634Z")];
+  // When
+  const first = orderPass(list);
+  list.push(orderRow(10, "2026-11-02T15:05:00.000Z", "pb-0123456789ab-2"), { id: "x1", ts: "2026-11-02T15:06:00.000Z", kind: "answer", content: "응" });
+  const next = orderPass(list);
+  const again = orderPass(list);
+  // Then: only the new order is the backlog's; the earlier one has no item, so dori backlog show leaves it to the lead
+  expect(first).toEqual(["BACKLOG_ORDERS_FROM 2026-11-02T15:00:00.000Z: dashboard-order rows after this are taken; earlier ones are the lead's"]);
+  expect(next).toEqual(["BACKLOG_INTAKE dashboard-order-10 (owner order): [대시보드 지시 #10] 이거 한거 아니야?"]);
+  expect(again).toEqual([]);
+  expect(readItem(state, "dashboard-order-8")).toBeUndefined();
+  expect(readItem(state, "dashboard-order-10")).toMatchObject({ by: "owner", priority: 2, row: "dashboard-order-10" });
+});
+
+test("an order about a todo whose lane runs goes to the lead at once, so a stop or a change reaches that lane now; the backlog never starts it", async () => {
+  // Given: todo 1 runs as a feed lane
+  await feedSweep([boardTodo("1")]);
+  await backlogTick(deps(), { force: true });
+  orderPass([]);
+  // When: the owner writes an order about todo 1
+  orderPass([orderRow(11, "2026-11-02T15:10:00.000Z", "pb-0123456789ab-1")]);
+  const pass = await backlogTick(deps(), { force: true });
+  lanes = lanes.map((l) => (l.key === "bl-todo-pb-0123456789ab-1" ? lane(l.key, true) : l));
+  await backlogTick(deps(), { force: true });
+  // Then: handed to the lead in the same pass, one backlog-held row, never started even after the todo's lane closed
+  expect(pass).toContain("BACKLOG_ORDER_TO_LEAD dashboard-order-11: todo pb-0123456789ab-1 runs in lane bl-todo-pb-0123456789ab-1; the lead puts the order into that lane");
+  expect(rows.filter((r) => r.kind === "backlog-held").map((r) => r.content.split(" ").slice(0, 2).join(" "))).toEqual(["BACKLOG_ORDER_TO_LEAD dashboard-order-11"]);
+  expect(readItem(state, "dashboard-order-11")?.status).toBe("dropped");
+  expect(launched).toEqual(["todo-pb-0123456789ab-1"]);
+});
+test("an order and a feed entry about one todo taken in by the same sweep never run at once, and a running approved follow-up counts as that todo's lane", async () => {
+  // Given: an order and a new feed entry for todo 2 in the same pass, room for two starts
+  orderPass([]);
+  orderPass([orderRow(12, "2026-11-02T15:11:00.000Z", "pb-0123456789ab-2")]);
+  await feedSweep([boardTodo("2")]);
+  // When
+  await backlogTick(deps({}, { maxStarts: 2 }), { force: true });
+  // Then: the order (priority 2) starts, the feed item waits for it
+  expect(launched).toEqual(["dashboard-order-12"]);
+  expect(readItem(state, "todo-pb-0123456789ab-2")?.status).toBe("open");
+  // Given: an approved follow-up of todo 3 runs
+  writeFileSync(join(state, "backlog", "items", "appr-pb-0123456789ab-3.json"), JSON.stringify({ id: "appr-pb-0123456789ab-3", title: "f", brief, done: "file /tmp/x", priority: 4, by: "feed", source: "pb-0123456789ab-3", followUpOf: "todo-pb-0123456789ab-3", status: "running", lane: "bl-appr-pb-0123456789ab-3", addedAt: "t", log: [] }));
+  lanes.push(lane("bl-appr-pb-0123456789ab-3"));
+  orderPass([orderRow(13, "2026-11-02T15:12:00.000Z", "pb-0123456789ab-3")]);
+  const pass = await backlogTick(deps({}, { maxStarts: 2 }), { force: true });
+  // Then: the order about todo 3 goes to the lead for that lane
+  expect(pass).toContain("BACKLOG_ORDER_TO_LEAD dashboard-order-13: todo pb-0123456789ab-3 runs in lane bl-appr-pb-0123456789ab-3; the lead puts the order into that lane");
+  expect(launched).not.toContain("dashboard-order-13");
+});
+test("an order with no room waits on the list and starts when room comes; it is never handed to the lead for that", async () => {
+  // Given: an order while the host is busy, for a long time
+  orderPass([]);
+  orderPass([orderRow(13, "2026-11-02T15:01:00.000Z")]);
+  now = T0 + 60 * 60_000;
+  const busy = await backlogTick(deps({ busy: async () => ["2 lanes over the guard"] }), { force: true });
+  // When: room comes
+  const free = await backlogTick(deps(), { force: true });
+  // Then
+  expect(busy.some((l) => l.includes("TO_LEAD"))).toBe(false);
+  expect(rows.filter((r) => r.kind === "backlog-held")).toEqual([]);
+  expect(free.some((l) => l.startsWith("BACKLOG_STARTED dashboard-order-13"))).toBe(true);
+});
+test("an order's launch copy carries the four fields dori launch requires", async () => {
+  // Given
+  orderPass([]);
+  orderPass([orderRow(14, "2026-11-02T15:01:00.000Z")]);
+  // When
+  await backlogTick(deps(), { force: true });
+  // Then
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
+  const gaps = briefGaps({ key: laneKeyOf("dashboard-order-14") }, sentBrief("dashboard-order-14"), ledger, "", { "eight-steps": await eightSteps(), "ui-steps": await uiSteps() }).map((g) => g.id);
+  expect(launched).toEqual(["dashboard-order-14"]);
+  expect(gaps).not.toContain("four-fields");
+  expect(sentBrief("dashboard-order-14")).toContain("[대시보드 지시 #14] 이거 한거 아니야?");
+});
+
+test("a todo renamed on the board is listed, started and reported under its new title", async () => {
+  // Given: todo 1 waits under its first title
+  await feedSweep([boardTodo("1", { title: "fix A" })]);
+  // When: the owner renames it, then a pass starts it
+  await feedSweep([boardTodo("1", { title: "fix B" })]);
+  await backlogTick(deps(), { force: true });
+  // Then
+  expect(readItem(state, "todo-pb-0123456789ab-1")?.title).toBe("fix B");
+  expect(rows.find((r) => r.kind === "backlog-start")?.content).toContain("(fix B, p6)");
+});
+
+test("an item waiting on its todo's lane does not use the start of an unrelated item behind it", async () => {
+  // Given: an order about todo 4 runs; the feed then lists todo 4, and a hand item waits; one start a pass
+  orderPass([]);
+  orderPass([orderRow(31, "2026-11-02T15:31:00.000Z", "pb-0123456789ab-4")]);
+  await backlogTick(deps(), { force: true });
+  await feedSweep([boardTodo("4", { auto_applied: false, card_approved_at: "x" })]);
+  add("hand9", { priority: "7" });
+  // When
+  const pass = await backlogTick(deps(), { force: true });
+  // Then: the feed item (priority 4) waits for the order's lane; the hand item behind it starts
+  expect(pass).toContain("BACKLOG_WAIT todo-pb-0123456789ab-4: todo pb-0123456789ab-4 is worked on by lane bl-dashboard-order-31 now");
+  expect(launched).toEqual(["dashboard-order-31", "hand9"]);
+});
+
+test("an order the lead replaced without --by is still an order: about a todo whose lane runs it goes to the lead at once", async () => {
+  // Given: an order waits (no room); the lead replaces it (a new brief, by defaults to lead); then todo 1's lane runs
+  orderPass([]);
+  orderPass([orderRow(40, "2026-11-02T15:40:00.000Z", "pb-0123456789ab-1")]);
+  addItem(state, { id: "dashboard-order-40", title: "fixed", brief, done: "file /tmp/x", priority: "2" }, { registered: false, at: new Date(now).toISOString() });
+  await feedSweep([boardTodo("1")]);
+  writeFileSync(join(state, "backlog", "items", "todo-pb-0123456789ab-1.json"), JSON.stringify({ ...readItem(state, "todo-pb-0123456789ab-1"), status: "running", lane: "bl-todo-pb-0123456789ab-1" }));
+  lanes.push(lane("bl-todo-pb-0123456789ab-1"));
+  // When
+  const pass = await backlogTick(deps(), { force: true });
+  // Then
+  expect(readItem(state, "dashboard-order-40")).toMatchObject({ status: "dropped", by: "lead", row: "dashboard-order-40" });
+  expect(pass).toContain("BACKLOG_ORDER_TO_LEAD dashboard-order-40: todo pb-0123456789ab-1 runs in lane bl-todo-pb-0123456789ab-1; the lead puts the order into that lane");
+});
+
+test("an order row is taken once by its id, whatever its time: one stamped like a row already seen, or reaching the inbox after a later one", () => {
+  // Given: the start is set, then order 51 (15:51) is taken
+  orderPass([]);
+  const list: InboxRow[] = [orderRow(51, "2026-11-02T15:51:00.000Z")];
+  orderPass(list);
+  // When: order 52 with the same time, and order 50 stamped earlier but delivered later, come in; then a pass again
+  list.push(orderRow(52, "2026-11-02T15:51:00.000Z"), orderRow(50, "2026-11-02T15:50:00.000Z"));
+  const lines = orderPass(list);
+  const again = orderPass(list);
+  // Then
+  expect(lines.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-52", "dashboard-order-50"]);
+  expect(again).toEqual([]);
+});
+
+const MODEL_SEEDS = Number(process.env.BACKLOG_MODEL_SEEDS ?? 40);
+// a seeded PRNG (mulberry32), so a failing run names its seed and replays exactly
+const prng = (seed: number) => () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+  return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+};
+
+test("model: random orders, feed sweeps, passes, lane closes, replacements and drops keep one owner per order and one running lane per todo", async () => {
+  for (let seed = 1; seed <= MODEL_SEEDS; seed++) {
+    const rnd = prng(seed);
+    const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)] as T;
+    root = mkdtempSync(join(tmpdir(), "backlog-model-"));
+    state = join(root, "state");
+    brief = join(root, "brief.md");
+    writeFileSync(brief, "ulw\n\n[목표] model\n");
+    lanes = [];
+    launched = [];
+    rows = [];
+    now = T0;
+    const steps: string[] = [];
+    const list: InboxRow[] = [];
+    const handed = new Set<string>();
+    let n = 0;
+    const fail = (why: string): never => {
+      throw new Error(`seed ${seed}: ${why}\nsteps: ${steps.join(" ; ")}`);
+    };
+    const pass = async (busy: boolean, maxStarts: number) => {
+      const before = rows.length;
+      const startedBefore = launched.length;
+      await backlogTick(deps({ busy: async () => (busy ? ["busy"] : []), intake: async () => orderPass(list) }, { maxStarts }), { force: true });
+      for (const r of rows.slice(before).filter((x) => x.content.startsWith("BACKLOG_ORDER_TO_LEAD"))) {
+        const [, row, , , , , , lane0] = r.content.split(" ");
+        if (handed.has(row ?? "")) fail(`${row} handed to the lead twice`);
+        handed.add(row ?? "");
+        const named = r.content.match(/by lane (\S+)/)?.[1];
+        // I4: the named lane runs now
+        if (!lanes.some((l) => l.key === named && !l.closedAt)) fail(`${row} handed for lane ${named ?? lane0}, which does not run`);
+      }
+      // I3: nothing handed to the lead is ever started
+      for (const id of launched.slice(startedBefore)) if (handed.has(id)) fail(`${id} started after it was handed to the lead`);
+      // I7: a pass that was not busy and had room starts something when an item may start (no scheduler that starts nothing)
+      if (!busy && launched.length === startedBefore) {
+        const all = listItems(state);
+        const running = all.filter((i) => i.status === "running");
+        const runningTodos7 = new Set(running.map(todoOf).filter((k): k is string => k !== undefined));
+        const room = Math.min(SETTINGS.maxLanes - running.length, maxStarts, SETTINGS.hostMaxLanes - running.length);
+        const startable = all.filter((i) => i.status === "open" && !i.ask && !i.approvalAsk && !i.held && !i.paused && !(todoOf(i) !== undefined && runningTodos7.has(todoOf(i) as string)));
+        if (room > 0 && startable.length) fail(`a free pass started nothing while ${startable.map((i) => i.id).join(", ")} could start`);
+      }
+      // I6: after a pass no open order waits while its todo's lane runs (the lead's rule: it went to the lead for that lane)
+      const runningTodos = new Set(listItems(state).filter((i) => i.status === "running").map(todoOf).filter((k): k is string => k !== undefined));
+      for (const o of listItems(state).filter((i) => i.status === "open" && i.row !== undefined && !i.by.startsWith("pair:"))) {
+        const k = todoOf(o);
+        if (k !== undefined && runningTodos.has(k)) fail(`order ${o.id} waits while its todo ${k} has a running lane`);
+      }
+    };
+    orderPass(list);
+    for (let step = 0; step < 40; step++) {
+      now += 60_000;
+      const op = pick(["order", "order", "feed", "pass", "pass", "pass", "close", "replace", "drop"] as const);
+      if (op === "order") {
+        n++;
+        const ts = new Date(T0 + pick([n, n, n - 1, 0]) * 60_000 + 1).toISOString();
+        list.push(orderRow(100 + n, ts, pick(["pb-0123456789ab-1", "pb-0123456789ab-2", "pb-0123456789ab-3"])));
+        steps.push(`order ${100 + n}@${ts.slice(11, 16)}`);
+      } else if (op === "feed") {
+        const todos = ["1", "2", "3"].filter(() => rnd() < 0.6).map((k) => boardTodo(k, { status: pick(["열림", "진행", "보류"]), auto_applied: rnd() < 0.5 }));
+        await feedSweep(todos);
+        steps.push(`feed ${todos.map((x) => `${String(x.todo_id).slice(-1)}:${x.status}`).join(",")}`);
+      } else if (op === "pass") {
+        const busy = rnd() < 0.2;
+        const maxStarts = pick([1, 2]);
+        steps.push(`pass busy=${busy} starts=${maxStarts}`);
+        await pass(busy, maxStarts);
+      } else if (op === "close") {
+        const open = lanes.filter((l) => !l.closedAt);
+        if (open.length) {
+          const l = pick(open);
+          lanes = lanes.map((x) => (x.key === l.key ? lane(x.key, true) : x));
+          steps.push(`close ${l.key}`);
+        }
+      } else if (op === "replace") {
+        const orders = listItems(state).filter((i) => i.status === "open" && i.row !== undefined);
+        if (orders.length) {
+          const o = pick(orders);
+          addItem(state, { id: o.id, title: "replaced", brief, done: "file /tmp/x", priority: "2" }, { registered: false, at: new Date(now).toISOString() });
+          steps.push(`replace ${o.id}`);
+        }
+      } else {
+        const open = listItems(state).filter((i) => i.status === "open");
+        if (open.length) {
+          const o = pick(open);
+          dropItem(state, o.id, "model", new Date(now).toISOString());
+          steps.push(`drop ${o.id}`);
+        }
+      }
+      // I1: at most one running item per todo
+      const running = listItems(state).filter((i) => i.status === "running");
+      const perTodo = new Map<string, number>();
+      for (const i of running) {
+        const k = todoOf(i);
+        if (k !== undefined) perTodo.set(k, (perTodo.get(k) ?? 0) + 1);
+      }
+      for (const [k, c] of perTodo) if (c > 1) fail(`${c} running items for todo ${k}`);
+      // I2: every order row the passes saw has exactly one item, which never disappears
+      if (steps.some((s) => s.startsWith("pass"))) {
+        const seen = list.filter((r) => (r.ts ?? "") > new Date(T0).toISOString());
+        const lastPass = steps.map((s, i) => (s.startsWith("pass") ? i : -1)).filter((i) => i >= 0).pop() ?? -1;
+        const before = steps.slice(0, lastPass + 1).filter((s) => s.startsWith("order")).length;
+        for (const r of seen.slice(0, before)) if (!readItem(state, rowItemId(r.id))) fail(`order ${r.id} has no item after a pass`);
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 120_000);
+
+test("an order handed to the lead whose row could not be written stays on the list and is handed over again, never lost", async () => {
+  // Given: todo 1 runs; an order about it comes in; the inbox fails once as the hand-over row is written
+  await feedSweep([boardTodo("1")]);
+  await backlogTick(deps(), { force: true });
+  orderPass([]);
+  orderPass([orderRow(60, "2026-11-02T15:30:00.000Z", "pb-0123456789ab-1")]);
+  let broken = true;
+  const flaky = deps({ inbox: (kind, id, content) => {
+    if (broken && content.startsWith("BACKLOG_ORDER_TO_LEAD")) {
+      broken = false;
+      throw new Error("disk full");
+    }
+    rows.push({ kind, id, content });
+  } });
+  // When: the pass is cut off, then the next one runs
+  const cut = await backlogTick(flaky, { force: true }).catch((e: unknown) => String(e));
+  const kept = readItem(state, "dashboard-order-60")?.status;
+  await backlogTick(flaky, { force: true });
+  // Then
+  expect(cut).toContain("disk full");
+  expect(kept).toBe("open");
+  expect(readItem(state, "dashboard-order-60")?.status).toBe("dropped");
+  expect(rows.filter((r) => r.content.startsWith("BACKLOG_ORDER_TO_LEAD dashboard-order-60")).length).toBe(1);
 });

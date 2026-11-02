@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
-import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, instanceOf, itemLine, laneKeyOf, lastRun, listItems, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
@@ -784,6 +784,11 @@ const ownerLinkProblem = async (url: string, maxAgeMs?: number): Promise<string 
   return undefined;
 };
 // dori backlog: a pass starts an item through the same launch as dori launch and tells the lead in its inbox
+const backlogInbox = (kind: string, id: string, content: string): void => {
+  const inbox = auditInbox();
+  mkdirSync(join(inbox, ".."), { recursive: true });
+  appendFileSync(inbox, `${JSON.stringify({ ts: new Date().toISOString(), id, kind, content })}\n`);
+};
 const backlogDeps = (): TickDeps => ({
   stateDir: config.stateDir,
   settings: config.backlog,
@@ -810,7 +815,11 @@ const backlogDeps = (): TickDeps => ({
   },
   host: { dir: config.backlog.hostDir, user: userInfo().username, instance: instanceOf(config.stateDir), max: config.backlog.hostMaxLanes },
   intake: async (sweep) => {
-    if (!sweep || !config.backlog.feedCommand.length) return [];
+    // the owner's orders every tick, from where the last pass stopped reading the inbox (kept once they are taken)
+    const inbox = inboxReader(config.stateDir, auditInbox());
+    const orders = orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows: inbox.rows, now: realClock.now });
+    inbox.commit();
+    if (!sweep || !config.backlog.feedCommand.length) return orders;
     const feed = async (): Promise<{ readonly todos: readonly FeedTodo[] } | { readonly why: string }> => {
       const r = await run(config.backlog.feedCommand.map((p) => p.replace(/^~(?=\/)/, homedir())), { timeoutMs: 120_000 });
       if (r.code !== 0) return { why: (r.err || r.out).trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code}` };
@@ -822,13 +831,9 @@ const backlogDeps = (): TickDeps => ({
         return { why: "the output is not JSON" };
       }
     };
-    return feedIntake({ stateDir: config.stateDir, settings: config.backlog, feed, now: realClock.now });
+    return [...orders, ...(await feedIntake({ stateDir: config.stateDir, settings: config.backlog, feed, now: realClock.now }))];
   },
-  inbox: (kind, id, content) => {
-    const inbox = auditInbox();
-    mkdirSync(join(inbox, ".."), { recursive: true });
-    appendFileSync(inbox, `${JSON.stringify({ ts: new Date().toISOString(), id, kind, content })}\n`);
-  },
+  inbox: backlogInbox,
 });
 // every thread status change goes through this queue: coalesced, retried after a 429, decided by the open cards and
 // the lanes still working in the thread
