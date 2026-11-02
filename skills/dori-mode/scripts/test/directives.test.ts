@@ -605,3 +605,14 @@ test("what the text calls comes before every-lane entries of either layer, and a
   expect(lines.length).toBe(2);
   expect(lines[1]).toStartWith("[장부 경고] 이 도리 로컬 장부에서 1줄을 못 읽어 뺐다: DIRECTIVES_LOCAL_SKIP");
 });
+
+test("scope replay 2026-11-02: a lane that runs node (Node.js) or edits a gate's write policy is no GPU or learning work, one that runs JEV-9B is GPU work, and a node that trains stays GPU work", async () => {
+  const ledger = loadLedger((await ledgerDeps()).config);
+  // launch-node-path, cytoplasm-fw-fail: node is Node.js or a mail host, and heavy-headroom / gpu-free were put on them
+  expect(scopeContext("[목표] dori launch가 띄우는 레인 PATH에 node가 잡히게 한다. nvm node를 찾고 node --version으로 확인한다.", ledger, { repo: "src" }).kinds.gpu).toBeUndefined();
+  // yoodori-gate-gaps: an account-write policy put sim-frames and learn-combine on it
+  expect(scopeContext("[목표] 유돌 게이트 정책을 고친다. 쓰기 policy는 승인 정책 표대로, policy 시험을 더한다.", ledger, { repo: "x" }).kinds.learning).toBeUndefined();
+  // jev-shadow, jev-howto: a local model on the GPU, which only node made GPU work before
+  expect(Object.keys(scopeContext("[목표] 로컬 JEV-9B로 형 글을 판단한다. GPU 메모리를 재고 GPU 한 장에서 JEV-9B를 돌린다.", ledger, { repo: "x" }).kinds)).toContain("gpu");
+  expect(Object.keys(scopeContext("노드에서 GPU 학습을 돌리고 노드 두 대를 쓴다.", ledger, { repo: "x" }).kinds)).toContain("gpu");
+});

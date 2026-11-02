@@ -5,11 +5,12 @@ import type { Runner } from "./run.ts";
 import { type Proc, procTable, resolveSession, sessionDirFor } from "./session-id.ts";
 
 // Background work an omo session started and is still waiting on, read from its session transcript: a detached eval
-// cell, a background (or auto-detached) bash session, a background task child. omo shows none of these on its status
+// cell, a background (or auto-detached) bash session, a background task child, a monitor a cell armed (tool.monitor, ended
+// by the notification that its command exited or its file fired, matched by its description). omo shows none of these on its status
 // line, so a lane that ended its turn to wait for one looks idle on screen. Each start is read from the tool's own result
 // (never from text it printed: a lane that greps logs or omo's source must not look busy), each end from a delivered
 // notification or a kill/cancel result; a start without its end is still running.
-export type BackgroundJob = { readonly kind: "eval" | "bash" | "task"; readonly id: string; readonly at: number };
+export type BackgroundJob = { readonly kind: "eval" | "bash" | "task" | "monitor"; readonly id: string; readonly at: number };
 
 const BASH_START = /^(?:Command running in background with ID: |Command is still running; auto-detached to background with ID: )(bash_\w+)/;
 const TASK_START = /\((st_[0-9a-z]+), running\)/;
@@ -22,12 +23,17 @@ const ENDS: readonly RegExp[] = [
   /Task (st_[0-9a-z]+) had already finished/g,
 ];
 // a line without any of these cannot start or end a job; it is not parsed
-const HINT = /detached and is running|"bash_id"|in background with ID|auto-detached|st_[0-9a-z]+|Detached eval cell|is cancelled|Background terminal session|Killed bash_|bash_\w+ exited/;
+const HINT = /detached and is running|"bash_id"|in background with ID|auto-detached|st_[0-9a-z]+|Detached eval cell|is cancelled|Background terminal session|Killed bash_|bash_\w+ exited|Monitor started with ID|senpi-monitor:notification/;
 
-type ToolCall = { readonly name?: string; readonly resultPreview?: string };
+const MONITOR_START = /^Monitor started with ID: (mon_\w+)/;
+
+type ToolCall = { readonly name?: string; readonly resultPreview?: string; readonly args?: { readonly description?: string; readonly path?: string } };
+// a monitor notification: each monitor it carries, by the watch's id (bash_<n> for a command) and description; kind
+// "summary" is the end of its command
+type MonitorEvent = { readonly id?: string; readonly description?: string; readonly kinds?: readonly string[] };
 type TaskRun = { readonly task_id?: string; readonly status?: string };
 type Details = TaskRun & { readonly bash_id?: string; readonly background?: boolean; readonly run_in_background?: boolean; readonly items?: readonly TaskRun[]; readonly toolCalls?: readonly ToolCall[] };
-type Entry = { readonly type?: string; readonly timestamp?: string; readonly content?: unknown; readonly message?: { readonly role?: string; readonly toolName?: string; readonly toolCallId?: string; readonly content?: unknown; readonly details?: Details } };
+type Entry = { readonly type?: string; readonly customType?: string; readonly details?: { readonly monitors?: readonly MonitorEvent[] }; readonly timestamp?: string; readonly content?: unknown; readonly message?: { readonly role?: string; readonly toolName?: string; readonly toolCallId?: string; readonly content?: unknown; readonly details?: Details } };
 
 const ENDING_TOOLS = new Set(["kill_bash", "task_cancel"]);
 const EVAL_STOPPED = /^Eval cell (\S+) \(\w+\) is cancelled/;
@@ -42,6 +48,8 @@ const startsOf = (tool: string, callId: string, text: string, d: Details | undef
   for (const c of d?.toolCalls ?? []) {
     const bash = c.name === "bash" ? BASH_START.exec(c.resultPreview ?? "")?.[1] : undefined;
     const task = c.name === "task" && c.resultPreview?.startsWith("Started task ") ? TASK_START.exec(c.resultPreview)?.[1] : undefined;
+    const monitor = c.name === "monitor" ? MONITOR_START.exec(c.resultPreview ?? "")?.[1] : undefined;
+    if (monitor) out.push(["monitor", monitor]);
     if (bash) out.push(["bash", bash]);
     if (task) out.push(["task", task]);
   }
@@ -54,6 +62,9 @@ const textOf = (content: unknown): string =>
 // The jobs started in [since, until] whose end is not in the transcript up to until.
 export const pendingBackground = (transcript: string, since = 0, until = Number.POSITIVE_INFINITY): BackgroundJob[] => {
   const open = new Map<string, BackgroundJob>();
+  // a monitor's start names it mon_<id>, its notifications name the watch bash_<n>: both are tied by its description
+  const monitors = new Map<string, { readonly description: string; readonly path: boolean }>();
+  const watchOf = new Map<string, string>();
   for (const line of transcript.split("\n")) {
     if (!HINT.test(line)) continue;
     let e: Entry;
@@ -66,12 +77,30 @@ export const pendingBackground = (transcript: string, since = 0, until = Number.
     if (Number.isNaN(at) || at > until) continue;
     const tool = e.message?.role === "toolResult" ? (e.message.toolName ?? "") : undefined;
     const text = e.type === "custom_message" ? textOf(e.content) : tool !== undefined ? textOf(e.message?.content) : "";
-    if (e.type === "custom_message" || (tool && ENDING_TOOLS.has(tool))) for (const re of ENDS) for (const m of text.matchAll(re)) if (m[1]) open.delete(m[1]);
+    if (e.type === "custom_message" && e.customType === "senpi-monitor:notification")
+      for (const ev of e.details?.monitors ?? [])
+        for (const [id, m] of monitors)
+          if (m.description === ev.description) {
+            if (ev.id) watchOf.set(ev.id, id);
+            if (m.path || ev.kinds?.includes("summary")) open.delete(id);
+          }
+    if (e.type === "custom_message" || (tool && ENDING_TOOLS.has(tool)))
+      for (const re of ENDS)
+        for (const m of text.matchAll(re))
+          if (m[1]) {
+            open.delete(m[1]);
+            const mon = watchOf.get(m[1]);
+            if (mon) open.delete(mon);
+          }
     const stopped = tool === "eval" ? EVAL_STOPPED.exec(text)?.[1] : undefined;
     if (stopped) open.delete(stopped);
     if (tool === "task_cancel") for (const m of text.matchAll(/\b(st_[0-9a-z]+)\b/g)) if (m[1]) open.delete(m[1]);
     if (tool === undefined || at < since) continue;
     for (const [kind, id] of startsOf(tool, e.message?.toolCallId ?? "", text, e.message?.details)) if (!open.has(id)) open.set(id, { kind, id, at });
+    for (const c of e.message?.details?.toolCalls ?? []) {
+      const mon = c.name === "monitor" ? MONITOR_START.exec(c.resultPreview ?? "")?.[1] : undefined;
+      if (mon) monitors.set(mon, { description: c.args?.description ?? "", path: Boolean(c.args?.path) });
+    }
   }
   return [...open.values()];
 };

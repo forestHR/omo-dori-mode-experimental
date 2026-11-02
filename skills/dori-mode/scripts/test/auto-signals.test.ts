@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { failedMetrics, inferRepeats, type LaneEvent, passedMetrics, readReports, suspects } from "../src/auto-signals.ts";
 import { loadTree, researchDone, stuckView } from "../src/explore.ts";
+import { eightSteps } from "../src/launch.ts";
 import { defaultConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { briefForCheck, claimCheck, groundFindings, linkedWords, ownerDecisions, ownerDue, ownerWords, parseOwnerReply, quoted, runOwnerCheck, sendReread, tieDecisions } from "../src/owner-check.ts";
@@ -449,6 +450,18 @@ test("replay hr35-e7 09:46:57Z: an owner quote that is only the lead's words aro
   // the owner's words inside the relay's quote still ground a finding
   const quotedOwner = await runOwnerCheck(ownerCheckDeps(41, E7_LINE1.replace("학습은 멈추지 말고", "왜 진도가 안 나가는지 알려줘"), []), { ...l, ownerCheck: undefined }, { files: [file], inbox, owner: "owner-1" });
   expect(quotedOwner.findings.map((f) => f.verified)).toEqual([true]);
+});
+
+test("replay pingpong-false-point 2026-11-01T09:50:30Z: a finding on the owner's eight steps in the brief stands; a line in parentheses under a step is the lead's and is OWNER_CHECK_UNGROUNDED", async () => {
+  writeFileSync(join(state.dir, "brief.md"), `ulw\n\n[목표] 헛점 판정\n\n${await eightSteps()}\n`);
+  const file = writeSession([sessionLine(30, "assistant", "[REPORT] rl-e7 | question | 기준점을 A로 할지 B로 할지 골라 주세요")]);
+  const reply = (owner: string) => `VERDICT: VIOLATION\nOWNER: "${owner}"\nREPORT: "기준점을 A로 할지 B로 할지 골라 주세요"\nWHY: 미리 허가한 계획 선택을 다시 물었다.`;
+  const step = await runOwnerCheck(ownerCheckDeps(40, reply("plan approval은 모두 허가하니 더 이상 질문하지 말고 바로 진행하라."), []), lane(state.dir), { files: [file] });
+  expect(step.findings.map((f) => [f.kind, f.verified])).toEqual([["VIOLATION", true]]);
+  expect(step.lines.join("\n")).not.toContain("OWNER_CHECK_UNGROUNDED");
+  const rule = await runOwnerCheck(ownerCheckDeps(41, reply("질문은 [넘으면 안 되는 선]을 넘어야 하거나 오너만 정할 수 있는 선택일 때만"), []), lane(state.dir), { files: [file] });
+  expect(rule.findings).toEqual([]);
+  expect(rule.lines[0]).toStartWith("OWNER_CHECK_UNGROUNDED rl-e7 VIOLATION");
 });
 
 test("replay hr35-e7 11:18:41Z: a finding on a report an earlier check already read is OWNER_CHECK_STALE and moves no rung, even after a confirmed re-read", async () => {

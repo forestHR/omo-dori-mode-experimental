@@ -2,8 +2,8 @@
   "about": "The owner's standing directives every Dori shares (the directive ledger, fork layer). dori launch reads it with the host's local ledger (config directives.local): see SKILL.md and references/sessions.md. original is the owner's whole message as he sent it; words is original with only fillers (the list below) and whole sentences left out, never reworded, reordered or added to (dori directives check refuses anything else; a typo or speech-to-text error is corrected only through fixes); rule says how the directive reads as a rule. No links, names or paths here: a host's local ledger adds them by id.",
   "minHits": 3,
   "kinds": {
-    "learning": "강화학습|학습|훈련|\\btrain(?:ing)?\\b|\\bRL\\b|reward|보상|정책|policy|체크포인트|checkpoint|\\biter\\b|관문|합격선|평가 판",
-    "gpu": "\\bGPU\\b|CUDA|노드|\\bnode\\b|DGX|Spark|dori heavy",
+    "learning": "강화학습|학습|훈련|\\btrain(?:ing)?\\b|\\bRL\\b|reward|보상|체크포인트|checkpoint|\\biter\\b|관문|합격선|평가 판",
+    "gpu": "\\bGPU\\b|CUDA|노드|DGX|Spark|dori heavy|\\bJEV-?9B",
     "release": "릴리스|릴리즈|\\brelease\\b|배포|\\bdeploy|서명 태그",
     "autophagy": "오토파지|autophagy|cytoplasm|hermes",
     "feature": "새 기능|기능을? 추가|새 명령|명령을? (?:추가|만들)|플래그|\\bflag\\b|\\bhook\\b|훅|서비스를? (?:추가|만들)|new feature|new command"

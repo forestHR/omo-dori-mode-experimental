@@ -54,6 +54,16 @@ const QUOTED = /"([^"\n]{6,})"|“([^”]{6,})”|‘([^’]{6,})’|「([^」]{
 // a brief is the lead's prose around the owner's quoted words. Text outside quote marks is never the owner's.
 export const ownerWords = (text: string): string => [...text.matchAll(QUOTED)].map((m) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5] ?? "").join("\n");
 
+// The owner's own prompts a brief carries as built-in blocks (the eight steps, the UI steps) are his words, though they
+// stand in the brief unquoted; a line in parentheses under a step is the lead's rule on how the step is met, not his. On
+// 2026-11-01 pingpong-false-point's finding on step 7 ("plan approval은 모두 허가하니 ...") was dropped as ungrounded.
+export const briefBlockWords = (brief: string, blocks: Readonly<Record<string, string>>): string[] => {
+  const flat = (s: string): string => s.replace(/\s+/g, " ").trim();
+  return Object.values(blocks)
+    .filter((b) => b && flat(brief).includes(flat(b)))
+    .map((b) => b.split("\n").filter((l) => !/^\s+\(.*\)\s*$/.test(l)).join("\n"));
+};
+
 // The owner's messages a text links (discord.com/channels/<guild>/<channel>/<message id>), as the inbox recorded them: his
 // words as he wrote or spoke them (author `owner` when known).
 export const linkedWords = (text: string, inbox: string, owner: string): string[] => {
@@ -336,11 +346,12 @@ export const runOwnerCheck = async (deps: FlowDeps, lane: Lane, opts: { readonly
   // the brief against the directive ledger: a directive in scope that is not in it is a DIRECTIVE_GAP line; the directives
   // in scope go to the reviewer as the owner's words
   const ledger = launchLedger(deps);
-  const directiveLines = (await laneDirectiveGaps(deps, lane, ledger, await blockTexts(), files)).map((g) => `OWNER_CHECK_${g.line}`);
+  const blocks = await blockTexts();
+  const directiveLines = (await laneDirectiveGaps(deps, lane, ledger, blocks, files)).map((g) => `OWNER_CHECK_${g.line}`);
   for (const line of directiveLines) watchLog(deps.config.watchLog, deps.clock, { source: "owner-check", line });
   const directives = await laneDirectiveWords(deps, lane, ledger);
   const prompt = ownerPrompt(lane, brief, relays, reports, decisions, directives, context);
-  const ownerSource = [lane.goal ?? "", ...directives, ownerWords(brief), ...linkedWords(brief, inbox, owner), ...relays.flatMap((r) => [ownerWords(r.text), ...linkedWords(r.text, inbox, owner)]), ...decisions.map((d) => d.words)].join("\n");
+  const ownerSource = [lane.goal ?? "", ...directives, ...briefBlockWords(brief, blocks), ownerWords(brief), ...linkedWords(brief, inbox, owner), ...relays.flatMap((r) => [ownerWords(r.text), ...linkedWords(r.text, inbox, owner)]), ...decisions.map((d) => d.words)].join("\n");
   // the direction the lane stated (dori intent-check) is evidence too: a finding may quote it
   const reportSource = [...reports.map((r) => r.text), lane.direction?.text ?? "", lane.direction?.next ?? ""].join("\n");
   const ground = { ownerSource, briefSource: brief, reports, direction: lane.direction, checkedUpTo: lane.ownerCheck?.lastReportAt, checkedAt: lane.ownerCheck?.at, shared };

@@ -354,9 +354,9 @@ test("an idle lane waiting on a detached eval cell, background bash or task it s
   world.screen = "Waiting on the browser cell.\n❯ ";
   expect(await watchTick(w.deps(T0))).toEqual([]);
   expect(await watchTick(w.deps(T0 + 30_000))).toEqual([]);
-  expect(await watchTick(w.deps(T0 + MIN))).toEqual([`BG_WAITING fix-a eval:toolu_01RfMaz,bash:bash_3,task:st_01a14301 ${PANE}`]);
+  expect(await watchTick(w.deps(T0 + MIN))).toEqual([`BG_WAITING fix-a eval:toolu_01RfMaz,bash:bash_3,monitor:mon_X,task:st_01a14301 ${PANE}`]);
   for (let t = T0 + MIN + 30_000; t < T0 + 60 * MIN; t += 10 * MIN) expect(await watchTick(w.deps(t))).toEqual([]);
-  expect((await at(T0).registry.read("fix-a"))?.waitingOn).toBe("eval:toolu_01RfMaz,bash:bash_3,task:st_01a14301");
+  expect((await at(T0).registry.read("fix-a"))?.waitingOn).toBe("eval:toolu_01RfMaz,bash:bash_3,monitor:mon_X,task:st_01a14301");
   // waiting too long: blocked after all, once
   expect(await watchTick(w.deps(T0 + 60 * MIN))).toEqual([`LANE_BLOCKED fix-a idle ${PANE}`]);
   expect(await watchTick(w.deps(T0 + 61 * MIN))).toEqual([]);
@@ -395,6 +395,39 @@ test("once its background work ended, or when the work is from before the agent 
   world.screen = "Waiting.\n❯ ";
   expect(await watchTick(w.deps(T0 + 70 * MIN + 1))).toEqual([]);
   expect(await watchTick(w.deps(T0 + 71 * MIN))).toEqual([`LANE_BLOCKED fix-a idle ${PANE}`]);
+});
+
+// replay dashboard-save-403 2026-10-21T13:04:08Z (one of 8 such false alarms in 30 days): the lane armed a persistent
+// merge watcher from a cell and ended its turn; omo's status line did not show it, and the lane was LANE_BLOCKED idle
+const monitorStart = { name: "monitor", ok: true, args: { description: "PR 166 merge-pr", command: "merge-pr.sh 166", persistent: true }, resultPreview: "Monitor started with ID: mon_P1DBNZEPY6J5A5H8" };
+const monitorEvent = (kinds: string[]) => ({ type: "custom_message", customType: "senpi-monitor:notification", content: "<system-reminder>Monitor event(PR 166 merge-pr): MERGE_DONE rc=0</system-reminder>", details: { monitors: [{ id: "bash_2", description: "PR 166 merge-pr", eventCount: 1, kinds }] } });
+
+test("replay dashboard-save-403: an idle lane waiting on a monitor it armed is BG_WAITING until the watched command ends, a line event does not end it", async () => {
+  await idleLane();
+  const w = bgWorld(T0 - 60 * MIN);
+  w.result(T0 - 20_000, "eval", "Monitor started with ID: mon_P1DBNZEPY6J5A5H8", { toolCalls: [monitorStart] });
+  world.screen = "PR #166 merge running in a watcher.\n❯ ";
+  expect(await watchTick(w.deps(T0))).toEqual([]);
+  expect(await watchTick(w.deps(T0 + MIN))).toEqual([`BG_WAITING fix-a monitor:mon_P1DBNZEPY6J5A5H8 ${PANE}`]);
+  w.entry(T0 + 2 * MIN, monitorEvent(["line"]));
+  expect(await watchTick(w.deps(T0 + 4 * MIN))).toEqual([]);
+  w.entry(T0 + 5 * MIN, monitorEvent(["line", "summary"]));
+  expect(await watchTick(w.deps(T0 + 7 * MIN))).toEqual([`LANE_BLOCKED fix-a idle ${PANE}`]);
+});
+
+// replay pingpong-analytics 2026-11-02T00:20:03Z: bash_19 started about 40 minutes before the lane went idle and ran 85
+// minutes; once it was an hour old it no longer counted and the lane was LANE_BLOCKED idle while it still ran
+test("replay pingpong-analytics: a job the lane started shortly before it went idle still counts after it is an hour old; it ends, then the lane is blocked", async () => {
+  await idleLane();
+  const w = bgWorld(T0 - 120 * MIN);
+  w.result(T0 - 40 * MIN, "bash", "Command running in background with ID: bash_19", { bash_id: "bash_19", background: true });
+  world.screen = "Waiting on the analysis run.\n❯ ";
+  expect(await watchTick(w.deps(T0))).toEqual([]);
+  expect(await watchTick(w.deps(T0 + MIN))).toEqual([`BG_WAITING fix-a bash:bash_19 ${PANE}`]);
+  expect(await watchTick(w.deps(T0 + 20 * MIN))).toEqual([]);
+  expect(await watchTick(w.deps(T0 + 36 * MIN))).toEqual([]);
+  w.notified(T0 + 45 * MIN, "<system-reminder>Background terminal session bash_19 finished: completed (exit code 0).</system-reminder>");
+  expect(await watchTick(w.deps(T0 + 47 * MIN))).toEqual([`LANE_BLOCKED fix-a idle ${PANE}`]);
 });
 
 test("a stopped agent in an aoe session is reported once two reads a tick apart agree, and the lead's session is skipped", async () => {
