@@ -1,0 +1,13 @@
+# Hourly read-only watch of the upstream Dori repository (the checkout's upstream remote): owner decisions and port candidates go to the lead inbox. Install on the lead's Dori only; see README "Upstream watch".
+[Unit]
+Description=Read the upstream Dori repository and tell the lead inbox about port candidates and owner decisions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.dori/dori.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -I %h/.dori/src/skills/dori-mode/setups/discord-aoe/upstream-watch.py
+TimeoutStartSec=300
+Nice=10
