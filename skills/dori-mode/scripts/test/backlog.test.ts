@@ -559,3 +559,29 @@ test("the host and account guards are checked again before each start, so the se
   expect(launched).toEqual(["g1"]);
   expect(lines).toEqual([expect.stringMatching(/^BACKLOG_STARTED g1/), "BACKLOG_HOLD panes 20 >= 20; 1 item(s) wait"]);
 });
+
+test("a draft the lead replaces stays a draft and is still upgraded when the owner approves it", async () => {
+  // Given: a held feed draft the lead fixes with add
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  await sweep([{ todo_id: "pb-ffffffffffff-1", title: "f", status: "진행" }]);
+  addItem(state, { id: "todo-pb-ffffffffffff-1", title: "f (고침)", brief, done: "file /tmp/x" }, { registered: false, at: "2026-11-02T16:00:00Z" });
+  const replaced = readItem(state, "todo-pb-ffffffffffff-1");
+  // When
+  const lines = await sweep([{ todo_id: "pb-ffffffffffff-1", title: "f", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
+  // Then
+  expect([replaced?.draftOnly, replaced?.source]).toEqual([true, "pb-ffffffffffff-1"]);
+  expect(lines).toEqual(["BACKLOG_FEED_APPROVED todo-pb-ffffffffffff-1: the owner approved it; it now works within its scope"]);
+  expect(readItem(state, "todo-pb-ffffffffffff-1")?.draftOnly).toBeUndefined();
+});
+
+test("a feed entry never changes an item the lead added by hand under the same id", async () => {
+  // Given
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  addItem(state, { id: "todo-x9", title: "손으로 넣은 일", brief, done: "file /tmp/x" }, { registered: false, at: "2026-11-02T15:00:00Z" });
+  // When
+  const lines = await feedIntake({ stateDir: state, settings, feed: async () => ({ todos: [{ todo_id: "x9", title: "x9", status: "완료" }] }), now: () => now });
+  // Then
+  expect(lines).toEqual(["BACKLOG_FEED_CLASH todo-x9: held by an item lead added, not feed entry x9; left alone"]);
+  expect(readItem(state, "todo-x9")?.status).toBe("open");
+});

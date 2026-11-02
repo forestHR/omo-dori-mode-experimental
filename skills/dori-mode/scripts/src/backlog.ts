@@ -158,7 +158,8 @@ export const addItem = (stateDir: string, input: AddInput, ctx: { readonly regis
     ...(input.tags?.length ? { tags: input.tags } : {}),
     ...(input.readOnly ? { readOnly: true } : {}),
     ...(input.ownerLink ? { ownerLink: input.ownerLink } : {}),
-    ...(input.draftOnly ? { draftOnly: true } : {}),
+    // a draft stays a draft when the lead replaces it; only the feed's own approval (draftOnly false) lifts it
+    ...((input.draftOnly ?? (replaced ? old?.draftOnly : undefined)) ? { draftOnly: true } : {}),
     // what the feed recorded stays when the lead replaces the item (the fix of a held one)
     ...((input.followUpOf ?? (replaced ? old?.followUpOf : undefined)) ? { followUpOf: input.followUpOf ?? old?.followUpOf } : {}),
     ...((input.source ?? (replaced ? old?.source : undefined)) ? { source: input.source ?? old?.source } : {}),
@@ -458,8 +459,8 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     const id = feedItemId(ref);
     if (!ref || !LANE_KEY.test(id)) continue;
     const found = readItem(d.stateDir, id);
-    if (found?.source !== undefined && found.source !== ref) {
-      lines.push(`BACKLOG_FEED_CLASH ${id}: held by feed entry ${found.source}, not ${ref}; left alone`);
+    if (found && found.source !== ref) {
+      lines.push(`BACKLOG_FEED_CLASH ${id}: held by ${found.source !== undefined ? `feed entry ${found.source}` : `an item ${found.by} added`}, not feed entry ${ref}; left alone`);
       continue;
     }
     const old = found;
