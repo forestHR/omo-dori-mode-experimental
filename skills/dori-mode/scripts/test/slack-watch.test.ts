@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { missingTokens, runSocket, slackWatchOptions, startWatch, writeEnvValues } from "../../setups/discord-aoe/slack-watch.ts";
+import { MessengerError } from "../src/messenger/http.ts";
+import { clearEyes, readUneyed } from "../src/messenger/slack.ts";
 import { run } from "../src/run.ts";
 
 const WATCH = join(import.meta.dir, "..", "..", "setups", "discord-aoe", "slack-watch.ts");
@@ -381,6 +383,50 @@ test("late eyes the watcher could not take off are asked about again on the next
   await send(w, slack, ["--to", "D1", "--text", "z"]);
   expect([next.code, next.out.trim().split("\n").length]).toEqual([0, 1]);
   expect(unreacted(slack).length).toBe(3);
+});
+
+test("a slow answer's done never closes a newer answer's failed attempt on the same message", async () => {
+  // Given one answered DM in the inbox
+  const dir = scratch();
+  const files = { inbox: join(dir, "inbox.jsonl"), uneyed: join(dir, "slack-uneyed.log") };
+  writeFileSync(files.inbox, `${JSON.stringify({ id: "1700000000.000100", channel_id: "D1", reply_thread: null, scope: "slack", addressed: "dm" })}\n`);
+  const posted = { channel: "D1", ts: "1700000100.000100" };
+  // When answer A's removal is slow, answer B's fails meanwhile, and only then A hears no_reaction
+  let answerA: (e: Error) => void = () => {};
+  let askedA = () => {};
+  const asked = new Promise<void>((r) => (askedA = r));
+  const a = clearEyes((_c, _t, _s) => new Promise<void>((_, reject) => { answerA = reject; askedA(); }), files, posted);
+  await asked;
+  const b = await clearEyes(async () => { throw new MessengerError("slack reactions.remove: internal_error", 200, "internal_error"); }, files, posted);
+  answerA(new MessengerError("slack reactions.remove: no_reaction", 200, "no_reaction"));
+  await a;
+  // Then the message is still open, and the next answer asks Slack again
+  expect(b).toEqual(["SLACK_UNEYE_FAIL D1 1700000000.000100 slack reactions.remove: internal_error"]);
+  expect(readUneyed(files.uneyed).done.has("D1:1700000000.000100")).toBe(false);
+  const asks: string[] = [];
+  await clearEyes(async (c, t) => { asks.push(`${c} ${t}`); }, files, posted);
+  expect(asks).toEqual(["D1 1700000000.000100"]);
+  expect(readUneyed(files.uneyed).done.has("D1:1700000000.000100")).toBe(true);
+});
+
+test("a stalled late-eyes removal in the watcher leaves the message open: the next answer asks again", async () => {
+  // Given a DM whose reactions.add answers late, answered while its eyes were not on yet
+  const slack = fakeSlack();
+  slack.failing.reactHold = true;
+  const w = await watcher(slack, [], 30_000, {}, 200);
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "a", ts: "1700000000.000100" });
+  await slack.until("the DM", () => w.msgs().length === 1);
+  slack.failing.unreact = "no_reaction";
+  expect((await send(w, slack, ["--to", "D1", "--text", "x"])).code).toBe(0);
+  // When the eyes land and the watcher's own removal never answers (or its process is gone)
+  slack.failing.unreact = "stall";
+  slack.release("add");
+  await slack.until("the watcher's removal", () => unreacted(slack).length === 2);
+  // Then the next answer asks again even while the watcher's request is still out, and the watcher says it gave up
+  slack.failing.unreact = "";
+  expect((await send(w, slack, ["--to", "D1", "--text", "y"])).code).toBe(0);
+  expect(unreacted(slack).length).toBe(3);
+  await slack.until("the watcher's SLACK_UNEYE_FAIL", () => w.lines.includes("SLACK_UNEYE_FAIL D1 1700000000.000100 slack reactions.remove: no answer within 0.2s"));
 });
 
 test("two answers at once in different DMs both keep their record", async () => {

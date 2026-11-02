@@ -67,34 +67,34 @@ export const slackUnreact = (token: string, base = "https://slack.com/api"): Unr
 };
 
 // One record shared by dori send slack and the watcher, append-only: every process only appends whole lines and reads
-// the lot, so concurrent writers never lose each other's facts and no lock is needed. Lines are "<fact> <channel>:<ts>":
-// "answered" before the removal is asked (eyes that land later see it), "done" once Slack said the eyes are off, and
-// "retry" when the watcher could not take late eyes off again. Each "answered" starts an attempt; a message is done when
-// its latest attempt has a done line and no retry line, in whatever order those two were appended.
-export type UneyedFact = "answered" | "done" | "retry";
-export const noteUneyed = (file: string, fact: UneyedFact, key: string): void => {
+// the lot, so concurrent writers never lose each other's facts and no lock is needed. Lines are
+// "<fact> <channel>:<ts> <attempt>": "answered" opens an attempt before its removal is asked (eyes that land later see
+// it), "done" closes that attempt once Slack said the eyes are off. A message is done when its latest attempt is
+// closed: the done of an older attempt (a slow answer overtaken by a newer one) closes nothing, and an attempt whose
+// removal failed, stalled or whose process died stays open, so the next answer there asks again.
+export const newAttempt = (): string => crypto.randomUUID().slice(0, 8);
+export const noteUneyed = (file: string, fact: "answered" | "done", key: string, attempt: string): void => {
   mkdirSync(dirname(file), { recursive: true });
-  appendFileSync(file, `${fact} ${key}\n`, { mode: 0o600 });
+  appendFileSync(file, `${fact} ${key} ${attempt}\n`, { mode: 0o600 });
 };
 export const readUneyed = (file: string): { readonly answered: ReadonlySet<string>; readonly done: ReadonlySet<string> } => {
-  const attempt = new Map<string, { done: boolean; retry: boolean }>();
+  const latest = new Map<string, string>();
+  const closed = new Set<string>();
   for (const line of existsSync(file) ? readFileSync(file, "utf8").split("\n") : []) {
-    const [fact, key] = line.split(" ");
-    if (!key) continue;
-    if (fact === "answered") attempt.set(key, { done: false, retry: false });
-    const a = attempt.get(key);
-    if (a && fact === "done") a.done = true;
-    if (a && fact === "retry") a.retry = true;
+    const [fact, key, attempt] = line.split(" ");
+    if (!key || !attempt) continue;
+    if (fact === "answered") latest.set(key, attempt);
+    else if (fact === "done") closed.add(`${key} ${attempt}`);
   }
-  return { answered: new Set(attempt.keys()), done: new Set([...attempt].filter(([, a]) => a.done && !a.retry).map(([k]) => k)) };
+  return { answered: new Set(latest.keys()), done: new Set([...latest].filter(([k, a]) => closed.has(`${k} ${a}`)).map(([k]) => k)) };
 };
 
 // The eyes read receipt slack-watch.ts puts on an addressed message comes off once the Dori answers it, as on Discord.
 // The watcher's inbox rows say which messages got eyes (addressed) and where their answer goes (reply_thread); a post
 // there, or in a thread under the message itself, answers every earlier one of them. reactions.remove with the bot
-// token only ever takes off the bot's own reaction, never a person's or another app's. Each message is noted answered
-// before its removal is asked and done right after Slack's answer (see noteUneyed), so a later answer in the same place
-// asks Slack nothing again and the watcher takes off eyes that land after the answer. Each removal has ms to answer: a
+// token only ever takes off the bot's own reaction, never a person's or another app's. Each removal is one attempt in
+// the shared record (see noteUneyed), so a later answer in the same place asks Slack nothing again and the watcher
+// takes off eyes that land after the answer. Each removal has ms to answer: a
 // stalled one is aborted and it and the rest stay for the next answer. Returns the lines to print: one
 // SLACK_UNEYE_SKIPPED when the app has no reactions:write, one SLACK_UNEYE_FAIL per other failure (retried next time).
 export const clearEyes = async (unreact: Unreact, files: { readonly inbox: string; readonly uneyed: string }, posted: Posted, thread?: string, ms = 3000): Promise<string[]> => {
@@ -116,7 +116,8 @@ export const clearEyes = async (unreact: Unreact, files: { readonly inbox: strin
   const lines: string[] = [];
   for (const ts of targets) {
     const key = `${posted.channel}:${ts}`;
-    noteUneyed(files.uneyed, "answered", key);
+    const attempt = newAttempt();
+    noteUneyed(files.uneyed, "answered", key, attempt);
     const stop = new AbortController();
     const timer = setTimeout(() => stop.abort(), ms);
     try {
@@ -139,7 +140,7 @@ export const clearEyes = async (unreact: Unreact, files: { readonly inbox: strin
     } finally {
       clearTimeout(timer);
     }
-    noteUneyed(files.uneyed, "done", key);
+    noteUneyed(files.uneyed, "done", key, attempt);
   }
   return lines;
 };
