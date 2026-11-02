@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 
 import { AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
+import { turnRunning } from "./submit.ts";
 import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { agentGone, firstTurnRuns, GOAL_WAIT, goalReader, lastLines, noGoalWhy } from "./pending-goal.ts";
@@ -589,7 +590,7 @@ export const aoeStartup = async (deps: FlowDeps, key: string, pane: string, scre
   const life = await paneLife(deps.run, pane);
   if (!life.live) return `STARTUP_ERROR ${key} ${pane}: ${life.how === "gone" ? "the tmux session is gone" : `the agent exited (status ${life.status})`}`;
   const full = await readScreen(deps.run, "aoe", pane);
-  const shows = [screen, full].some((s) => s.toLowerCase().includes(BUSY_MARK) || WAKE_MARKS.some((m) => s.includes(m)) || inputLine(s) !== undefined);
+  const shows = [screen, full].some((s) => turnRunning(s) || WAKE_MARKS.some((m) => s.includes(m)) || inputLine(s) !== undefined);
   return shows ? `STARTUP_OK ${key} ${pane}` : `STARTUP_UNCONFIRMED ${key} ${pane}: no running turn and no ❯ prompt on screen; last lines: ${lastLines(full || screen)}`;
 };
 

@@ -1231,6 +1231,60 @@ test("an automatic start whose lane stays busy for the whole wait is refused as 
   expect(existsSync(join(state.dir, "handover", "lanes", "demo.lock"))).toBe(false);
 });
 
+// omo's input box sits between two ─ borders; the status lines under it can quote "esc to interrupt" (here the cwd and a
+// session title), while omo's own running-turn mark is on the box's top border
+const QUOTED = HIGH.replace("old transcript line\n❯ \n────", "old transcript line\n────\n❯ \n────").replace("~/work •", "~/work/esc to interrupt •").replace("(OmO) mem:x", "(OmO) Fix esc to interrupt indicator");
+const BORDER_BUSY = QUOTED.replace("old transcript line\n────", "old transcript line\n── • Working (3s • esc to interrupt) ────");
+
+test("busy mark scope: an idle lane whose status lines quote esc to interrupt is not refused as busy; the mark on the box's top border still refuses", async () => {
+  // Given
+  const deps = await setup();
+  table = baseTable().filter((p) => p.pid !== 15 && p.pid !== 16);
+  // When
+  w.screens[OLD] = QUOTED;
+  const idle = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
+  const idleLines = [...printed];
+  w.screens[OLD] = BORDER_BUSY;
+  const busy = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // Then
+  expect(idle.code).toBe(0);
+  expect(idleLines.some((l) => l.includes("a turn is running"))).toBe(false);
+  expect(idleLines.some((l) => l.startsWith("HANDOVER_DRY_RUN demo"))).toBe(true);
+  expect(busy.code).toBe(2);
+  expect(printed.at(-1)).toContain("a turn is running");
+  expect(opened()).toBe(false);
+});
+
+test("busy mark scope: an automatic start stops waiting once only the status lines quote esc to interrupt, and freezes the lane without thawing it", async () => {
+  // Given: a turn runs (mark on the border), then ends at the second poll; the status lines keep quoting the words
+  const base = await setup();
+  const c = fakeClock(Date.parse("2026-10-11T16:35:00Z"));
+  let polls = 0;
+  const sigs: string[] = [];
+  const deps: LaneHandoverDeps = {
+    ...base,
+    clock: { now: () => c.at, sleep: async (ms: number) => { c.at += ms; polls++; if (polls === 2) w.screens[OLD] = QUOTED; simulate(); } },
+    config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } },
+    reportOwner: async () => "msg-9",
+    signal: (pid, sig) => {
+      sigs.push(`${sig} ${pid}`);
+      return true;
+    },
+  };
+  table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
+  w.screens[OLD] = BORDER_BUSY;
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  // Then
+  expect(r.code).toBe(0);
+  expect(printed.filter((l) => l.startsWith("HANDOVER_WAIT_IDLE demo"))).toHaveLength(1);
+  expect(polls).toBeLessThan(10);
+  expect(printed.some((l) => l.includes("a turn started as it was frozen"))).toBe(false);
+  expect(printed.filter((l) => l.startsWith("HANDOVER_FROZEN demo"))).toHaveLength(1);
+  expect(sigs[0]).toBe("SIGSTOP 11");
+  expect(printed).toContain(`HANDOVER_COMMITTED demo ${NEW}`);
+});
+
 test("when the old session ends during the checks, the new one stays the lane instead of moving back to a dead pane", async () => {
   // Given
   const deps = await setup();

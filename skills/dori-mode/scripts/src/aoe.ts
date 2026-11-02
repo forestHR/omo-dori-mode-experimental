@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 
 import type { Pane } from "./panes.ts";
 import type { Clock, Runner } from "./run.ts";
+import { turnRunning } from "./submit.ts";
 
 export type AoeSession = { readonly id: string; readonly title: string; readonly path: string; readonly tool?: string; readonly profile?: string };
 
@@ -48,7 +49,8 @@ export const aoeStates = async (run: Runner): Promise<Map<string, string>> => {
   return new Map((JSON.parse(r.out) as { session: string; state: string }[]).map((p) => [p.session, p.state]));
 };
 
-// omo prints "esc to interrupt" while its main turn runs. Between turns its status line shows what will wake it:
+// omo prints "esc to interrupt" while its main turn runs, on its input box's top border (turnRunning reads only there: the
+// status lines under the box may quote the words in the cwd, session title or goal objective). Between turns its status line shows what will wake it:
 // a monitor ("◉ watching ..."), wake sources on duty, a scheduled goal continuation, an active goal.
 // aoe's state lags behind all of these, and shows an open omo question ("Ask user · ...") as idle.
 export const BUSY_MARK = "esc to interrupt";
@@ -67,7 +69,7 @@ export const paneActivity = async (run: Runner, panes: readonly string[]): Promi
     const state = id ? states.get(id) : undefined;
     if (!state) continue;
     const screen = await captureTmux(run, pane);
-    if (screen.includes(BUSY_MARK)) out.set(pane, "busy");
+    if (turnRunning(screen)) out.set(pane, "busy");
     else if (state === "waiting" || state === "error") out.set(pane, state);
     else if (QUESTION_MARK.test(screen)) out.set(pane, "question");
     else if (WAKE_MARKS.some((m) => screen.includes(m))) out.set(pane, "running");

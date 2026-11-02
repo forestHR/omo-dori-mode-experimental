@@ -1,8 +1,9 @@
-import { BUSY_MARK, inputLine } from "./aoe.ts";
+import { inputLine } from "./aoe.ts";
 import type { DoriConfig } from "./config.ts";
 import { frozenPanes } from "./frozen.ts";
 import { listPanes, readScreen } from "./panes.ts";
 import type { Runner } from "./run.ts";
+import { turnRunning } from "./submit.ts";
 
 // A pane is judged from what positively shows, never from one screen read (ported from dori-superagent 40034ad, #7, MIT,
 // https://github.com/sisyphuslabs/dori-superagent/commit/40034ad1a557b92a34aa1450565adcafd3352c96; herdr's agent_status
@@ -17,7 +18,7 @@ export const UNRECOGNISED_ALERT_AFTER = 3;
 export type DeadPaneState = { readonly unknown: Map<string, number>; readonly lastTail: Map<string, string> };
 export const newDeadPaneState = (): DeadPaneState => ({ unknown: new Map(), lastTail: new Map() });
 
-const agentShows = (screen: string): boolean => inputLine(screen) !== undefined || screen.toLowerCase().includes(BUSY_MARK);
+const agentShows = (screen: string): boolean => inputLine(screen) !== undefined || turnRunning(screen);
 
 // pausedPanes: panes of paused lanes, which the lead parked on purpose
 export const deadPaneTick = async (run: Runner, config: DoriConfig, seen: Set<string>, hourKey: string, pausedPanes: readonly string[] = [], state: DeadPaneState = newDeadPaneState()): Promise<string[]> => {
