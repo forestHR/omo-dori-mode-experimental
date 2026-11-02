@@ -126,7 +126,7 @@ def whole(kind: str, items: list[dict]) -> list[dict]:
 def merged_prs(repo: str) -> list[dict]:
     if FIXTURE:
         return json.loads(fixture("prs.json"))
-    fields = "number,title,url,mergedAt,mergeCommit,files,changedFiles,body"
+    fields = "number,title,url,mergedAt,mergeCommit,body"
     return whole("PR", json.loads(gh(["pr", "list", "--repo", repo, "--state", "merged", "--limit", LIST_LIMIT, "--json", fields])))
 
 
@@ -144,16 +144,38 @@ def commits(repo: str) -> list[dict]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
-def pr_diff(repo: str, number: int) -> str:
-    if FIXTURE:
-        return fixture(f"diff-{number}.txt", "")
-    return gh(["pr", "diff", str(number), "--repo", repo])
+FILES_LIMIT = 3000
 
 
-def commit_detail(repo: str, sha: str) -> dict:
+def file_entries(repo: str, what: str, endpoint: str, jq: str, fixture_name: str) -> list[dict]:
+    # One source for a PR's or a commit's files: every page, each with its patch (GitHub leaves the patch out of a
+    # huge file). The PR diff endpoint is not used: it refuses diffs over 300 files or 3000 lines (406 too_large).
     if FIXTURE:
-        return json.loads(fixture(f"commit-{sha}.json", "{}"))
-    return json.loads(gh(["api", f"repos/{repo}/commits/{sha}"]))
+        entries = json.loads(fixture(fixture_name, "[]"))
+    else:
+        out = gh(["api", "--paginate", f"repos/{repo}/{endpoint}", "--jq", jq])
+        entries = [json.loads(line) for line in out.splitlines() if line.strip()]
+    if len(entries) >= FILES_LIMIT:
+        raise Incomplete(f"{what} lists {len(entries)} files, GitHub's limit of {FILES_LIMIT}; its file list may be cut")
+    return entries
+
+
+def pr_files(repo: str, number: int) -> list[dict]:
+    return file_entries(repo, f"PR #{number}", f"pulls/{number}/files?per_page=100", ".[] | {filename, patch, status, changes}", f"files-{number}.json")
+
+
+def commit_files(repo: str, sha: str) -> list[dict]:
+    return file_entries(repo, f"commit {sha[:9]}", f"commits/{sha}?per_page=100", ".files[] | {filename, patch, status, changes}", f"commit-{sha}.json")
+
+
+def unread(entries: list[dict]) -> list[str]:
+    # changed code GitHub sent no patch for: its added lines cannot be checked, so it is not taken as harmless
+    return [f["filename"] for f in entries if f.get("patch") is None and f.get("status") != "removed" and (f.get("changes") or 0) > 0
+            and CODE_FILE.search(f["filename"]) and not TEST_FILE.search(f["filename"])]
+
+
+def as_diff(entries: list[dict]) -> str:
+    return "".join(f"diff --git a/{f['filename']} b/{f['filename']}\n{f.get('patch') or ''}\n" for f in entries)
 
 
 def commit_prs(repo: str, sha: str) -> list[dict]:
@@ -224,12 +246,14 @@ def new_deps(added: dict[str, list[str]]) -> str | None:
     return None
 
 
-def classify_change(title: str, paths: list[str], diff: str) -> tuple[str, str]:
+def classify_change(title: str, paths: list[str], diff: str, blind: list[str] | None = None) -> tuple[str, str]:
     if PR_HARNESS.search(title):
         return "2", "herdr 하네스"
     added = added_by_file(diff)
     ours = [p for p in paths if p.startswith("skills/")]
     why = []
+    if blind:
+        why.append(f"내용을 못 읽음(patch 없음: {', '.join(blind[:3])}{' 외' if len(blind) > 3 else ''}), 손으로 확인")
     sent = outbound(added)
     if OUTBOUND_TITLE.search(title) or sent:
         why.append("바깥으로 데이터를 보냄" + (f"({sent})" if sent else ""))
@@ -256,21 +280,9 @@ def classify_pr(repo: str, pr: dict, here: Here) -> tuple[str, str]:
         return "1", f"우리 코드가 이 PR이 닫은 이슈 #{cited[0]}를 인용"
     if here.has_commit(sha):
         return "1", "우리 이력에 이미 있음"
-    diff = "" if PR_HARNESS.search(pr["title"]) else pr_diff(repo, n)
-    paths = [f["path"] for f in pr.get("files") or []]
-    if (pr.get("changedFiles") or 0) > len(paths):
-        paths = changed_paths(sha, n)
-    return classify_change(pr["title"], paths, diff)
-
-
-def changed_paths(sha: str | None, n: int) -> list[str]:
-    # gh lists at most 100 files of a PR: read the whole list from the merge commit, fetched by id (no ref moves)
-    if not sha or git(["fetch", "--quiet", "--no-tags", "upstream", sha]).returncode != 0:
-        raise GhError(f"PR #{n} lists more files than gh returned and its merge commit {sha} could not be fetched")
-    out = git(["diff", "--name-only", f"{sha}^1", sha])
-    if out.returncode != 0:
-        raise GhError(f"git diff of PR #{n} merge commit {sha} failed: {out.stderr.strip()[:200]}")
-    return out.stdout.split()
+    entries = [] if PR_HARNESS.search(pr["title"]) else pr_files(repo, n)
+    cls, why = classify_change(pr["title"], [f["filename"] for f in entries], as_diff(entries), unread(entries))
+    return cls, why + (f", 이슈 {', '.join(f'#{i}' for i in closes)} 닫음" if closes else "")
 
 
 def classify_issue(issue: dict, here: Here, closed_by: dict[int, int]) -> tuple[str, str]:
@@ -354,10 +366,8 @@ def gather(repo: str, here: Here) -> list[dict]:
                 return "1", "우리 이력에 이미 있음"
             if covered := [p["number"] for p in commit_prs(repo, sha) if p.get("merged_at") and p.get("number") in merged]:
                 return "2", f"머지된 PR #{covered[0]}에 들어 있음(그 PR로 판단)"
-            detail = commit_detail(repo, sha)
-            files = detail.get("files") or []
-            diff = "".join(f"diff --git a/{f['filename']} b/{f['filename']}\n{f.get('patch', '')}\n" for f in files)
-            return classify_change(first, [f["filename"] for f in files], diff)
+            entries = commit_files(repo, sha)
+            return classify_change(first, [f["filename"] for f in entries], as_diff(entries), unread(entries))
 
         items.append({"key": f"commit:{sha}", "label": f"커밋 {sha[:9]}", "title": first,
                       "url": c.get("html_url") or f"https://github.com/{repo}/commit/{sha}", "classify": classify_commit})
@@ -412,12 +422,16 @@ def main(argv: list[str]) -> int:
         items = gather(repo, here)
         fresh = [i for i in items if i["key"] not in state["items"]]
         for item in fresh:
-            item["cls"], item["why"] = ("0", "seed") if seed else item["classify"]()
+            try:
+                item["cls"], item["why"] = ("0", "seed") if seed else item["classify"]()
+            except Incomplete as error:
+                # this item alone could not be read in full: it goes to the lead as a decision, the rest go on
+                item["cls"], item["why"] = "3", f"다 못 읽음({one_line(error, 160)}), 손으로 확인"
     except (GhError, ValueError, KeyError) as error:
         state["fails"] += 1
         # a list cut short would lose items quietly: say so on the first such run, not after three
         incomplete = isinstance(error, Incomplete) and not state.get("incomplete_alerted")
-        alert = state["fails"] == FAILS_BEFORE_ALERT or incomplete
+        alert = incomplete or (state["fails"] == FAILS_BEFORE_ALERT and not state.get("incomplete_alerted"))
         if incomplete:
             state["incomplete_alerted"] = True
         if alert:

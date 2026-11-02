@@ -30,20 +30,16 @@ beforeEach(() => {
   sh(["git", "add", "."], src);
   sh(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "root"], src);
   ourRoot = sh(["git", "rev-parse", "HEAD"], src);
-  sh(["git", "checkout", "-q", "-b", "upstream-side"], src);
-  mkdirSync(join(src, "docs"));
-  for (let i = 0; i < 100; i++) writeFileSync(join(src, "docs", `page-${String(i).padStart(3, "0")}.md`), `${i}\n`);
-  mkdirSync(join(src, "skills"));
-  writeFileSync(join(src, "skills", "zz-late.ts"), "x\n");
-  sh(["git", "add", "."], src);
-  sh(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "big"], src);
-  const bigMerge = sh(["git", "rev-parse", "HEAD"], src);
-  sh(["git", "checkout", "-q", "-"], src);
-  sh(["git", "remote", "add", "upstream", src], src);
-  const pr = (number: number, title: string, paths: string[], extra: object = {}) => ({
-    number, title, url: `${UP}/pull/${number}`, mergedAt: "2026-11-02T00:00:00Z", files: paths.map((path) => ({ path })),
-    mergeCommit: { oid: `${number}`.padStart(40, "c") }, body: "", ...extra,
-  });
+
+  // a PR's files as GitHub's pulls/N/files lists them, with the patch of the given ones
+  const patches: Record<string, string> = {
+    "src/telemetry.ts": "@@ -0,0 +1 @@\n+  const res = await fetch(url);",
+    "skills/dori-mode/scripts/src/cli.ts": "@@ -0,0 +1 @@\n+// see https://github.com/x/y",
+  };
+  const pr = (number: number, title: string, paths: string[], extra: object = {}) => {
+    json(`files-${number}.json`, paths.map((filename) => ({ filename, patch: patches[filename] ?? null })));
+    return { number, title, url: `${UP}/pull/${number}`, mergedAt: "2026-11-02T00:00:00Z", mergeCommit: { oid: `${number}`.padStart(40, "c") }, body: "", ...extra };
+  };
   json("prs.json", [
     pr(7, "fix(dori-mode): decide pane state", ["skills/dori-mode/scripts/src/dead-panes.ts"], { mergeCommit: { oid: "40034ad1a557b92a34aa1450565adcafd3352c96" } }),
     pr(16, "feat: dori superharness on herdr + omo", ["src/herdr.ts", "README.md"]),
@@ -52,11 +48,9 @@ beforeEach(() => {
     pr(23, "feat(loop): hourly loop that keeps picking up the next backlog item", ["src/loop.ts"]),
     pr(25, "fix(dori-mode): skip report templates", ["skills/dori-mode/scripts/src/freshness.ts"], { body: "Fixes #22" }),
     pr(30, "fix(dori-mode): keep reports in reports.jsonl", ["skills/dori-mode/scripts/src/cli.ts"]),
-    // gh returns the first 100 files only; the skills/ change is the 101st
-    pr(40, "fix: rename the docs pages", Array.from({ length: 100 }, (_, i) => `docs/page-${String(i).padStart(3, "0")}.md`), { changedFiles: 101, mergeCommit: { oid: bigMerge } }),
+    // more files than one page and than gh pr list shows (100); the skills/ change is the 101st
+    pr(40, "fix: rename the docs pages", [...Array.from({ length: 100 }, (_, i) => `docs/page-${String(i).padStart(3, "0")}.md`), "skills/dori-mode/zz-late.ts"]),
   ]);
-  writeFileSync(join(gh, "diff-21.txt"), "diff --git a/src/telemetry.ts b/src/telemetry.ts\n+++ b/src/telemetry.ts\n+  const res = await fetch(url);\n");
-  writeFileSync(join(gh, "diff-30.txt"), "diff --git a/skills/dori-mode/scripts/src/cli.ts b/skills/dori-mode/scripts/src/cli.ts\n+// see https://github.com/x/y\n");
   const issue = (number: number, title: string, state = "OPEN") => ({ number, title, state, url: `${UP}/issues/${number}`, createdAt: "2026-11-02T00:00:00Z" });
   json("issues.json", [issue(22, "freshness: lastReportLine selects templates", "CLOSED"), issue(27, "Telemetry", "CLOSED"), issue(29, "freshness: other report-template shapes"), issue(31, "dori send fails for agents launched with pane run")]);
   const commit = (sha: string, message: string) => ({ sha, commit: { message }, html_url: `${UP}/commit/${sha}` });
@@ -66,7 +60,7 @@ beforeEach(() => {
     commit(ourRoot, "root"),
     commit("a".repeat(40), "a commit older than our history"),
   ].map((c) => JSON.stringify(c)).join("\n"));
-  json(`commit-${"b".repeat(40)}.json`, { files: [{ filename: "skills/dori-mode/scripts/src/sweeps.ts", patch: "+x" }] });
+  json(`commit-${"b".repeat(40)}.json`, [{ filename: "skills/dori-mode/scripts/src/sweeps.ts", patch: "+x" }]);
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
@@ -193,14 +187,18 @@ if a[:2] == ["pr", "list"]:
     print(json.dumps(json.load(open("${join(root, "prs.json")}"))[: int(a[a.index("--limit") + 1])]))
 elif a[:2] == ["issue", "list"]:
     print("[]")
-elif a[:2] == ["pr", "diff"]:
-    print("")
+elif a[0] == "api" and a[1] == "--paginate" and "/pulls/" in a[2]:
+    print(json.dumps({"filename": "skills/dori-mode/scripts/src/cli.ts", "patch": "+x"}))
+elif a[0] == "api" and a[1] == "--paginate" and "/commits/" in a[2]:
+    # a commit's files come 300 per page; the skills/ change is on the second page
+    print(json.dumps({"filename": "docs/a.md", "patch": "+a"}))
+    print(json.dumps({"filename": "skills/dori-mode/scripts/src/sweeps.ts", "patch": "+x"}))
 elif a[0] == "api" and a[1] == "--paginate":
     print(open("${join(root, "commits.jsonl")}").read())
 elif a[0] == "api" and a[1].endswith("/pulls"):
     print(json.dumps([{"number": 999 if "${"f".repeat(40)}" in a[1] else 5, "merged_at": "2026-11-02T00:00:00Z"}]))
 elif a[0] == "api" and "/commits/" in a[1]:
-    print(json.dumps({"files": [{"filename": "skills/dori-mode/scripts/src/sweeps.ts", "patch": "+x"}]}))
+    print(json.dumps({"filename": "docs/a.md", "patch": "+a"}))
 else:
     sys.exit(f"unexpected gh {a}")
 `);
@@ -235,6 +233,32 @@ else:
   expect(first.err).toContain("UPSTREAM-WATCH-FAIL Incomplete");
   expect(seen()).toEqual({});
   expect(inbox().map((x) => [x.kind, x.thread])).toEqual([["upstream-watch-fail", "discord:42"]]);
-  expect((await cut()).code).toBe(3);
+  for (let i = 0; i < 3; i++) expect((await cut()).code).toBe(3);
   expect(inbox()).toHaveLength(1);
+});
+
+test("a PR at GitHub's 3000-file cap goes to the lead as a decision by itself, and the other items still arrive", async () => {
+  json("files-30.json", Array.from({ length: 3000 }, (_, i) => ({ filename: `docs/f${i}.md`, patch: null })));
+  const r = await run();
+  expect(r.code).toBe(0);
+  const rows = inbox().filter((x) => x.kind === "upstream-change");
+  expect(rows.find((x) => x.item === "pr:30")).toMatchObject({ class: "3" });
+  expect(rows.find((x) => x.item === "pr:30")!.reason).toContain("PR #30 lists 3000 files");
+  expect(rows.map((x) => x.item)).toContain("pr:21");
+});
+
+test("with a neutral title the file contents decide: outbound code found in a patch, and code without a patch, both go to the owner", async () => {
+  json("prs.json", [
+    { number: 41, title: "refactor: client cleanup", url: `${UP}/pull/41`, mergedAt: "2026-11-02T00:00:00Z", mergeCommit: { oid: "4".repeat(40) }, body: "" },
+    { number: 42, title: "refactor: tidy the store", url: `${UP}/pull/42`, mergedAt: "2026-11-02T00:00:00Z", mergeCommit: { oid: "5".repeat(40) }, body: "" },
+    { number: 43, title: "refactor: move a file", url: `${UP}/pull/43`, mergedAt: "2026-11-02T00:00:00Z", mergeCommit: { oid: "6".repeat(40) }, body: "" },
+  ]);
+  json("files-41.json", [{ filename: "src/client.ts", patch: "@@ -0,0 +1 @@\n+await post('https://t.omo.dev/v1/logs')", status: "modified", changes: 1 }]);
+  json("files-42.json", [{ filename: "src/store.ts", patch: null, status: "modified", changes: 900 }]);
+  json("files-43.json", [{ filename: "src/old.ts", patch: null, status: "removed", changes: 40 }, { filename: "README.md", patch: null, status: "modified", changes: 2 }]);
+  json("issues.json", []);
+  writeFileSync(join(gh, "commits.jsonl"), "");
+  expect((await run()).code).toBe(0);
+  expect(inbox().filter((x) => x.kind === "upstream-change").map((x) => [x.item, x.class])).toEqual([["pr:41", "3"], ["pr:42", "3"]]);
+  expect(seen()["pr:43"]!.class).toBe("2");
 });
