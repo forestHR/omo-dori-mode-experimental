@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, type FeedTodo, flockDir, followUpId, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
+import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, feedItemId, type FeedTodo, flockDir, followUpId, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 
@@ -439,7 +439,7 @@ test("an approved follow-up has its own Done line, is dropped when the source fi
   // Given: a draft whose lane finished, with an id of the longest lane-key length
   const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
   const ref = `pb-${"a".repeat(54)}`;
-  const draftId = `todo-${ref}`.slice(0, 61);
+  const draftId = feedItemId(ref);
   const entry = (status: string, approved: boolean) => ({ todo_id: ref, title: "긴 할 일", status, ...(approved ? { approved_at: "2026-11-02T15:00:00Z", auto_applied: false } : {}) });
   const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
   await sweep([entry("진행", false)]);
@@ -449,7 +449,7 @@ test("an approved follow-up has its own Done line, is dropped when the source fi
   const follow = readItem(state, followUpId(draftId));
   const finished = await sweep([entry("완료", true)]);
   // Then
-  expect(draftId.length).toBe(61);
+  expect(draftId.length).toBeLessThanOrEqual(61);
   expect(followUpId(draftId)).not.toBe(draftId);
   expect(followUpId(draftId).length).toBeLessThanOrEqual(61);
   expect(approved[0]).toStartWith(`BACKLOG_INTAKE ${followUpId(draftId)} (feed, owner-approved, after draft ${draftId})`);
@@ -496,4 +496,66 @@ test("an unsafe shared host directory is refused, and a link planted at a slot's
   expect(planted).toBeUndefined();
   expect(readFileSync(victim, "utf8")).toBe("keep");
   expect(readdirSync(real)).toEqual([]);
+});
+
+test("a follow-up the lead replaces (the fix of a held one) still belongs to its draft and is dropped with it", async () => {
+  // Given: an approved follow-up of a finished draft
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  await sweep([{ todo_id: "pb-dddddddddddd-1", title: "d", status: "진행" }]);
+  writeFileSync(join(state, "backlog", "items", "todo-pb-dddddddddddd-1.json"), JSON.stringify({ ...readItem(state, "todo-pb-dddddddddddd-1")!, status: "done" }));
+  await sweep([{ todo_id: "pb-dddddddddddd-1", title: "d", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
+  // When: the lead replaces it, then the source finishes
+  addItem(state, { id: "appr-pb-dddddddddddd-1", title: "d (고침)", brief, done: "file /tmp/x" }, { registered: false, at: "2026-11-02T16:00:00Z" });
+  const done = await sweep([{ todo_id: "pb-dddddddddddd-1", title: "d", status: "완료" }]);
+  // Then
+  expect(readItem(state, "appr-pb-dddddddddddd-1")?.followUpOf).toBe("todo-pb-dddddddddddd-1");
+  expect(done).toEqual(["BACKLOG_FEED_DONE appr-pb-dddddddddddd-1: done on the source, dropped from the list"]);
+});
+
+test("feed entries that cleaning or cutting would merge keep their own items, and finishing one leaves the other", async () => {
+  // Given
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  const long = (tail: string) => `pb-${"e".repeat(70)}-${tail}`;
+  // When
+  const added = await sweep([{ todo_id: "mail/A", title: "a1", status: "진행" }, { todo_id: "mail:A", title: "a2", status: "진행" }, { todo_id: long("1"), title: "l1", status: "진행" }, { todo_id: long("2"), title: "l2", status: "진행" }]);
+  const done = await sweep([{ todo_id: "mail/A", title: "a1", status: "완료" }, { todo_id: long("1"), title: "l1", status: "완료" }]);
+  // Then
+  expect(new Set([feedItemId("mail/A"), feedItemId("mail:A"), feedItemId(long("1")), feedItemId(long("2"))]).size).toBe(4);
+  expect(added.length).toBe(4);
+  expect(done).toEqual([`BACKLOG_FEED_DONE ${feedItemId("mail/A")}: done on the source, dropped from the list`, `BACKLOG_FEED_DONE ${feedItemId(long("1"))}: done on the source, dropped from the list`]);
+  expect([readItem(state, feedItemId("mail:A"))?.status, readItem(state, feedItemId(long("2")))?.status]).toEqual(["open", "open"]);
+  expect(readItem(state, feedItemId("mail:A"))?.source).toBe("mail:A");
+  expect(feedItemId("pb-1697b943644f-1")).toBe("todo-pb-1697b943644f-1");
+});
+
+test("a pair repair starts without an owner link even where writes need one (the owner's standing repair rule), and config loading says so once", async () => {
+  // Given
+  const file = join(root, "both.json");
+  writeFileSync(file, JSON.stringify({ backlog: { pairRepairPattern: "^도리야, 수리 요청", writeNeedsOwnerLink: true } }));
+  const warned: string[] = [];
+  const settings = { ...SETTINGS, pairRepairPattern: "^도리야, 수리 요청", pairRequestPattern: "^도리야,", writeNeedsOwnerLink: true };
+  const inbox: InboxRow[] = [{ id: "2000", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  const intake = () => pairIntake({ stateDir: state, settings, rows: () => inbox, pairBots: ["B1"], guild: "1", ownerLink: async () => undefined, now: () => now });
+  // When
+  await loadConfig(file, root, (line) => warned.push(line));
+  await intake();
+  inbox.push({ id: "2001", scope: "pair-bot", author_id: "B1", channel_id: "3", content: "도리야, 수리 요청: 감시가 멈췄어" });
+  await intake();
+  // Then
+  expect(warned.filter((w) => w.startsWith("CONFIG_BACKLOG_REPAIR_EXEMPT")).length).toBe(1);
+  expect(readItem(state, "pair-2001")?.ask).toBeUndefined();
+});
+
+test("the host and account guards are checked again before each start, so the second start of a pass waits when the first used the room", async () => {
+  // Given: room for two starts, but the host is full after the first
+  add("g1", { priority: "1" });
+  add("g2", { priority: "2" });
+  let busyCalls = 0;
+  // When
+  const lines = await backlogTick(deps({ busy: async () => (busyCalls++ === 0 ? [] : ["panes 20 >= 20"]) }, { maxStarts: 2 }));
+  // Then
+  expect(launched).toEqual(["g1"]);
+  expect(lines).toEqual([expect.stringMatching(/^BACKLOG_STARTED g1/), "BACKLOG_HOLD panes 20 >= 20; 1 item(s) wait"]);
 });

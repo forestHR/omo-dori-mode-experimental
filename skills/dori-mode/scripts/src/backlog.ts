@@ -35,6 +35,8 @@ export type BacklogItem = {
   readonly by: string;
   // the feed draft this item follows up once the owner approved it (only these are dropped with their source)
   readonly followUpOf?: string;
+  // the feed entry's own id, as the source gave it (two entries never share an item)
+  readonly source?: string;
   // the lead says the work only reads; the owner's message link the work rests on (checked when it was added)
   readonly readOnly?: boolean;
   readonly ownerLink?: string;
@@ -108,6 +110,7 @@ export type AddInput = {
   readonly ownerLink?: string;
   readonly draftOnly?: boolean;
   readonly followUpOf?: string;
+  readonly source?: string;
 };
 
 // backlog.writeNeedsOwnerLink: work that may write starts on its own only with the owner's message behind it
@@ -156,7 +159,9 @@ export const addItem = (stateDir: string, input: AddInput, ctx: { readonly regis
     ...(input.readOnly ? { readOnly: true } : {}),
     ...(input.ownerLink ? { ownerLink: input.ownerLink } : {}),
     ...(input.draftOnly ? { draftOnly: true } : {}),
-    ...(input.followUpOf ? { followUpOf: input.followUpOf } : {}),
+    // what the feed recorded stays when the lead replaces the item (the fix of a held one)
+    ...((input.followUpOf ?? (replaced ? old?.followUpOf : undefined)) ? { followUpOf: input.followUpOf ?? old?.followUpOf } : {}),
+    ...((input.source ?? (replaced ? old?.source : undefined)) ? { source: input.source ?? old?.source } : {}),
     ...(ask ? { ask } : {}),
     by,
     status: "open",
@@ -359,7 +364,9 @@ export const pairIntake = async (d: IntakeDeps): Promise<string[]> => {
     const { item } = addItem(d.stateDir, {
       id, title, brief, done, by: `pair:${row.author_id}`,
       ...(kind === "repair" ? { noThread: `#dori-pair 수리 요청 ${link}` } : { thread: "new", ownerLink }),
-    }, { registered: false, at });
+    // a repair request is not held to backlog.writeNeedsOwnerLink: the owner's standing rule that faults of the Dori base go
+    // straight to the Dori that repairs the fork is his approval for it (config loading says so once when both are on)
+    }, { registered: false, at, ...(kind === "request" ? { needOwnerLink: d.settings.writeNeedsOwnerLink } : {}) });
     lines.push(`BACKLOG_INTAKE ${item.id} (${kind}) from ${row.author_id}: ${title}`);
   }
   save_();
@@ -408,6 +415,15 @@ export const orderIntake = (d: { readonly stateDir: string; readonly settings: B
 // same length; which draft it follows is kept in the item (followUpOf), never read from the name
 export const followUpId = (id: string): string => `appr-${id.startsWith("todo-") ? id.slice(5) : id}`.slice(0, 61);
 
+// a feed entry's item id: its id as it is when that is already a lane key, else a cleaned prefix and a hash of the whole id,
+// so two entries the cleaning would merge (mail/A, mail:A) or the cut would merge (long ids) stay apart
+export const feedItemId = (ref: string): string => {
+  const plain = `todo-${ref}`;
+  if (LANE_KEY.test(plain) && plain.length <= 61) return plain;
+  const clean = ref.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 46).replace(/[-._]+$/, "");
+  return `todo-${clean}-${createHash("sha256").update(ref).digest("hex").slice(0, 8)}`;
+};
+
 export type FeedTodo = { readonly todo_id?: string; readonly id?: string; readonly title?: string; readonly status?: string; readonly [k: string]: unknown };
 const FEED_DONE = /^(done|완료|끝|closed)$/i;
 
@@ -439,9 +455,14 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
   const lines: string[] = [];
   for (const todo of got.todos) {
     const ref = String(todo.todo_id ?? todo.id ?? "");
-    const id = `todo-${ref.toLowerCase().replace(/[^a-z0-9._-]+/g, "-")}`.slice(0, 61);
+    const id = feedItemId(ref);
     if (!ref || !LANE_KEY.test(id)) continue;
-    const old = readItem(d.stateDir, id);
+    const found = readItem(d.stateDir, id);
+    if (found?.source !== undefined && found.source !== ref) {
+      lines.push(`BACKLOG_FEED_CLASH ${id}: held by feed entry ${found.source}, not ${ref}; left alone`);
+      continue;
+    }
+    const old = found;
     if (FEED_DONE.test(String(todo.status ?? ""))) {
       const children = listItems(d.stateDir).filter((i) => i.followUpOf === id);
       for (const open of [old, ...children].filter((i): i is BacklogItem => i?.status === "open")) {
@@ -467,7 +488,7 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     const itemId = followUp ?? id;
     const brief = join(dir(d.stateDir), "intake", `${itemId}.md`);
     writeAtomic(brief, feedBrief(todo, itemId, approved) + (followUp ? `\n[앞 단계] 승인 전 초안 레인 ${id}이 이미 끝났다. 그 보고서(${old?.done ?? "?"})의 초안을 먼저 읽고 이어서 한다.\n` : ""));
-    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, ...(followUp ? { followUpOf: id } : {}), noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
+    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, source: ref, ...(followUp ? { followUpOf: id } : {}), noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
     lines.push(upgrade ? `BACKLOG_FEED_APPROVED ${id}: the owner approved it; it now works within its scope` : `BACKLOG_INTAKE ${itemId} (feed, ${approved ? "owner-approved" : "draft only"}${followUp ? `, after draft ${id}` : ""}): ${title}`);
   }
   return lines;
@@ -606,10 +627,14 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
     // 3. the next items start at once, by priority, within the limits
     const waiting = listItems(d.stateDir).filter((i) => i.status === "open" && !i.ask && !i.held).sort(byTurn);
     const room = Math.max(0, Math.min(d.settings.maxLanes - runningIds.size, d.settings.maxStarts));
-    const hold = waiting.length && room > 0 ? [...(await d.busy()), ...[d.limited()].filter((x): x is string => Boolean(x))] : [];
-    if (hold.length) quiet.push(`BACKLOG_HOLD ${hold.join(" | ")}; ${waiting.length} item(s) wait`);
     let tried = 0;
-    for (const queued of hold.length ? [] : waiting.slice(0, room)) {
+    for (const queued of waiting.slice(0, room)) {
+      // checked again before each start: the start before it may have used the last pane, memory or account
+      const hold = [...(await d.busy()), ...[d.limited()].filter((x): x is string => Boolean(x))];
+      if (hold.length) {
+        quiet.push(`BACKLOG_HOLD ${hold.join(" | ")}; ${waiting.length - tried} item(s) wait`);
+        break;
+      }
       const item = readItem(d.stateDir, queued.id);
       if (!item || item.status !== "open" || item.ask || item.held) continue;
       const full = await hostReserve(d.host, item.id, d.now());
