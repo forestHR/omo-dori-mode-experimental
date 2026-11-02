@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, type InboxRow, orderIntake, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, readItem, StartRefused, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
+import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, type InboxRow, orderIntake, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 import { briefGaps, COMMON_LEDGER, loadLedger } from "../src/directives.ts";
@@ -969,4 +969,147 @@ test("an order row is taken once by its id, whatever its time: one stamped like 
   // Then
   expect(lines.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-52", "dashboard-order-50"]);
   expect(again).toEqual([]);
+});
+
+const MODEL_SEEDS = Number(process.env.BACKLOG_MODEL_SEEDS ?? 40);
+// a seeded PRNG (mulberry32), so a failing run names its seed and replays exactly
+const prng = (seed: number) => () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+  return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+};
+
+test("model: random orders, feed sweeps, passes, lane closes, replacements and drops keep one owner per order and one running lane per todo", async () => {
+  for (let seed = 1; seed <= MODEL_SEEDS; seed++) {
+    const rnd = prng(seed);
+    const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)] as T;
+    root = mkdtempSync(join(tmpdir(), "backlog-model-"));
+    state = join(root, "state");
+    brief = join(root, "brief.md");
+    writeFileSync(brief, "ulw\n\n[목표] model\n");
+    lanes = [];
+    launched = [];
+    rows = [];
+    now = T0;
+    const steps: string[] = [];
+    const list: InboxRow[] = [];
+    const handed = new Set<string>();
+    let n = 0;
+    const fail = (why: string): never => {
+      throw new Error(`seed ${seed}: ${why}\nsteps: ${steps.join(" ; ")}`);
+    };
+    const pass = async (busy: boolean, maxStarts: number) => {
+      const before = rows.length;
+      const startedBefore = launched.length;
+      await backlogTick(deps({ busy: async () => (busy ? ["busy"] : []), intake: async () => orderPass(list) }, { maxStarts }), { force: true });
+      for (const r of rows.slice(before).filter((x) => x.content.startsWith("BACKLOG_ORDER_TO_LEAD"))) {
+        const [, row, , , , , , lane0] = r.content.split(" ");
+        if (handed.has(row ?? "")) fail(`${row} handed to the lead twice`);
+        handed.add(row ?? "");
+        const named = r.content.match(/by lane (\S+)/)?.[1];
+        // I4: the named lane runs now
+        if (!lanes.some((l) => l.key === named && !l.closedAt)) fail(`${row} handed for lane ${named ?? lane0}, which does not run`);
+      }
+      // I3: nothing handed to the lead is ever started
+      for (const id of launched.slice(startedBefore)) if (handed.has(id)) fail(`${id} started after it was handed to the lead`);
+      // I7: a pass that was not busy and had room starts something when an item may start (no scheduler that starts nothing)
+      if (!busy && launched.length === startedBefore) {
+        const all = listItems(state);
+        const running = all.filter((i) => i.status === "running");
+        const runningTodos7 = new Set(running.map(todoOf).filter((k): k is string => k !== undefined));
+        const room = Math.min(SETTINGS.maxLanes - running.length, maxStarts, SETTINGS.hostMaxLanes - running.length);
+        const startable = all.filter((i) => i.status === "open" && !i.ask && !i.approvalAsk && !i.held && !i.paused && !(todoOf(i) !== undefined && runningTodos7.has(todoOf(i) as string)));
+        if (room > 0 && startable.length) fail(`a free pass started nothing while ${startable.map((i) => i.id).join(", ")} could start`);
+      }
+      // I6: after a pass no open order waits while its todo's lane runs (the lead's rule: it went to the lead for that lane)
+      const runningTodos = new Set(listItems(state).filter((i) => i.status === "running").map(todoOf).filter((k): k is string => k !== undefined));
+      for (const o of listItems(state).filter((i) => i.status === "open" && i.row !== undefined && !i.by.startsWith("pair:"))) {
+        const k = todoOf(o);
+        if (k !== undefined && runningTodos.has(k)) fail(`order ${o.id} waits while its todo ${k} has a running lane`);
+      }
+    };
+    orderPass(list);
+    for (let step = 0; step < 40; step++) {
+      now += 60_000;
+      const op = pick(["order", "order", "feed", "pass", "pass", "pass", "close", "replace", "drop"] as const);
+      if (op === "order") {
+        n++;
+        const ts = new Date(T0 + pick([n, n, n - 1, 0]) * 60_000 + 1).toISOString();
+        list.push(orderRow(100 + n, ts, pick(["pb-0123456789ab-1", "pb-0123456789ab-2", "pb-0123456789ab-3"])));
+        steps.push(`order ${100 + n}@${ts.slice(11, 16)}`);
+      } else if (op === "feed") {
+        const todos = ["1", "2", "3"].filter(() => rnd() < 0.6).map((k) => boardTodo(k, { status: pick(["열림", "진행", "보류"]), auto_applied: rnd() < 0.5 }));
+        await feedSweep(todos);
+        steps.push(`feed ${todos.map((x) => `${String(x.todo_id).slice(-1)}:${x.status}`).join(",")}`);
+      } else if (op === "pass") {
+        const busy = rnd() < 0.2;
+        const maxStarts = pick([1, 2]);
+        steps.push(`pass busy=${busy} starts=${maxStarts}`);
+        await pass(busy, maxStarts);
+      } else if (op === "close") {
+        const open = lanes.filter((l) => !l.closedAt);
+        if (open.length) {
+          const l = pick(open);
+          lanes = lanes.map((x) => (x.key === l.key ? lane(x.key, true) : x));
+          steps.push(`close ${l.key}`);
+        }
+      } else if (op === "replace") {
+        const orders = listItems(state).filter((i) => i.status === "open" && i.row !== undefined);
+        if (orders.length) {
+          const o = pick(orders);
+          addItem(state, { id: o.id, title: "replaced", brief, done: "file /tmp/x", priority: "2" }, { registered: false, at: new Date(now).toISOString() });
+          steps.push(`replace ${o.id}`);
+        }
+      } else {
+        const open = listItems(state).filter((i) => i.status === "open");
+        if (open.length) {
+          const o = pick(open);
+          dropItem(state, o.id, "model", new Date(now).toISOString());
+          steps.push(`drop ${o.id}`);
+        }
+      }
+      // I1: at most one running item per todo
+      const running = listItems(state).filter((i) => i.status === "running");
+      const perTodo = new Map<string, number>();
+      for (const i of running) {
+        const k = todoOf(i);
+        if (k !== undefined) perTodo.set(k, (perTodo.get(k) ?? 0) + 1);
+      }
+      for (const [k, c] of perTodo) if (c > 1) fail(`${c} running items for todo ${k}`);
+      // I2: every order row the passes saw has exactly one item, which never disappears
+      if (steps.some((s) => s.startsWith("pass"))) {
+        const seen = list.filter((r) => (r.ts ?? "") > new Date(T0).toISOString());
+        const lastPass = steps.map((s, i) => (s.startsWith("pass") ? i : -1)).filter((i) => i >= 0).pop() ?? -1;
+        const before = steps.slice(0, lastPass + 1).filter((s) => s.startsWith("order")).length;
+        for (const r of seen.slice(0, before)) if (!readItem(state, rowItemId(r.id))) fail(`order ${r.id} has no item after a pass`);
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 120_000);
+
+test("an order handed to the lead whose row could not be written stays on the list and is handed over again, never lost", async () => {
+  // Given: todo 1 runs; an order about it comes in; the inbox fails once as the hand-over row is written
+  await feedSweep([boardTodo("1")]);
+  await backlogTick(deps(), { force: true });
+  orderPass([]);
+  orderPass([orderRow(60, "2026-11-02T15:30:00.000Z", "pb-0123456789ab-1")]);
+  let broken = true;
+  const flaky = deps({ inbox: (kind, id, content) => {
+    if (broken && content.startsWith("BACKLOG_ORDER_TO_LEAD")) {
+      broken = false;
+      throw new Error("disk full");
+    }
+    rows.push({ kind, id, content });
+  } });
+  // When: the pass is cut off, then the next one runs
+  const cut = await backlogTick(flaky, { force: true }).catch((e: unknown) => String(e));
+  const kept = readItem(state, "dashboard-order-60")?.status;
+  await backlogTick(flaky, { force: true });
+  // Then
+  expect(cut).toContain("disk full");
+  expect(kept).toBe("open");
+  expect(readItem(state, "dashboard-order-60")?.status).toBe("dropped");
+  expect(rows.filter((r) => r.content.startsWith("BACKLOG_ORDER_TO_LEAD dashboard-order-60")).length).toBe(1);
 });
