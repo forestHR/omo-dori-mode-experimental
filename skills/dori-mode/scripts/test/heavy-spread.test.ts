@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import type { HeavyQueue } from "../src/config.ts";
 import type { HeavyCtx } from "../src/heavy-queue.ts";
-import { copyBack, heavySpread, pathsIn, spreadPlan, type SpreadJob } from "../src/heavy-spread.ts";
+import { copyBack, heavySpread, pathsIn, spreadPlan, withPipefail, type SpreadJob } from "../src/heavy-spread.ts";
 import type { SlotDeps } from "../src/heavy-slot.ts";
 import { withState } from "./fakes.ts";
 
@@ -55,6 +55,35 @@ beforeEach(() => {
   writeFileSync(join(work, "in.txt"), "hello\n");
 });
 afterEach(() => state.done());
+
+test("a folder of a git checkout synced in part, or a checkout that says it runs here only, stays here with the reason", () => {
+  // Given: a checkout whose tests read a sibling folder, the 2026-11-02 shape (only scripts/ synced)
+  const repo = join(state.dir, "repo");
+  const scripts = join(repo, "scripts");
+  mkdirSync(scripts, { recursive: true });
+  expect(Bun.spawnSync(["git", "init", "-q", repo]).exitCode).toBe(0);
+
+  // When / Then
+  expect(spreadPlan(jobOf(["bun", "test"], { cwd: scripts, sync: [scripts] }), who)).toEqual({ ok: false, why: `the working folder is in the git checkout ${repo}, which --sync carries only in part (its tests read the rest); add --sync ${repo}` });
+  expect(spreadPlan(jobOf(["bun", "test"], { cwd: scripts, sync: [repo] }), who).ok).toBe(true);
+  writeFileSync(join(repo, ".dori-heavy-local"), "\nits tests start bwrap boxes and systemd scopes themselves\n");
+  expect(spreadPlan(jobOf(["bun", "test"], { cwd: scripts, sync: [repo] }), who)).toEqual({ ok: false, why: `${join(repo, ".dori-heavy-local")}: its tests start bwrap boxes and systemd scopes themselves` });
+});
+
+test("a bash -c script that pipes a failing command into tail fails the job; other commands run unchanged", () => {
+  // Given: the 2026-11-02 shape, bun test piped into tail, and commands that must stay as written
+  const run = (cmd: readonly string[]) => Bun.spawnSync([...cmd]).exitCode;
+  const piped = ["bash", "-c", "echo out; false | tail -1"];
+  const unchanged = [["bash", "-c", "false || true"], ["bash", "-o", "pipefail", "-c", "true | true"], ["sh", "-c", "false | tail -1"], ["bash", "run.sh", "a|b"], ["bun", "test"]];
+
+  // When / Then
+  expect(run(piped)).toBe(0);
+  expect(withPipefail(piped)).toEqual(["bash", "-c", "set -o pipefail; echo out; false | tail -1"]);
+  expect(run(withPipefail(piped))).toBe(1);
+  expect(run(withPipefail(["bash", "-lc", "exit 3 | cat"]))).toBe(3);
+  expect(withPipefail(["bash", "-O", "extglob", "-c", "false | cat", "name"])).toEqual(["bash", "-O", "extglob", "-c", "set -o pipefail; false | cat", "name"]);
+  for (const cmd of unchanged) expect(withPipefail(cmd)).toBe(cmd);
+});
 
 test("a command this host cannot start now runs on the helper at the same paths, and its exit code and new files come back", async () => {
   // Given

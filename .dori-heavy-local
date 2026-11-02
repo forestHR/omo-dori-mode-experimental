@@ -1,0 +1,1 @@
+dori's own test suite runs here only: its tests start bwrap boxes, systemd user scopes and aoe launches with node, which a helper's box (no systemd bus, no node, no network) cannot, so there it fails tests that pass here

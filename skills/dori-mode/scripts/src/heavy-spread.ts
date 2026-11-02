@@ -50,6 +50,29 @@ export type SpreadJob = {
 };
 export type Plan = { readonly ok: true; readonly sync: readonly string[]; readonly playwright?: string } | { readonly ok: false; readonly why: string };
 
+// A bash -c script whose pipeline ends in tail, grep or head exits with that last command's code, so a failing test run
+// piped into tail looked like a pass (2026-11-02: 171 of 744 failed on the helper, HEAVY_DONE exit 0). The script that pipes
+// and does not set pipefail itself runs with set -o pipefail, so any failing stage fails the job; anything else is unchanged.
+export const withPipefail = (cmd: readonly string[]): readonly string[] => {
+  if (basename(cmd[0] ?? "") !== "bash" || cmd.some((a) => a.includes("pipefail"))) return cmd;
+  let sawC = false;
+  for (let i = 1; i < cmd.length; i++) {
+    const a = cmd[i]!;
+    if (/^[-+][oO]$/.test(a)) {
+      i++;
+      continue;
+    }
+    if (/^-[A-Za-z]+$/.test(a)) {
+      sawC ||= a.includes("c");
+      continue;
+    }
+    if (a === "--" || a.startsWith("--")) continue;
+    if (!sawC || !/(?:^|[^|])\|(?!\|)/.test(a)) return cmd;
+    return [...cmd.slice(0, i), `set -o pipefail; ${a}`, ...cmd.slice(i + 1)];
+  }
+  return cmd;
+};
+
 // absolute paths inside one argument: the whole argument, or what follows = , or : (not the // of a URL)
 export const pathsIn = (arg: string): string[] => [...arg.matchAll(/(?:^|[=,:])(\/(?!\/)[^\s=,:;"'\]}]*)/g)].map((m) => normalize(m[1]!));
 
@@ -86,6 +109,23 @@ const playwrightVersion = (roots: readonly string[]): string | undefined => {
   return undefined;
 };
 
+// the git checkout a folder is in, or undefined
+const gitTop = (dir: string): string | undefined => {
+  const p = Bun.spawnSync(["git", "-C", dir, "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "ignore" });
+  const top = p.exitCode === 0 ? p.stdout.toString().trim() : "";
+  return top && isAbsolute(top) ? normalize(top) : undefined;
+};
+
+// STAY_FILE in the working folder or a folder above it up to `root`: its first line says why the job runs here only
+export const STAY_FILE = ".dori-heavy-local";
+const stayHere = (cwd: string, root: string): string | undefined => {
+  for (let at = cwd; ; at = dirname(at)) {
+    const f = join(at, STAY_FILE);
+    if (existsSync(f)) return `${f}: ${readFileSync(f, "utf8").split("\n").map((l) => l.trim()).find(Boolean)?.slice(0, 200) ?? "runs here only"}`;
+    if (at === root || !within(at, root) || at === "/") return undefined;
+  }
+};
+
 // Whether the job can run on another host unchanged: every path it needs travels with --sync, and every --sync path is
 // this account's own (its home or /tmp, owned by it, no link on the way, no ..). Anything else runs here (HEAVY_LOCAL).
 export const spreadPlan = (job: SpreadJob, who: { readonly uid: number; readonly home: string }): Plan => {
@@ -109,6 +149,13 @@ export const spreadPlan = (job: SpreadJob, who: { readonly uid: number; readonly
   const sync = [...new Set(roots)].sort((a, b) => a.length - b.length).filter((p, i, all) => !all.slice(0, i).some((q) => within(p, q)));
   const covered = (p: string): boolean => sync.some((s) => within(p, s)) || SYSTEM.some((s) => within(p, s));
   if (!sync.some((s) => within(job.cwd, s))) return no(`the working folder ${job.cwd} is not in a --sync path`);
+  // a test run reads its whole checkout (docs, fixtures, sibling folders) by relative path, which no argument names: a
+  // checkout synced in part fails on the helper and passes here (2026-11-02: scripts/ only, 171 of 744 failed there)
+  const top = gitTop(job.cwd);
+  if (top && top !== who.home && (within(top, who.home) || within(top, "/tmp")) && !sync.some((s) => within(top, s))) return no(`the working folder is in the git checkout ${top}, which --sync carries only in part (its tests read the rest); add --sync ${top}`);
+  // a folder that says it must run here (its tests start boxes and systemd scopes themselves, which a helper's box cannot)
+  const stay = stayHere(job.cwd, top ?? sync.find((s) => within(job.cwd, s))!);
+  if (stay) return no(stay);
   for (const arg of job.cmd) for (const p of pathsIn(arg)) if (!covered(p)) return no(`${p} (in "${arg.slice(0, 80)}") is not in a --sync path`);
   for (const s of sync) {
     if (!existsSync(s) || !statSync(s).isDirectory()) continue;

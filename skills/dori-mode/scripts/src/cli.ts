@@ -33,7 +33,7 @@ import { neverFits, parseMem, readMeminfo, spawnScoped } from "./heavy-mem.ts";
 import { heavyJobCommand, HeavyJobError, heavyServe } from "./heavy-queue.ts";
 import { acquireSlot, pidAlive, releaseSlot, type SlotDeps } from "./heavy-slot.ts";
 import { heavyWorker } from "./heavy-worker.ts";
-import { heavySpread, isKind, spreadPlan, type SpreadJob } from "./heavy-spread.ts";
+import { heavySpread, isKind, spreadPlan, withPipefail, type SpreadJob } from "./heavy-spread.ts";
 import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
 import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, reopenLaneThread, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
@@ -1262,6 +1262,9 @@ try {
       const memOpt = opt("mem");
       const needBytes = memOpt === undefined ? undefined : (parseMem(memOpt) ?? die(`dori heavy --mem takes a size like 70G or 200M, not "${memOpt}"`));
       const deps = heavyDeps(load);
+      // a bash -c pipe into tail must not turn a failure into exit 0, here or on a helper (heavy-spread.ts withPipefail)
+      const jobCmd = withPipefail(cmd);
+      if (jobCmd !== cmd) deps.log?.(`HEAVY_PIPEFAIL ${name}: the bash -c script pipes, so it runs with set -o pipefail and a failing stage fails the job`);
       const host = readMeminfo();
       const never = needBytes && host ? neverFits(needBytes, host, config.heavyHeadroomPct) : undefined;
       if (never) {
@@ -1277,7 +1280,7 @@ try {
         const badEnv = many("env").find((e) => !/^[A-Za-z_]\w{0,63}$/.test(e));
         if (badEnv !== undefined) die(`dori heavy --env takes a variable name, not "${badEnv}"`);
         const env = Object.fromEntries(["LANG", "TZ", ...many("env")].flatMap((k) => (process.env[k] === undefined ? [] : [[k, process.env[k]!]])));
-        const job: SpreadJob = { label: name, kind, cmd, cwd: process.cwd(), sync: many("sync").map((s) => resolve(s)), env, ...(needBytes ? { needBytes } : {}) };
+        const job: SpreadJob = { label: name, kind, cmd: jobCmd, cwd: process.cwd(), sync: many("sync").map((s) => resolve(s)), env, ...(needBytes ? { needBytes } : {}) };
         const plan = spreadPlan(job, { uid: process.getuid?.() ?? -1, home: homedir() });
         if (!plan.ok) deps.log?.(`HEAVY_LOCAL ${name}: ${plan.why}`);
         else if (!config.heavyQueue.helpers.length) deps.log?.(`HEAVY_LOCAL ${name}: no heavyQueue.helpers on this host`);
@@ -1292,7 +1295,7 @@ try {
       }
       const slot = spreadSlot ?? (await acquireSlot(deps, name, 15_000, needBytes ? needBytes / 1024 : undefined));
       try {
-        process.exitCode = await spawnScoped({ label: name, cmd, free: config.heavyHeadroomPct, ...(needBytes ? { needBytes } : {}), ...(deps.log ? { log: deps.log } : {}) }, { stdout: "inherit", stderr: "inherit", stdin: "inherit" });
+        process.exitCode = await spawnScoped({ label: name, cmd: jobCmd, free: config.heavyHeadroomPct, ...(needBytes ? { needBytes } : {}), ...(deps.log ? { log: deps.log } : {}) }, { stdout: "inherit", stderr: "inherit", stdin: "inherit" });
       } finally {
         releaseSlot(slot);
       }
