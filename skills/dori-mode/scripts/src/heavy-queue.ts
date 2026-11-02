@@ -111,7 +111,7 @@ export const runQueued = async (ctx: HeavyCtx, req: JobRequest, dir: string): Pr
     const got = await acquire<Started>(ctx.deps, req.label, { since, elsewhere: helpers });
     if ("slot" in got) {
       try {
-        const r = await runJob(job, dir, req.args, { label: req.label, free: ctx.deps.headroom?.free ?? 10, ...(ctx.deps.log ? { log: ctx.deps.log } : {}) });
+        const r = await runJob(job, dir, req.args, { label: req.label, free: ctx.deps.headroom?.free ?? 10, gpuFreeKb: ctx.deps.headroom?.gpuFreeKb ?? 0, ...(ctx.deps.log ? { log: ctx.deps.log } : {}) });
         log(`HEAVY_DONE ${req.label} here: exit ${r.code}`);
         return r;
       } finally {

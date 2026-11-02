@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,8 +24,17 @@ w = wave.open(sys.argv[-1], "wb"); w.setnchannels(1); w.setsampwidth(2); w.setfr
 w.writeframes(b"\\0\\0" * 16000 * int(os.environ["FAKE_SECS"])); w.close()
 `);
   exe(join(asr, "whisper.cpp/build/bin/whisper-cli"), `#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 a = sys.argv
+calls = os.path.join(os.environ["DORI_ASR_DIR"], "calls")
+n = len(open(calls).read()) if os.path.exists(calls) else 0
+open(calls, "a").write("x")
+if n < int(os.environ.get("FAKE_CUDA_FAIL", "0")):
+    print("ggml_cuda_init: found 1 CUDA devices:", file=sys.stderr)
+    print("/src/whisper.cpp/ggml/src/ggml-cuda/ggml-cuda.cu:108: CUDA error", file=sys.stderr, flush=True)
+    os.abort()
+if os.environ.get("FAKE_PLAIN_FAIL"):
+    print("error: failed to open the model", file=sys.stderr); sys.exit(2)
 if "-oj" not in a:
     print(" hello there"); sys.exit(0)
 import os, wave
@@ -45,6 +54,13 @@ for wav in [a[i + 1] for i, x in enumerate(a) if x == "-f"]:
 `);
 });
 afterEach(() => rmSync(asr, { recursive: true, force: true }));
+
+// dori on PATH: gpu-room says what it did and leaves its arguments in <asr>/dori.log
+const fakeDori = (): Record<string, string> => {
+  exe(join(asr, "fakebin/dori"), `#!/bin/sh\necho "$*" >> "${asr}/dori.log"\necho "HEAVY_GPU_ROOM $2: pushed 20480M of cache out" >&2\n`);
+  return { PATH: `${join(asr, "fakebin")}:${process.env.PATH}` };
+};
+const readOr = (p: string): string => (existsSync(p) ? readFileSync(p, "utf8") : "");
 
 const diarizer = () =>
   exe(join(asr, "diar/venv/bin/python"), `#!/usr/bin/env python3
@@ -116,4 +132,35 @@ test("a loop squeezed into one instant is kept once without a retry, and a faile
     out: "[00:00:00] opening words reply words stuck line stuck line stuck line stuck line stuck line",
   });
   expect(failed.err).toContain("REPEAT_LEFT 10.0-20.0s 5 lines kept: whisper-cli exit 3");
+});
+
+// 2026-11-02 20:33 KST: the owner's voice note failed in ggml_cuda_init (exit 134) while page cache filled the GB10's memory
+test("a whisper-cli that dies in a CUDA error gets one more try after dori gpu-room, and the voice note is heard", async () => {
+  const r = await run(20, { ...fakeDori(), FAKE_CUDA_FAIL: "1" });
+  expect({ code: r.code, out: r.out, calls: readOr(join(asr, "calls")), room: readOr(join(asr, "dori.log")) }).toEqual({ code: 0, out: "hello there", calls: "xx", room: "gpu-room transcribe\n" });
+  expect(r.err).toContain("TRANSCRIBE_CUDA_RETRY whisper-cli exit 134: /src/whisper.cpp/ggml/src/ggml-cuda/ggml-cuda.cu:108: CUDA error");
+  expect(r.err).toContain("HEAVY_GPU_ROOM transcribe: pushed");
+});
+
+test("a second CUDA error fails with whisper-cli's code and its error, with no third try", async () => {
+  const r = await run(20, { ...fakeDori(), FAKE_CUDA_FAIL: "9" });
+  expect({ code: r.code, out: r.out, calls: readOr(join(asr, "calls")), room: readOr(join(asr, "dori.log")) }).toEqual({ code: 134, out: "", calls: "xx", room: "gpu-room transcribe\n" });
+  expect(r.err).toContain("ggml-cuda.cu:108: CUDA error");
+});
+
+test("a failure that is not a CUDA error is not tried again and keeps its code", async () => {
+  const r = await run(20, { ...fakeDori(), FAKE_PLAIN_FAIL: "1" });
+  expect({ code: r.code, calls: readOr(join(asr, "calls")), room: readOr(join(asr, "dori.log")) }).toEqual({ code: 2, calls: "x", room: "" });
+  expect(r.err).toContain("error: failed to open the model");
+});
+
+test("a long recording whose whisper-cli dies in a CUDA error is tried once more after dori gpu-room", async () => {
+  diarizer();
+  const r = await run(400, { ...fakeDori(), DORI_ASR_CHUNK_SEC: "1000", FAKE_CUDA_FAIL: "1" });
+  expect({ code: r.code, lines: r.out.split("\n"), room: readOr(join(asr, "dori.log")) }).toEqual({
+    code: 0,
+    lines: ["[00:00:00] 화자1: opening words", "[00:00:05] 화자2: reply words", "[00:00:10] 화자1: fixed one fixed two"],
+    room: "gpu-room transcribe\n",
+  });
+  expect(r.err).toContain("TRANSCRIBE_CUDA_RETRY whisper-cli exit -6: /src/whisper.cpp/ggml/src/ggml-cuda/ggml-cuda.cu:108: CUDA error");
 });

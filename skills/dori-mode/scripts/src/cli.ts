@@ -29,7 +29,7 @@ import { ownerSpeechProblem, plainSummaryProblem } from "./close-summary.ts";
 import { literalNewlineProblem } from "./messenger/literal-newline.ts";
 import { autoReadyLine, freshnessTick } from "./freshness.ts";
 import { sampleUsage } from "./heavy-headroom.ts";
-import { neverFits, parseMem, readMeminfo, spawnScoped } from "./heavy-mem.ts";
+import { gpuRoom, neverFits, parseMem, readMeminfo, spawnScoped } from "./heavy-mem.ts";
 import { heavyJobCommand, HeavyJobError, heavyServe } from "./heavy-queue.ts";
 import { acquireSlot, pidAlive, releaseSlot, type SlotDeps } from "./heavy-slot.ts";
 import { heavyWorker } from "./heavy-worker.ts";
@@ -259,6 +259,11 @@ const USAGE = `dori <command> [options]
                                        its start; over it only the job is killed (HEAVY_OOM, exit 137), never the lane
                                        that started it. --mem also waits until that much memory keeps 10% free (counting
                                        what running jobs said and do not use yet) and refuses one that never fits
+  gpu-room [label] [--want SIZE]       make SIZE (heavyGpuFreeGb, 20G) of free memory for a GPU start, as dori heavy does
+                                       before every GPU job: below it, page cache is pushed out by touching anonymous
+                                       memory and letting it go, never taking MemAvailable under heavyHeadroomPct and
+                                       stopping once anything is swapped out (HEAVY_GPU_ROOM / _SHORT / _FAILED on stderr
+                                       and in state/heavy/heavy.log; nothing when enough is free)
   heavy <label> --job <name> [--in FILE ...] [--out DIR] [--rl] [-- arg ...]
                                        run heavyQueue.jobs.<name> in the GPU line of all hosts: on the queue host here
                                        first, then on a heavyQueue.helpers host (an rl job only where its heavyQueue.rl), else wait;
@@ -489,7 +494,7 @@ const flags = parseArgs({
     answer: { type: "string" }, repo: { type: "string", multiple: true }, since: { type: "string" }, until: { type: "string" }, backtest: { type: "boolean" },
     static: { type: "boolean" }, dir: { type: "string", multiple: true }, "no-thread": { type: "string" }, "why-new": { type: "string" },
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
-    job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
+    job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
     "delete-branch": { type: "boolean" },
   },
@@ -552,7 +557,7 @@ const heavyDeps = (load: () => Promise<number>): SlotDeps => ({
   load,
   alive: pidAlive,
   pid: process.pid,
-  headroom: { maxSlots: config.heavyMaxSlots, free: config.heavyHeadroomPct, settleSec: config.heavySettleSec, usage: (pids) => sampleUsage(run, pids) },
+  headroom: { maxSlots: config.heavyMaxSlots, free: config.heavyHeadroomPct, settleSec: config.heavySettleSec, usage: (pids) => sampleUsage(run, pids), gpuFreeKb: config.heavyGpuFreeGb * 1024 ** 2 },
   log: (line) => {
     console.error(line);
     // a refusal comes before any slot work made the folder
@@ -1304,10 +1309,19 @@ try {
       }
       const slot = spreadSlot ?? (await acquireSlot(deps, name, 15_000, needBytes ? needBytes / 1024 : undefined));
       try {
-        process.exitCode = await spawnScoped({ label: name, cmd: jobCmd, free: config.heavyHeadroomPct, ...(needBytes ? { needBytes } : {}), ...(deps.log ? { log: deps.log } : {}) }, { stdout: "inherit", stderr: "inherit", stdin: "inherit" });
+        // plain dori heavy is the GPU slot line, and --kind gpu a GPU job: both get free memory made first (heavy-mem.ts gpuRoom)
+        const gpu = kind === undefined || kind === "gpu";
+        process.exitCode = await spawnScoped({ label: name, cmd: jobCmd, free: config.heavyHeadroomPct, ...(needBytes ? { needBytes } : {}), ...(deps.log ? { log: deps.log } : {}), ...(gpu ? { gpuFreeKb: config.heavyGpuFreeGb * 1024 ** 2 } : {}) }, { stdout: "inherit", stderr: "inherit", stdin: "inherit" });
       } finally {
         releaseSlot(slot);
       }
+      break;
+    }
+    case "gpu-room": {
+      // what dori heavy does before a GPU job, on its own: a script whose CUDA start failed calls it before its one retry
+      const wantOpt = opt("want");
+      const want = wantOpt === undefined ? config.heavyGpuFreeGb * 1024 ** 3 : (parseMem(wantOpt) ?? die(`dori gpu-room --want takes a size like 20G, not "${wantOpt}"`));
+      await gpuRoom(key && !key.startsWith("-") ? key : "gpu-room", want / 1024, config.heavyHeadroomPct, heavyDeps(async () => 0).log);
       break;
     }
     case "heavy-serve": {

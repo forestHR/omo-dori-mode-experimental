@@ -12,6 +12,7 @@ import array
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,10 +34,27 @@ def log(msg: str) -> None:
     print(f"transcribe_long: {msg}", file=sys.stderr)
 
 
+CUDA_FAILED = re.compile(r"CUDA error|ggml_cuda_init: failed")
+
+
 def whisper(parts: list[tuple[str, float]], opts: list[str]) -> list[list]:
     inputs = [a for wav, _ in parts for a in ("-f", wav)]
-    subprocess.run([CLI, "-m", MODEL, "-l", LANG, "-np", "-oj", *inputs, *opts],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    argv = [CLI, "-m", MODEL, "-l", LANG, "-np", "-oj", *inputs, *opts]
+    r = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace")
+    hit = next((line for line in r.stderr.splitlines() if CUDA_FAILED.search(line)), None) if r.returncode else None
+    if hit:
+        # transcribe.sh: a CUDA start that failed while page cache filled a unified-memory GPU's memory gets one more
+        # try after dori gpu-room pushed cache out; a second failure raises as before
+        log(f"TRANSCRIBE_CUDA_RETRY whisper-cli exit {r.returncode}: {hit}")
+        dori = shutil.which("dori") or os.path.expanduser("~/.bun/bin/dori")
+        try:
+            subprocess.run([dori, "gpu-room", "transcribe"], stdout=sys.stderr, check=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            log(f"TRANSCRIBE_GPU_ROOM_FAILED {dori}: {e}")
+        r = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace")
+    if r.returncode:
+        sys.stderr.write("".join(r.stderr.splitlines(True)[-5:]))
+        raise subprocess.CalledProcessError(r.returncode, argv)
     segs = []
     for wav, shift in parts:
         with open(wav + ".json", encoding="utf-8", errors="replace") as f:

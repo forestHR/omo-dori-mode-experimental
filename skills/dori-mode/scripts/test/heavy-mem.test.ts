@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { canScope, memVerdict, neverFits, parseMem, spawnScoped } from "../src/heavy-mem.ts";
+import { canScope, gpuRoomPlan, makeGpuRoom, memVerdict, neverFits, parseMem, parseRoomInfo, spawnScoped } from "../src/heavy-mem.ts";
 import { linesOf } from "../src/heavy-queue.ts";
 import { withState } from "./fakes.ts";
 
@@ -78,4 +78,46 @@ test("memory sizes read as bytes and a fit keeps the free share", () => {
   expect(neverFits(80 * 1024 ** 3, host, 10)).toBeUndefined();
   expect(memVerdict(host, 50_000_000, 0, 10).ok).toBe(true);
   expect(memVerdict(host, 50_000_001, 0, 10).ok).toBe(false);
+});
+
+test("before a GPU job page cache is pushed out only when free memory is short, and never under the heavy headroom floor", () => {
+  // the host at 2026-11-02 20:33 KST, when the owner's voice note failed in ggml_cuda_init: MemFree 1G, MemAvailable 95G of 121G
+  const host = { totalKb: 127539392, availKb: 100103936, freeKb: 1024 ** 2 };
+  const want = 20 * 1024 ** 2;
+  expect(gpuRoomPlan(host, want, 10)).toMatchObject({ make: true, wantKb: want, budgetKb: want, floorKb: 12753940 });
+  expect(gpuRoomPlan({ ...host, freeKb: 24 * 1024 ** 2 }, want, 10)).toEqual({ make: false, why: "24.0G free, 20.0G wanted from under 20.0G" });
+  // dori heavy acts only under a quarter of what it wants: touching eats free memory before any cache goes
+  expect(gpuRoomPlan({ ...host, freeKb: 6 * 1024 ** 2 }, want, 10, want / 4)).toMatchObject({ make: false });
+  expect(gpuRoomPlan({ ...host, freeKb: 4 * 1024 ** 2 }, want, 10, want / 4)).toMatchObject({ make: true, wantKb: want, budgetKb: want });
+  // 3G available over the 10% floor: no more than that is touched
+  expect(gpuRoomPlan({ ...host, availKb: 12753940 + 3 * 1024 ** 2 }, want, 10)).toMatchObject({ make: true, budgetKb: 3 * 1024 ** 2 });
+  expect(gpuRoomPlan({ ...host, availKb: 12_000_000 }, want, 10)).toMatchObject({ make: false, why: expect.stringMatching(/^short: 1.0G free and 11.4G available, no room above the 10% floor$/) });
+});
+
+test("the room maker touches memory up to its budget and lets it go, and touches none when that would cross the floor", async () => {
+  const m = parseRoomInfo(readFileSync("/proc/meminfo", "utf8"))!;
+  // real memory, a little: 300M more free than now is wanted, at most 512M may be touched
+  const r = await makeGpuRoom({ make: true, wantKb: m.freeKb + 300 * 1024, budgetKb: 512 * 1024, floorKb: 0, why: "" }, "test");
+  expect(r).toMatchObject({ ok: true, line: expect.stringMatching(/^pushed (256|512)M of cache out in [\d.]+s \(stop: (enough|budget)\): free \d+M -> \d+M, in 2M\+ blocks \d+M -> \d+M$/) });
+  const floor = await makeGpuRoom({ make: true, wantKb: m.freeKb + 1024 ** 2, budgetKb: 1024 ** 2, floorKb: m.availKb + 1024 ** 2, why: "" }, "test");
+  expect(floor).toMatchObject({ ok: true, line: expect.stringMatching(/^pushed 0M of cache out in [\d.]+s \(stop: floor\)/) });
+  // a --mem of 70.1G makes fractional kB; the helper still runs (it stops at the floor here, touching nothing)
+  const fraction = await makeGpuRoom({ make: true, wantKb: m.freeKb + 73_505_996.8, budgetKb: 1024 ** 2 + 0.6, floorKb: m.availKb + 1024 ** 2 + 0.4, why: "" }, "test");
+  expect(fraction).toMatchObject({ ok: true, line: expect.stringMatching(/\(stop: floor\)/) });
+});
+
+test("dori gpu-room reads --want as a size and refuses one it cannot read", async () => {
+  const config = join(state.dir, "config.json");
+  await Bun.write(config, JSON.stringify({ stateDir: join(state.dir, "state") }));
+  const own = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("DORI_")));
+  const run = async (...args: string[]) => {
+    const p = Bun.spawn([process.execPath, CLI, "gpu-room", ...args], { env: { ...own, DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "none.env"), DORI_STATE_DIR: join(state.dir, "state") }, stdout: "pipe", stderr: "pipe" });
+    return { code: await p.exited, err: await new Response(p.stderr).text() };
+  };
+  const bad = await run("--want", "lots");
+  expect(bad.code).not.toBe(0);
+  expect(bad.err).toContain('dori gpu-room --want takes a size like 20G, not "lots"');
+  // 1K is always free: nothing to do, nothing said (read as the 20G default it would push cache out)
+  const small = await run("--want", "1K");
+  expect({ code: small.code, room: small.err.includes("HEAVY_GPU_ROOM") }).toEqual({ code: 0, room: false });
 });

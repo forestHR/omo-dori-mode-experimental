@@ -77,8 +77,9 @@ const inputs = (dir: string): string[] =>
     .filter((n) => /^\d+-/.test(n))
     .sort((a, b) => Number(a.split("-")[0]) - Number(b.split("-")[0]));
 
-// the job runs in its own memory-capped scope (heavy-mem.ts): free is heavyHeadroomPct, log the heavy log
-export type JobRun = { readonly label: string; readonly free: number; readonly log?: (line: string) => void };
+// the job runs in its own memory-capped scope (heavy-mem.ts): free is heavyHeadroomPct, log the heavy log; a job of the
+// GPU line gets gpuFreeKb of free memory made first (heavy-mem.ts gpuRoom)
+export type JobRun = { readonly label: string; readonly free: number; readonly log?: (line: string) => void; readonly gpuFreeKb?: number };
 
 export const runJob = async (job: HeavyJob, dir: string, args: readonly string[], scope: JobRun = { label: "job", free: 10 }): Promise<JobResult> => {
   const values: Record<string, string> = { in: join(dir, "in"), out: join(dir, "out") };
