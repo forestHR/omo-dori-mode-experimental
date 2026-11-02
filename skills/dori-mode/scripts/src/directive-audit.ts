@@ -345,8 +345,10 @@ export const leadThreadGaps = (map: ThreadMap, lanes: readonly Pick<Lane, "threa
 
 // The lead memory files where his standing directives were kept before the ledger: system/*.md and reference/*.md, not
 // the lead's journal about itself (reference/self/, and system/self-aware.md, which reflection writes from it: his words
-// there are what he said about the lead's behaviour, quoted as evidence). A repo that is not there leaves the check out,
-// with a line.
+// there are what he said about the lead's behaviour, quoted as evidence), and not system/boundaries.md, which keeps what he
+// told the lead not to do in his own words by design (a pointer there would be a rewording). A repo that is not there
+// leaves the check out, with a line.
+const MEMORY_LEFT_OUT = ["system/self-aware.md", "system/boundaries.md"];
 export const memoryFiles = (repo: string, skipped: string[]): { readonly path: string; readonly text: string }[] => {
   if (!existsSync(repo)) {
     skipped.push(`DIRECTIVES_MEMORY_SKIP ${repo}: the lead's memory repo is not there; no check for directives kept twice`);
@@ -355,7 +357,7 @@ export const memoryFiles = (repo: string, skipped: string[]): { readonly path: s
   return ["system", "reference"].flatMap((dir) => {
     const d = join(repo, dir);
     if (!existsSync(d)) return [];
-    return readdirSync(d).filter((n) => n.endsWith(".md") && `${dir}/${n}` !== "system/self-aware.md").sort().map((n) => ({ path: `${dir}/${n}`, text: readFileSync(join(d, n), "utf8") }));
+    return readdirSync(d).filter((n) => n.endsWith(".md") && !MEMORY_LEFT_OUT.includes(`${dir}/${n}`)).sort().map((n) => ({ path: `${dir}/${n}`, text: readFileSync(join(d, n), "utf8") }));
   });
 };
 
