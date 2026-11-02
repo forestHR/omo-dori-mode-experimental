@@ -128,6 +128,7 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
         },
         enter: async () => { await run(["tmux", "send-keys", "-t", target(pane), "Enter"]); },
         read: () => captureTmux(run, pane),
+        clear: async () => { await run(["tmux", "send-keys", "-t", target(pane), "C-u"]); },
         delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
       }
     : {

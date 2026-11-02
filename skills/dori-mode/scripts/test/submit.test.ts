@@ -145,8 +145,37 @@ test("side-panel text on the input box rows is not unsent text, and a Steering q
 test("text left in the input box next to the side panel is still NOT_SUBMITTED, with only the box's text in the reason", async () => {
   const { keys, log } = keysFor([paneled("❯ [LEAD] half-typed report")]);
   const r = await submitText(keys, fakeClock(0), LEAD);
-  expect(r).toEqual({ status: "NOT_SUBMITTED", reason: "text still in the input box after 2 Enters: [LEAD] half-typed report" });
+  expect(r).toEqual({ status: "NOT_SUBMITTED", reason: "text still in the input box after 2 Enters: [LEAD] half-typed report; left in the box" });
   expect(log.enters).toBe(2);
+});
+
+// dori-superagent issue #13: a prompt left in the box after its Enters failed sat there, and the next text was typed after it
+const strandingPane = (before: string) => {
+  const log = { clears: 0, enters: 0 };
+  let inBox = before;
+  const keys: PaneKeys = {
+    type: async (text) => { inBox += text.split("\n").join(" "); return undefined; },
+    enter: async () => { log.enters++; },
+    read: async () => box(`❯ ${inBox}`),
+    clear: async () => { log.clears++; inBox = ""; },
+  };
+  return { keys, log, inBox: () => inBox };
+};
+
+test("a text the Enters did not submit is cleared from a box that was empty before it, and is still NOT_SUBMITTED", async () => {
+  const pane = strandingPane("");
+  const r = await submitText(pane.keys, fakeClock(0), "[REPORT] demo | milestone | done");
+  expect(r).toEqual({ status: "NOT_SUBMITTED", reason: "text still in the input box after 2 Enters: [REPORT] demo | milestone | done; cleared from the box" });
+  expect(pane.log.clears).toBe(1);
+  expect(pane.inBox()).toBe("");
+});
+
+test("a box that already held other text is not cleared, so text that is not ours stays", async () => {
+  const pane = strandingPane("owner draft ");
+  const r = await submitText(pane.keys, fakeClock(0), "[REPORT] demo | milestone | done");
+  expect(r.reason).toEndWith("; left in the box: it held other text before this one");
+  expect(pane.log.clears).toBe(0);
+  expect(pane.inBox()).toBe("owner draft [REPORT] demo | milestone | done");
 });
 
 test("a Steering line of another text does not count as the sent text", async () => {
