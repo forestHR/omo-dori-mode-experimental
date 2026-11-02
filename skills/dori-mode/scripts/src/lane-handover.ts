@@ -11,7 +11,8 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 
 import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./background.ts";
-import { aoeSessions, BUSY_MARK, captureTmux, closeAoeSession, envMismatch, inputLine, laneEnv, openAoeSession, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
+import { aoeSessions, captureTmux, closeAoeSession, envMismatch, inputLine, laneEnv, openAoeSession, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
+import { turnRunning } from "./submit.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { freezePane, writeFrozen } from "./frozen.ts";
 import { ackFile, endStrayTasks, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
@@ -529,7 +530,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   ];
   const busy = [
     // a ready mark covers chains only: a turn that started after it (a nudge, a message) still blocks
-    ...(screen.includes(BUSY_MARK) ? ["a turn is running (esc to interrupt on screen)"] : []),
+    ...(turnRunning(screen) ? ["a turn is running (esc to interrupt on screen)"] : []),
     ...(QUESTION_MARK.test(screen) ? ["a question is open in the pane"] : []),
   ];
   const blockers = [...work, ...busy];
@@ -581,7 +582,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
       frozen = deps.signal(agent.pid, "SIGSTOP");
       emit(frozen ? `HANDOVER_FROZEN ${key} agent ${agent.pid} in ${lane.pane} at its idle moment (${Math.round((deps.clock.now() - opts.idle.since) / 1000)} s after the automatic start)` : `HANDOVER_FREEZE_FAIL ${key} agent ${agent.pid}: it stays told and quiet only`);
       const after = await captureTmux(deps.run, lane.pane);
-      if (after.includes(BUSY_MARK) || QUESTION_MARK.test(after)) {
+      if (turnRunning(after) || QUESTION_MARK.test(after)) {
         if (frozen) emit(deps.signal(agent.pid, "SIGCONT") ? `HANDOVER_THAWED ${key} agent ${agent.pid}: a turn started as it was frozen` : `HANDOVER_THAW_FAIL ${key} agent ${agent.pid}`);
         if (!opts.idle.final) return { code: 2, retry: true };
         return refuse(`the lane stayed busy for ${opts.idle.waitedMin} min: a turn started as it was frozen`, { blocked: "busy" });
@@ -652,7 +653,7 @@ export const laneHandover = async (deps: LaneHandoverDeps, key: string, here: st
         if (deps.clock.now() >= until) break;
         const pane = (await deps.registry.read(key))?.pane;
         const screen = pane ? await captureTmux(deps.run, pane) : "";
-        if (!screen.includes(BUSY_MARK) && !QUESTION_MARK.test(screen)) break;
+        if (!turnRunning(screen) && !QUESTION_MARK.test(screen)) break;
       }
     }
   } finally {

@@ -3,7 +3,7 @@ import { laneBackground } from "../src/background.ts";
 import { appendFileSync, chmodSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { sessionPath, withPi } from "../src/aoe.ts";
+import { paneActivity, sessionPath, withPi } from "../src/aoe.ts";
 import { leadAlertPoster } from "../src/autoturn.ts";
 import { deadPaneTick, newDeadPaneState, UNRECOGNISED_ALERT_AFTER } from "../src/dead-panes.ts";
 import { claimDone, type FlowDeps, watchTick } from "../src/done-flow.ts";
@@ -379,6 +379,47 @@ test("pending goal footer scope: an idle first turn whose status lines read esc 
 test("pending goal footer scope: the running-turn mark on the box's top border, with the same status lines, is STARTUP_PENDING_GOAL", async () => {
   world.screen = FOOT_BUSY;
   expect((await goalLaunch(["none"])).startup).toStartWith(`STARTUP_PENDING_GOAL smoke ${pendingPane}`);
+});
+
+// the other readers of the running-turn mark read it where turnRunning does: an idle lane whose status lines quote the
+// words is not busy, while omo's own mark on the box's top border still is
+test("busy mark scope: paneActivity calls a lane busy only for the mark on the box's top border, not for status lines quoting it", async () => {
+  world.aoePs = [{ session: LANE_ID, state: "idle" }];
+  world.screens[PANE] = FOOT_IDLE;
+  expect((await paneActivity(at(T0).run, [PANE])).get(PANE)).toBe("idle");
+  world.screens[PANE] = FOOT_BUSY;
+  expect((await paneActivity(at(T0).run, [PANE])).get(PANE)).toBe("busy");
+});
+
+test("busy mark scope: dead-panes takes the mark on the box's top border as alive, but not status lines quoting it on a pane with no prompt", async () => {
+  const deps = at(T0);
+  const panes = newDeadPaneState();
+  // a tall box scrolled its ❯ line out of view while the turn runs
+  world.screen = ["omo has stopped earlier, retrying", `── • Working (3s • esc to interrupt) ${"─".repeat(20)}`, "  a long text being typed", "─".repeat(40), " …/esc to interrupt • main"].join("\n");
+  for (let i = 0; i < 3; i++) expect(await deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12", [], panes)).toEqual([]);
+  world.screen = ["─".repeat(40), "─".repeat(40), " …/esc to interrupt • main", "omo has stopped", "$ "].join("\n");
+  expect(await deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12", [], panes)).toEqual([]);
+  expect(await deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12", [], panes)).toEqual([`DEAD_PANE ${PANE}`]);
+});
+
+test("busy mark scope: a launch whose screen only quotes esc to interrupt above its last lines, with no prompt, is STARTUP_UNCONFIRMED, not STARTUP_OK", async () => {
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# brief\n");
+  const deps = after20s(at(T0), () => {
+    world.screen = "Do you trust the files in /tmp/cwd esc to interrupt?\n  1. Trust (this session only)\n  2. Exit\n  (enter to confirm)";
+  });
+  const r = await launchLane(deps, { noThread: "test lane", key: "smoke", title: "smoke", brief, done: "file /tmp/ok", cwd: "/tmp/w" });
+  expect(r.startup).toStartWith(`STARTUP_UNCONFIRMED smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}: no running turn and no ❯ prompt on screen`);
+});
+
+test("busy mark scope: a launch whose tall box scrolled its ❯ line away while the turn runs is STARTUP_OK from the mark on the top border", async () => {
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# brief\n");
+  const deps = after20s(at(T0), () => {
+    world.screen = ["reading the brief", `── • Working (3s • esc to interrupt) ${"─".repeat(20)}`, "  line 1 of a long text", "  line 2", "─".repeat(40), " ~/w • main"].join("\n");
+  });
+  const r = await launchLane(deps, { noThread: "test lane", key: "smoke", title: "smoke", brief, done: "file /tmp/ok", cwd: "/tmp/w" });
+  expect(r.startup).toBe(`STARTUP_OK smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}`);
 });
 
 test("pending goal footer scope: dori watch counts a pending lane idle while only its status lines read esc to interrupt: three reads say LANE_NO_GOAL", async () => {
