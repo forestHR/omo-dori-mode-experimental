@@ -18,6 +18,8 @@ import unittest
 from urllib.parse import parse_qs, quote, urlsplit
 from unittest.mock import AsyncMock, patch
 
+TODO = "pb-0123456789ab-1"  # a dashboard todo id: its proposal id and the todo's place in it
+
 
 def load(name):
     spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
@@ -66,6 +68,12 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                       "created_by": "Owner@Example.com", "body_sha256": "a" * 64, "status": "받음", "uses": 0}
         self.order_reply = None
         self.use_reply = None
+        self.todo = {"todo_id": TODO, "proposal_id": TODO[:-2], "project": "연구", "status": "열림",
+                     "approved_at": gate.utc(), "auto_applied": False, "card": {"channel_id": "30", "message_id": "3001"},
+                     "title_sha256": "b" * 64, "uses": 0, "first_used_at": ""}
+        self.todo_reply = None
+        self.todo_use_reply = None
+        self.reactions[("3001", quote("✅"))] = [{"id": "7", "bot": True}, {"id": "1", "bot": False}]
         self.scope = "openid"
         self.owner_text = "이거 정리해 줘 <https://example.net/page>"
         self.search_queries = []
@@ -116,6 +124,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             "owner_proof": {"token_file": str(self.state / "bot"), "max_age_hours": 24},
             "owner_order": {"api_base": self.base, "token_file": str(self.state / "dashboard"),
                             "owner_logins": ["owner@example.com"], "max_age_hours": 24},
+            "owner_todo": {"api_base": self.base, "token_file": str(self.state / "dashboard"), "max_age_hours": 24},
             "google_scopes": ["openid", "https://www.googleapis.com/auth/gmail.readonly"],
             "connect_allow": ["example.com", {"host": "*.example.org", "ports": [443]}],
             "upstreams": {host: self.base for host in gate.GOOGLE_HOSTS},
@@ -161,6 +170,23 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     return
                 elif method == "GET" and path == asked:
                     data = self.order
+                else:
+                    status = 404
+            elif path.startswith("/api/todos/"):
+                asked = "/api/todos/" + self.todo.get("asked_as", self.todo["todo_id"])
+                if headers.get("x-pb-gate-token") != "dashboard-secret":
+                    status = 403
+                elif method == "POST" and path == asked + "/use":
+                    if self.todo_use_reply is not None:
+                        await gate.reply(writer, *self.todo_use_reply)
+                        return
+                    self.todo = {**self.todo, "uses": self.todo["uses"] + 1}
+                    data = self.todo
+                elif self.todo_reply is not None:
+                    await gate.reply(writer, *self.todo_reply)
+                    return
+                elif method == "GET" and path == asked:
+                    data = self.todo
                 else:
                     status = 404
             elif path == "/ddg/html/":
@@ -321,7 +347,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     def writes(self):
         return [r for r in self.seen if r[0] not in gate.READS and
-                not r[1].startswith(("/api/v10", "/token", "/api/orders/"))]
+                not r[1].startswith(("/api/v10", "/token", "/api/orders/", "/api/todos/"))]
 
     def changes(self):
         return self.service.records()
@@ -1469,6 +1495,163 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.writes()), 1)
         row = self.changes()[0]
         self.assertEqual((row["owner_order"]["id"], row["approved_by"]), ("17", entry["card"]))
+
+    async def todo_request(self, todo=TODO, **kwargs):
+        return await self.request(proof=False, headers={"x-dori-owner-todo": todo, **kwargs.pop("headers", {})},
+                                  **kwargs)
+
+    def todo_reads(self):
+        return [r for r in self.seen if r[1].startswith("/api/todos/")]
+
+    def todo_uses(self):
+        return [r[1] for r in self.todo_reads() if r[0] == "POST"]
+
+    def card_checks(self):
+        return [r[1].split("?")[0] for r in self.seen if r[1].startswith("/api/v10/channels/30/messages/3001/reactions/")]
+
+    async def test_card_approved_todo_is_owner_proof_asked_on_every_write_and_journaled(self):
+        # Owner 2026-11-03 06:09 KST Q2 "카드 승인 할 일도 근거로 받음"
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            status, _ = await self.todo_request(data={"summary": "내일 10시 회의"})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.writes()), 1)
+        self.assertNotIn("x-dori-owner-todo", self.writes()[0][2])
+        self.assertEqual(self.todo_uses(), [f"/api/todos/{TODO}/use"])
+        self.assertEqual(sorted(self.card_checks()), ["/api/v10/channels/30/messages/3001/reactions/" + quote(e)
+                                                      for e in sorted(["✅", "⛔"])])
+        row = self.changes()[0]
+        self.assertEqual(row["owner_message"], f"{self.base}/api/todos/{TODO}")
+        self.assertEqual(row["owner_todo"], {"id": TODO, "url": f"{self.base}/api/todos/{TODO}",
+                                             "approved_at": self.todo["approved_at"],
+                                             "card": "https://discord.com/channels/10/30/3001"})
+        self.assertNotIn("owner_order", row)
+        self.assertNotIn("dashboard-secret", output.getvalue() + (self.state / "changes.jsonl").read_text())
+        # never cached: the next write asks again and sees the todo finished
+        self.todo = {**self.todo, "status": "완료"}
+        status, body = await self.todo_request()
+        self.assertEqual((status, json.loads(body)["error"]), (403, "owner-todo-required"))
+        self.assertEqual((len([r for r in self.todo_reads() if r[0] == "GET"]), len(self.writes())), (2, 1))
+
+    async def test_todo_that_is_not_an_open_recent_card_approval_is_refused(self):
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
+        ahead = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
+        cases = {"taken in without a card": {"auto_applied": True}, "no auto_applied": {"auto_applied": None},
+                 "auto_applied not a boolean": {"auto_applied": "false"}, "no card": {"card": None},
+                 "card without a message": {"card": {"channel_id": "30", "message_id": ""}},
+                 "card not ids": {"card": {"channel_id": "30/../31", "message_id": "3001"}},
+                 "card not an object": {"card": "30/3001"},
+                 "approved too long ago": {"approved_at": old}, "approved in the future": {"approved_at": ahead},
+                 "no timezone": {"approved_at": "2026-11-02T00:00:00"}, "never approved": {"approved_at": ""},
+                 "done": {"status": "완료"}, "on hold": {"status": "보류"}, "unknown status": {"status": "open"},
+                 "other todo": {"todo_id": TODO[:-1] + "2", "asked_as": TODO}, "unknown todo": {"asked_as": TODO[:-1] + "9"}}
+        original = dict(self.todo)
+        for name, change in cases.items():
+            with self.subTest(name):
+                self.todo = {**original, **change}
+                status, body = await self.todo_request()
+                self.assertEqual((status, json.loads(body)["error"]), (403, "owner-todo-required"))
+        self.assertEqual((self.writes(), self.changes(), self.todo_uses()), ([], [], []))
+
+    async def test_todo_card_needs_the_owners_own_reaction_seen_by_the_gate(self):
+        owner = {"id": "1", "bot": False}
+        cases = {"no ✅": {}, "✅ by someone else": {"✅": [{"id": "2", "bot": False}]},
+                 "✅ by a bot with the owner's id": {"✅": [{"id": "1", "bot": True}]},
+                 "owner also ⛔": {"✅": [owner], "⛔": [owner]}}
+        for name, reactions in cases.items():
+            with self.subTest(name):
+                self.reactions = {("3001", quote(emoji)): users for emoji, users in reactions.items()}
+                status, body = await self.todo_request()
+                self.assertEqual((status, json.loads(body)["error"]), (403, "owner-todo-required"))
+        self.reactions = {("3001", quote("✅")): [owner]}
+        with self.subTest("card outside the owner's guild"):
+            self.todo = {**self.todo, "card": {"channel_id": "99", "message_id": "3001"}}
+            self.assertEqual(json.loads((await self.todo_request())[1])["error"], "owner-todo-required")
+        self.assertEqual((self.writes(), self.todo_uses()), ([], []))
+
+    async def test_malformed_todo_id_never_reaches_the_dashboard(self):
+        for todo in ("pb-0123456789ab", "pb-0123456789AB-1", "pb-0123456789ab-0", "pb-0123456789ab-01", "../x",
+                     f"{TODO}/use", f"{TODO}%2Fuse", "pb-0123456789ab-12345", "pb-0123456789abc-1", "17"):
+            with self.subTest(todo):
+                status, body = await self.todo_request(todo)
+                self.assertEqual((status, json.loads(body)["error"]), (403, "owner-todo-required"))
+        status, body = await self.todo_request("")
+        self.assertEqual((status, json.loads(body)["error"]), (403, "owner-message-required"))
+        self.assertEqual((self.todo_reads(), self.writes()), ([], []))
+
+    async def test_todo_proof_needs_the_setting_the_token_and_an_answer(self):
+        (self.state / "dashboard").write_text("wrong")
+        self.assertEqual(json.loads((await self.todo_request())[1])["error"], "owner-todo-required")
+        self.assertEqual(self.todo_reads()[0][2]["x-pb-gate-token"], "wrong")
+        (self.state / "dashboard").write_text("dashboard-secret\n")
+        for name, answer in {"server error": (500, b'{"error":"x"}'), "not json": (200, b"<html>"),
+                             "not an object": (200, b"[1]")}.items():
+            with self.subTest(name):
+                self.todo_reply = answer
+                self.assertEqual(json.loads((await self.todo_request())[1])["error"], "owner-todo-required")
+        self.todo_reply = None
+        settings = self.config.pop("owner_todo")
+        self.assertEqual(json.loads((await self.todo_request())[1])["error"], "owner-todo-required")
+        self.config["owner_todo"] = settings
+        with socket.socket() as unused:
+            unused.bind(("127.0.0.1", 0))
+            settings["api_base"] = "http://127.0.0.1:%d" % unused.getsockname()[1]
+        with self.subTest("dashboard down"):
+            self.assertEqual(json.loads((await self.todo_request())[1])["error"], "owner-todo-required")
+        self.assertEqual((len(self.todo_reads()), self.todo_uses(), self.writes()), (4, [], []))
+
+    async def test_dashboard_that_cannot_record_the_todo_use_refuses_the_write(self):
+        for name, answer in {"use refused": (404, b"not found"), "other todo": (200, gate.json_bytes({"todo_id": "x"})),
+                             "not json": (200, b"<html>")}.items():
+            with self.subTest(name):
+                self.todo_use_reply = answer
+                self.assertEqual(json.loads((await self.todo_request())[1])["error"], "owner-todo-required")
+        self.assertEqual((len(self.todo_uses()), self.writes(), self.changes()), (3, [], []))
+
+    async def test_todo_cannot_skip_the_outbound_card(self):
+        self.approval()
+        status, body = await self.todo_request(data={"attendees": [{"email": "outside@example.net"}]})
+        self.assertEqual((status, json.loads(body)["status"]), (202, "pending_approval"))
+        self.assertEqual(self.writes(), [])
+        entry = self.service.pending()[0]
+        self.assertEqual(entry["owner_todo"]["id"], TODO)
+        status, body = await self.todo_request(path="/gmail.googleapis.com/gmail/v1/users/me/messages/send")
+        self.assertEqual((status, json.loads(body)["error"]), (403, "mail-send-not-here"))
+        self.service.todo_facts.clear()  # as after a restart: the pending record carries the todo
+        self.approve()
+        await self.service.poll_approvals()
+        self.assertEqual(len(self.writes()), 1)
+        row = self.changes()[0]
+        self.assertEqual((row["owner_todo"]["id"], row["approved_by"]), (TODO, entry["card"]))
+
+    async def test_no_client_removes_the_owners_reaction_on_a_todo_card(self):
+        # The owner's ⛔ on a dashboard todo card must stay for the gate to read; the card is not one of the gate's.
+        self.reactions[("3001", quote("⛔"))] = [{"id": "1", "bot": False}]
+        card = "/api/v10/channels/30/messages/3001/reactions"
+        for suffix in ("/%E2%9B%94/1", "/%E2%9B%94", "", "/%E2%9B%94/%401"):
+            with self.subTest(suffix):
+                status, body = await self.request("DELETE", card + suffix, port="discord",
+                                                  headers={"authorization": "Bot MTIz.fake.fake"})
+                self.assertEqual((status, json.loads(body)["error"]), (403, "reaction-removal-not-allowed"))
+        self.assertFalse([r for r in self.seen if r[0] == "DELETE"])
+        for suffix in ("/%E2%9B%94/@me", "/%E2%9B%94/%40me"):
+            status, _ = await self.request("DELETE", card + suffix, port="discord",
+                                           headers={"authorization": "Bot MTIz.fake.fake"})
+            self.assertEqual(status, 200)
+        self.assertEqual(json.loads((await self.todo_request())[1])["error"], "owner-todo-required")
+
+    async def test_a_todo_backed_batch_keeps_the_todo_in_its_journal_after_a_restart(self):
+        self.approval()
+        status, body = await self.request("POST", "/_gate/batch", proof=False, headers={"x-dori-owner-todo": TODO},
+                                          data={"title": "도리집 정리", "items": self.batch_items()})
+        answer = json.loads(body)
+        self.assertEqual((status, self.service.batch(answer["batch"])["owner_todo"]["id"]), (202, TODO))
+        self.react(self.service.batch(answer["batch"])["message"])
+        await self.service.poll_approvals()
+        self.service.todo_facts.clear()  # as after a restart: the batch record carries the todo
+        self.assertEqual((await self.batch_folder(answer["batch"]))[0], 200)
+        row = self.changes()[-1]
+        self.assertEqual((row["owner_todo"]["id"], row["batch"]), (TODO, answer["batch"]))
 
     async def test_owner_message_wins_over_a_dashboard_order(self):
         status, _ = await self.request(headers={"x-dori-owner-order": "17"})

@@ -44,6 +44,8 @@ BAD_SCOPES = {"gmail.send", "gmail.compose", "gmail.insert", "gmail.modify",
 READS = {"GET", "HEAD"}
 # Dashboard order states that still stand for an owner command (done and cancelled orders do not).
 OPEN_ORDER_STATUSES = ("받음", "넘김", "처리 중")
+# 보류 (on hold) is not finished, but the owner stopped it; the backlog does not start it either
+OPEN_TODO_STATUSES = ("열림", "진행")
 # Discord fetches every linked URL to build a preview, so a link in a bot message is a request to that host.
 URL = re.compile(r"https?://([^/\s<>\"'`\\)\]|?#]+)", re.I)
 DISCORD_URL_ALLOW = ["discord.com", "*.discord.com", "discordapp.com", "*.discordapp.com", "discord.gg",
@@ -725,6 +727,7 @@ class Gate:
         self.approval_lock = asyncio.Lock()
         self.approval_task = None
         self.order_facts = {}
+        self.todo_facts = {}
         self.web_tasks = {}
         self.search_rest_until = 0.0
         for name in ("pending", "batches"):
@@ -780,7 +783,8 @@ class Gate:
         connection_class = TlsUpstream if parts.scheme == "https" else PlainUpstream
         connection = connection_class(parts.hostname, parts.port, timeout=timeout)
         outgoing = {k: v for k, v in headers.items()
-                    if k.lower() not in HOP | {"host", "content-length", "x-dori-owner-message", "x-dori-owner-order"}}
+                    if k.lower() not in HOP | {"host", "content-length", "x-dori-owner-message", "x-dori-owner-order",
+                                               "x-dori-owner-todo"}}
         outgoing["Connection"] = "close"
         outgoing["Content-Length"] = str(len(body))
         try:
@@ -929,6 +933,8 @@ class Gate:
     async def proof(self, headers: dict) -> str:
         if not headers.get("x-dori-owner-message") and headers.get("x-dori-owner-order"):
             return await self.order_proof(headers)
+        if not headers.get("x-dori-owner-message") and headers.get("x-dori-owner-todo"):
+            return await self.todo_proof(headers)
         reference = headers.get("x-dori-owner-message", "")
         if not re.fullmatch(r"\d+/\d+", reference):
             raise Refused("owner-message-required")
@@ -999,6 +1005,56 @@ class Gate:
             raise Refused("owner-order-required") from None
         self.order_facts[link] = dict(id=identity, url=link, body_sha256=data["body_sha256"],
                                       created_at=data["created_at"], device=device)
+        return link
+
+    async def todo_proof(self, headers: dict) -> str:
+        """A dashboard todo the owner approved by its card as his command (owner 2026-11-03 06:09 KST Q2 "고친다: 카드
+        승인 할 일도 근거로 받음", after Q454/Q455: a card-approved todo goes at once, one the board took in without a
+        card asks first). The gate asks the dashboard itself on every write and refuses on any doubt.
+
+        The todo must exist under that id, have come in through the owner's approval card (auto_applied false and
+        the card's channel and message), still be open and have been approved no longer than max_age_hours ago
+        (the same 24-hour window as an order, owner Q353). The gate then checks the card on Discord itself: the
+        owner's own account (not a bot) reacted ✅ and not ⛔ on that message, in a channel of the owner's guild.
+        Then it records the use on the dashboard (POST .../use) and refuses if that fails. Only the proof changes:
+        writes that reach outside still park on the approval card.
+        """
+        settings = self.config.get("owner_todo")
+        identity = headers.get("x-dori-owner-todo", "")
+        if not settings or not re.fullmatch(r"pb-[0-9a-f]{12}-[1-9][0-9]{0,3}", identity):
+            raise Refused("owner-todo-required")
+        base = str(settings["api_base"]).rstrip("/")
+        link = str(settings.get("link", base + "/api/todos/{id}")).replace("{id}", identity)
+        try:
+            asking = {settings.get("token_header", "X-PB-Gate-Token"): Path(settings["token_file"]).read_text().strip(),
+                      "Accept": "application/json"}
+            timeout = settings.get("timeout_seconds", 5)
+            data = await self.fetch_json("GET", f"{base}/api/todos/{identity}", asking, timeout=timeout)
+            stamp = dt.datetime.fromisoformat(str(data["approved_at"]).replace("Z", "+00:00"))
+            age = (dt.datetime.now(dt.timezone.utc) - stamp).total_seconds()
+            card = data.get("card")
+            channel = str(card["channel_id"]) if isinstance(card, dict) else ""
+            message = str(card["message_id"]) if isinstance(card, dict) else ""
+            if (data.get("todo_id") != identity or data.get("auto_applied") is not False
+                    or not re.fullmatch(r"\d{1,20}", channel) or not re.fullmatch(r"\d{1,20}", message)
+                    or data.get("status") not in settings.get("open_statuses", OPEN_TODO_STATUSES)
+                    or not 0 <= age <= settings.get("max_age_hours", 24) * 3600):
+                raise Refused("owner-todo-required")
+            authorization = "Bot " + Path(self.config["owner_proof"]["token_file"]).read_text().strip()
+            card_path = f"/channels/{channel}/messages/{message}"
+            if (not await self.channel_allowed(channel, authorization, dm=False)
+                    or await self.owner_reacted(card_path, "⛔") or not await self.owner_reacted(card_path, "✅")):
+                raise Refused("owner-todo-required")
+        except (Refused, OSError, ValueError, KeyError, TypeError, AttributeError):
+            raise Refused("owner-todo-required") from None
+        try:
+            recorded = await self.fetch_json("POST", f"{base}/api/todos/{identity}/use", asking, timeout=timeout)
+            if recorded.get("todo_id") != identity:
+                raise Refused("owner-todo-required")
+        except (Refused, OSError, ValueError, KeyError, TypeError, AttributeError):
+            raise Refused("owner-todo-required") from None
+        self.todo_facts[link] = dict(id=identity, url=link, approved_at=data["approved_at"],
+                                     card=f"https://discord.com/channels/{self.config['owner_guild']}/{channel}/{message}")
         return link
 
     def owner_attendees(self, data: dict, reasons: list, existing=False) -> None:
@@ -1232,6 +1288,8 @@ class Gate:
                    restorable=restorable and 200 <= status < 300)
         if proof in self.order_facts:
             row["owner_order"] = self.order_facts[proof]
+        if proof in self.todo_facts:
+            row["owner_todo"] = self.todo_facts[proof]
         if approved_by:
             row["approved_by"] = approved_by
         if batch:
@@ -1250,6 +1308,8 @@ class Gate:
             # The owner's ✅ on the batch card is the proof for its listed writes, for a day after it.
             batch = self.open_batch(uid, headers["x-dori-batch"])
             proof = batch["owner_message"]
+            if batch.get("owner_todo"):
+                self.todo_facts[proof] = batch["owner_todo"]
         link = proof if proof is not None else await self.proof(headers)
         reasons = []
         api, op, snapshot = await self.policy(method, path, query, headers, body, reasons)
@@ -1535,6 +1595,7 @@ class Gate:
             message = str(json_object(response)["id"])
             link = f"https://discord.com/channels/{self.config['owner_guild']}/{thread}/{message}"
             batch = dict(id=identity, ts=utc(), uid=uid, owner_message=proof, owner_order=self.order_facts.get(proof),
+                         owner_todo=self.todo_facts.get(proof),
                          title=title, items=items, state=["open"] * len(items), refs={}, channel=thread,
                          message=message, card=link, thread=thread, status="pending",
                          content_hash=hashlib.sha256(json_object(response).get("content", content).encode()).hexdigest(),
@@ -1617,6 +1678,8 @@ class Gate:
                 private_write(pending_path, json_bytes(entry))
                 if entry.get("owner_order"):
                     self.order_facts[entry["owner_message"]] = entry["owner_order"]
+                if entry.get("owner_todo"):
+                    self.todo_facts[entry["owner_message"]] = entry["owner_todo"]
                 try:
                     status, _, _ = await self.google_write(
                         entry["uid"], entry["method"], entry["path"], [tuple(pair) for pair in entry["query"]],
@@ -1643,7 +1706,8 @@ class Gate:
         waiting = self.pending()
         reasons = []
         # Both limits are off unless the config sets them (owner Q447: in-account writes need no card).
-        if (limits.get("writes_per_owner_message") is not None and proof not in self.order_facts and
+        if (limits.get("writes_per_owner_message") is not None and proof not in self.order_facts
+                and proof not in self.todo_facts and
                 sum(r["owner_message"] == proof for r in rows) + sum(r["owner_message"] == proof for r in waiting)
                 >= limits["writes_per_owner_message"]):
             reasons.append("owner-message-write-limit")
@@ -1727,7 +1791,7 @@ class Gate:
                      upstream_url=self.base(host) + "/" + quote(route, safe="/:@") + ("?" + urlencode(query) if query else ""),
                      headers={k: v for k, v in headers.items() if k.lower() in {"content-type", "accept"}},
                      body=base64.b64encode(body).decode(), owner_message=proof,
-                     owner_order=self.order_facts.get(proof),
+                     owner_order=self.order_facts.get(proof), owner_todo=self.todo_facts.get(proof),
                      reason=",".join(sorted(set(reasons))), api=api, op=op,
                      channel=channel, message=message, card=link, title=title, thread=thread,
                      content_hash=hashlib.sha256(json_object(response).get("content", content).encode()).hexdigest(), status="pending",
@@ -1840,6 +1904,8 @@ class Gate:
                     private_write(pending_path, json_bytes(entry))
                     if entry.get("owner_order"):
                         self.order_facts[entry["owner_message"]] = entry["owner_order"]
+                    if entry.get("owner_todo"):
+                        self.todo_facts[entry["owner_message"]] = entry["owner_todo"]
                     try:
                         async with self.write_lock:
                             if entry["api"] == "obsidian":
@@ -2005,6 +2071,12 @@ class Gate:
             if (method == "POST" and route == f"/channels/{entry['channel']}/messages/bulk-delete"
                     and entry["message"] in [str(m) for m in json_object(body).get("messages", [])]):
                 raise Refused("card-protected")
+        # No client removes another account's reaction, on any message: the owner's ⛔ on a dashboard todo card is
+        # a refusal the gate reads at each write (X-Dori-Owner-Todo), before first use and after a restart alike.
+        # Removing its own reaction (@me) stays allowed.
+        reaction = re.fullmatch(r"/channels/\d+/messages/\d+/reactions(/[^/]+)?(/[^/]+)?", route)
+        if method == "DELETE" and reaction and reaction[2] != "/@me":
+            raise Refused("reaction-removal-not-allowed")
         if method not in READS:
             allowed = self.config.get("discord_url_allow", DISCORD_URL_ALLOW)
             for text in message_texts(headers, body):

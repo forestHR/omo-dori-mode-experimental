@@ -70,6 +70,25 @@ approval card, and Gmail send stays refused. The dashboard keeps its gate token 
 account (0600); the owner's root apply copies it to `/etc/dori-gate/dashboard-orders-token`
 (root:dori-gate 0640) and again whenever the dashboard makes a new one.
 
+A todo the owner approved by its card is the third proof (owner 2026-11-03 06:09 KST Q2 "고친다: 카드 승인 할 일도
+근거로 받음", after Q454/Q455: a todo approved by card goes at once, one the board took in without a card asks
+first): `X-Dori-Owner-Todo: <todo id>` (the dashboard todo id, `pb-<12 hex>-<n>`) when neither
+`X-Dori-Owner-Message` nor `X-Dori-Owner-Order` is sent. With `owner_todo` set, the gate asks the dashboard on
+every write, never cached: `GET <api_base>/api/todos/<id>` with the same gate token header (`token_file`,
+`token_header`). The answer must be a JSON object with `todo_id` equal to the asked id, `auto_applied` exactly
+`false` (the board took it in through the owner's approval card, not by its own auto-apply switch), `card` with the
+card's `channel_id` and `message_id` (digits), `status` one of `open_statuses` (default `열림`, `진행`; `완료` and
+`보류` are refused) and `approved_at` an ISO time with zone no older than `max_age_hours` (24, the same window as an
+order) and not in the future. Then the gate checks the card on Discord itself, with the owner-proof bot token: the
+channel is in the owner's guild, the owner's own account (`owner_id`, not a bot) reacted ✅ on that message and did
+not react ⛔. Anything else, a non-2xx answer, no answer within `timeout_seconds` (5), a card the bot cannot read
+or a missing setting is `403 owner-todo-required` before Google. The gate then records the use
+(`POST <api_base>/api/todos/<id>/use`, same header; the answer's `todo_id` must match) and refuses the write if
+that fails. Like an order, a todo has no write count limit, only the window, and changes only the proof: outbound
+writes still park on the approval card and Gmail send stays refused. The journal row keeps `owner_todo` (id, link,
+`approved_at`, card link). YooDori's backlog puts the header in each card-approved todo lane's brief
+(`references/scripts.md`, backlog feed). `owner_todo` usually shares `owner_order`'s `api_base` and token file.
+
 A card is only for a write that reaches someone other than the owner (owner 2026-11-02 21:35 KST Q447
 "바깥 사람에게 가는 것만: 메일·바깥 초대·바깥 공유", and 21:41 KST "파일 바꾸는 것도 승인 없이 구글 드라이브 다 승인 없이").
 Writes inside the owner's account (spreadsheets, conversions, images by URL, any number of writes or deletes)
@@ -101,7 +120,8 @@ vault writes at 1 MiB. Chunked requests are decoded; trailers cannot alter heade
 Owner 2026-10-29 10:02 KST "그래 그럼 그렇게 한번 해보자" (stage 1 of the web window, for the gated Dori only).
 The gate reads pages and searches for the Dori; the Dori itself still has no DNS and no web. Off unless
 `listen.web` is set. Both calls are `GET` only and need the same owner proof as a write
-(`X-Dori-Owner-Message`, or `X-Dori-Owner-Order`); one owner message (or order) is one task.
+(`X-Dori-Owner-Message`, `X-Dori-Owner-Order` or `X-Dori-Owner-Todo`); one owner message (or order, or todo) is
+one task.
 
 ```sh
 W=http://127.0.0.1:3131; O='X-Dori-Owner-Message: <channel id>/<message id>'
@@ -174,7 +194,9 @@ returning `202` with a card link. The gate posts short Korean cards (kind, recip
 (`내용: <file> 공유(보기)`; an unreadable name says so with the file id), so the card alone tells who gets what. Only the owner's non-bot reaction counts. Cancel wins over approve.
 Cards expire after 24 hours. Missing/tampered cards never execute. A SHA-256
 content check precedes reactions. Clients cannot edit/delete pending cards or
-add/remove their reactions through the Discord port.
+add/remove their reactions through the Discord port. On any message, a client may remove only its own reaction
+(`@me`); removing another account's reaction, all reactions of an emoji or all reactions is
+`403 reaction-removal-not-allowed`, so the owner's ⛔ on a dashboard todo card stays for the todo proof.
 
 Each card lives in a thread, and its result is written on the card there. A request
 written inside a thread under the approval channel keeps its card in that thread; one
@@ -278,7 +300,8 @@ owner-message link, pre-change snapshot where applicable, and approval-card link
 when approved. A write on a dashboard order has the order link as `owner_message` and
 `owner_order` `{id, url, body_sha256, created_at, device}` (`url` is `owner_order.link` with `{id}`
 filled in, else the API address), next to the written resource's title, so each change can be
-matched with the order's text. Logs exclude request bodies, authorization and query credentials;
+matched with the order's text. A write on a card-approved todo has the todo link as `owner_message` and
+`owner_todo` `{id, url, approved_at, card}` (`card` the approval card's Discord link). Logs exclude request bodies, authorization and query credentials;
 snapshots and parked bodies are confidential state, not diagnostic logs.
 New-resource creation has no previous state, so its snapshot is null.
 

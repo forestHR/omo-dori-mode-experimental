@@ -8,7 +8,8 @@ const WINDOW = () => new URL(process.env.DORI_WEB_WINDOW || "http://127.0.0.1:31
 const OWNER_MESSAGE = {
 	type: "string",
 	description: "The owner's Discord message this work is for, as '<channel id>/<message id>' (the same value as the " +
-		"X-Dori-Owner-Message header), or 'order:<n>' for a dashboard order. Required: the gate opens the web only inside " +
+		"X-Dori-Owner-Message header), 'order:<n>' for a dashboard order or 'todo:<todo id>' for a todo the owner approved " +
+		"by card. Required: the gate opens the web only inside " +
 		"an owner task, and links it returned open only within the same task.",
 };
 
@@ -16,8 +17,10 @@ function ownerHeaders(ownerMessage) {
 	const value = String(ownerMessage || process.env.DORI_OWNER_MESSAGE || "").trim();
 	const order = value.match(/^order:([1-9][0-9]{0,8})$/);
 	if (order) return { "X-Dori-Owner-Order": order[1] };
+	const todo = value.match(/^todo:(pb-[0-9a-f]{12}-[1-9][0-9]{0,3})$/);
+	if (todo) return { "X-Dori-Owner-Todo": todo[1] };
 	if (/^\d+\/\d+$/.test(value)) return { "X-Dori-Owner-Message": value };
-	throw new Error("owner_message is required: pass the owner's message as '<channel id>/<message id>' (or 'order:<n>').");
+	throw new Error("owner_message is required: pass the owner's message as '<channel id>/<message id>' (or 'order:<n>', 'todo:<todo id>').");
 }
 
 // node:http straight to the loopback window: fetch would follow HTTP(S)_PROXY to the CONNECT-only port.

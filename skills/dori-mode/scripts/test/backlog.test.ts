@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, inboxReader, type InboxRow, orderIntake, readLines, pairIntake, isPairItem, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
+import { addItem, todoProofRule, launchRules, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, inboxReader, type InboxRow, orderIntake, readLines, pairIntake, isPairItem, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 import { briefGaps, COMMON_LEDGER, loadLedger } from "../src/directives.ts";
@@ -567,6 +567,25 @@ test("only the owner's card approves a feed entry: approved_at with auto_applied
   ]);
   // Then
   expect(["todo-c1", "todo-a1", "todo-u1"].map((id) => writeLimit(readItem(state, id)!))).toEqual(["approved", "draft", "draft"]);
+});
+
+test("a card-approved todo's lane is told the gate proof for its todo; an answer-approved or draft one is not", async () => {
+  // Given: one entry the owner approved by card, one taken in without a card
+  await feedSweep([
+    { todo_id: "pb-121212121212-1", title: "내일 10시 회의 일정 추가", status: "열림", approved_at: "2026-11-02T15:00:00Z", auto_applied: false },
+    { todo_id: "pb-131313131313-1", title: "auto", status: "열림", approved_at: "2026-11-02T15:00:00Z", auto_applied: true },
+  ]);
+  // When
+  await backlogTick(deps(), { force: true });
+  await backlogTick(deps(), { force: true });
+  // Then
+  expect(sentBrief("todo-pb-121212121212-1")).toContain(todoProofRule("pb-121212121212-1"));
+  expect(sentBrief("todo-pb-121212121212-1")).toContain("X-Dori-Owner-Todo: pb-121212121212-1 ");
+  expect(sentBrief("todo-pb-131313131313-1")).not.toContain("X-Dori-Owner-Todo");
+  const decided = { id: "z2", title: "z", brief, done: "file /tmp/x", priority: 5, by: "feed", status: "open" as const, addedAt: "t", log: [], source: "pb-141414141414-1", feedHash: "h", approval: { at: "t", hash: "h", by: "decide" as const } };
+  expect(launchRules(decided)).toContain(APPROVED_RULE);
+  expect(launchRules(decided)).not.toContain("X-Dori-Owner-Todo");
+  expect(launchRules({ ...decided, approval: { ...decided.approval, by: "card" } })).toContain("X-Dori-Owner-Todo: pb-141414141414-1 ");
 });
 
 test("the write limit comes from the item's state at each launch: a draft the lead replaced with a plain brief still launches draft-only", async () => {
