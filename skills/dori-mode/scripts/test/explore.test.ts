@@ -302,7 +302,7 @@ test("reviewers.allowSameFamily keeps a same-family reviewer for challenge (not 
   const off = await challengeWorld(hostRunner(calls), list, own);
   await expect(runChallenge(off.deps, off.l, off.plan, { model: "anthropic-subscription/claude-fable-5-1:xhigh" })).rejects.toThrow("the lane's own family");
   expect((await runChallenge(off.deps, off.l, off.plan, { all: true })).reviews.map((v) => v.record.model)).toEqual(["chatgpt-subscription/gpt-6-astra:xhigh"]);
-  const deps = { ...off.deps, config: { ...off.deps.config, reviewers: { models: list, allowSameFamily: true } } };
+  const deps = { ...off.deps, config: { ...off.deps.config, reviewers: { ...off.deps.config.reviewers, models: list, allowSameFamily: true } } };
   expect((await runChallenge(deps, off.l, off.plan, { all: true })).reviews.map((v) => v.record.model)).toEqual(["chatgpt-subscription/gpt-6-astra:xhigh", "anthropic-subscription/claude-fable-5-1:xhigh"]);
   expect((await runChallenge(deps, off.l, off.plan, { model: "anthropic-subscription/claude-fable-5-1:xhigh" })).reviews.map((v) => v.record.model)).toEqual(["anthropic-subscription/claude-fable-5-1:xhigh"]);
   await expect(runChallenge(deps, off.l, off.plan, { model: "anthropic-subscription/claude-opus-5-5" })).rejects.toThrow("the lane's own model");
@@ -417,7 +417,8 @@ test("fork-explore runs CPU branches at once, queues GPU branches on the slot, p
   expect(() => branchesFrom(["a"], ["t"], [], false)).toThrow("at least 2");
 });
 
-test("intent-check shows the owner's goal, the lane's direction and next step; a stage-change milestone puts that lane's owner check first and writes no INTENT line", async () => {
+// 2026-11-02 (owner card Q442): freshness no longer has a reviewer read lane reports; only dori intent-check asks one
+test("intent-check shows the owner's goal, the lane's direction and next step; a freshness sweep, a stage-change milestone included, asks no reviewer and writes no INTENT line", async () => {
   const empty: Tree = { area: "x", nodes: [] };
   const goal = "굴착기가 흙을 퍼서 적치띠에 덤프하는 정책을 학습";
   expect(intentView({ ...lane, goal, direction: { at: "t", text: "적치띠 덤프 보상 정책 학습 재개", next: "9-seed 평가" } }, empty)).toEqual({ goal, direction: "적치띠 덤프 보상 정책 학습 재개", next: "9-seed 평가" });
@@ -434,7 +435,6 @@ test("intent-check shows the owner's goal, the lane's direction and next step; a
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `2026-01-01T11-00-00-000Z_00000000-0000-0000-0000-00000000000${key === "rl-a" ? 1 : 2}.jsonl`), `${JSON.stringify({ type: "message", timestamp: new Date(T0 + 30_000).toISOString(), message: { role: "user", content: [{ type: "text", text: `[REPORT] ${key} | milestone | working` }] } })}\n`);
   }
-  // whichever lane the registry lists first, the one that announced a new stage is checked (one check per sweep)
   for (const staged of ["rl-a", "rl-b"]) {
     const dir = join(state.dir, `st-${staged}`);
     checked.length = 0;
@@ -445,8 +445,9 @@ test("intent-check shows the owner's goal, the lane's direction and next step; a
     const line = (k: string) => ` [REPORT] ${k} | milestone | ${k === staged ? "phase 2 starts: switch to curriculum training" : "still tuning"}`;
     world.screens["lead:p1"] = `${line("rl-a")}\n${line("rl-b")}\n\n❯ `;
     await freshnessTick(deps, "/home/test");
-    expect(checked).toEqual([staged]);
-    expect(await Bun.file(deps.config.watchLog).text()).not.toMatch(/INTENT_/);
+    expect(checked).toEqual([]);
+    const log = Bun.file(deps.config.watchLog);
+    expect((await log.exists()) ? await log.text() : "").not.toMatch(/INTENT_/);
   }
   expect(footer({ ...lane, goal }, "lead:p1")).toContain(`Goal (owner words): "${goal}"`);
 });

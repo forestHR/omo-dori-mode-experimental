@@ -205,17 +205,19 @@ export const defaultDiscordWords: DiscordWords = {
 // --improved, the larger of the tagged count (fix tags, dori fix-attempt) and the inferred one (untagged reports, commits,
 // tree). Rung 2 from hypothesesAt attempts: competing hypotheses with cheap tests before the next patch. Rung 3 from
 // researchAt attempts: ulw research and a dori challenge of the next plan, in the same session, no rollover. Rung 4: a
-// failure after rung 3, the same hypothesis fixatedAfter times, or an owner-check finding that comes back: the lead may
+// failure after rung 3, the same hypothesis fixatedAfter times, or an intent-check finding that comes back: the lead may
 // roll the lane over. rereadText ({key}, {brief}, {finding}) goes to a lane whose report broke the owner's words, only when
-// the lead confirms it with dori owner-check <key> --reread.
+// the lead confirms it with dori intent-check <key> --reread.
 export type Stuck = { readonly hypothesesAt: number; readonly researchAt: number; readonly fixatedAfter: number; readonly rereadText: string };
 
-// Reviewer models of another family for dori challenge and dori owner-check, in order (best GPT, Claude, Grok, then a
+// Reviewer models of another family for dori challenge and dori intent-check, in order (best GPT, Claude, Grok, then a
 // second model of each family). Each command takes the first callable one of another family than the lane's.
 // allowSameFamily: dori challenge (and challenge --check) also keeps a model of the lane's family (only the lane's own
-// model is skipped), so an account can have Claude Fable review a Claude Opus lane. owner-check, intent-check, the
-// directives check and the rollover audit still take another family.
-export type Reviewers = { readonly models: readonly string[]; readonly allowSameFamily: boolean };
+// model is skipped), so an account can have Claude Fable review a Claude Opus lane. intent-check, the directives check,
+// the close summary and the rollover audit still take another family. first: the models id those four try first
+// (gpt-6.1-sol: on live Korean lane logs the cheaper gpt-6-luna misread a relayed order's scope); command: their argv
+// template ({model}, {prompt}, {system}); minutes: their time limit per call.
+export type Reviewers = { readonly models: readonly string[]; readonly allowSameFamily: boolean; readonly first: string; readonly command: ArgvTemplate; readonly minutes: number };
 
 // dori review / dori merge (src/merge-gate.ts). repos: "<owner>/<repo>" -> ISO time; claim-done refuses a lane whose done
 // signal names a PR of that repo merged at or after that time without dori merge (empty: no repo is checked). testCommand
@@ -249,7 +251,6 @@ export type Signals = { readonly launchLanes: number; readonly numberedAttemptPa
 // with "ulw research " (RESEARCH_PREFIX): omo attaches its ulw-research skill only to typed input that names it, and not
 // when the text starts with a [TAG]. researchVerifyMin: how long after sending the lane's session log may take to show the
 // skill pointer and a read of its SKILL.md before RESEARCH_NOT_STARTED.
-// stagePattern: a milestone report matching it announces a new stage, and freshness runs the owner check on that lane first.
 // Before a review each reviewers.models id is checked against modelsCommand (the host's models) and authCommand
 // ({provider}: is it logged in); an id the host cannot call is skipped or moved to a logged-in provider of the same model.
 // challengeCommand / branchCommand: argv templates ({model}, {prompt}, and {system}, the reviewer's system prompt, for
@@ -259,7 +260,6 @@ export type Explore = {
   readonly sendResearchToLane: boolean;
   readonly researchText: string;
   readonly researchVerifyMin: number;
-  readonly stagePattern: string;
   readonly treeLines: number;
   readonly modelsCommand: ArgvTemplate;
   readonly authCommand: ArgvTemplate;
@@ -269,7 +269,7 @@ export type Explore = {
   readonly branchMinutes: number;
 };
 
-// Signals that need no tag from the lane: the inferred count of the stuck ladder and OWNER_CHECK. The inferred count is
+// Signals that need no tag from the lane: the inferred count of the stuck ladder (and what dori intent-check reads). The inferred count is
 // the cycles of "a gate line failed, then a new attempt targets it" on one metric; repeatGapMin: attempts on one
 // metric closer than this are one attempt told twice. failPattern / passPattern: a gate line's verdict; verdictPattern: a
 // prescription's verdict (fails every known metric the text names); inferAttemptPattern: a new attempt (a prescription, an
@@ -282,23 +282,13 @@ export type Explore = {
 // prescribes again in the same report counts as an attempt. targetScope: an
 // attempt targets a metric named in the same "sentence" (the default: reports name the target a few words from the prescription)
 // or the same "clause" (between commas: quieter, misses more).
-// ownerCheck: a reviewer of another family reads the brief, the owner's words and recent reports and answers VIOLATION /
-// CONTRADICTION / GOAL_LOSS / OK. enabled: freshness runs it on new reports; first: the reviewers.models id it tries first
-// (gpt-6.1-sol: on live Korean lane logs the cheaper gpt-6-luna misread a relayed order's scope); command: argv
-// template ({model}, {prompt}, {system}); minutes: time limit; minIntervalMin: at most one check per lane in this time;
-// maxPerDay: per lane; reports: the newest reports it reads at least; maxReports: at most this many of the reports since the
-// last check (all of them up to that); relays: how many owner [LEAD] relays it reads, and how many of the owner's decisions in the lane's thread (card answers, his messages); perTick: checks per sweep.
-export type OwnerCheck = {
-  readonly enabled: boolean;
-  readonly first: string;
-  readonly command: ArgvTemplate;
-  readonly minutes: number;
-  readonly minIntervalMin: number;
-  readonly maxPerDay: number;
+// intentCheck: what dori intent-check's reviewer reads: reports (the newest reports it reads at least), maxReports (at
+// most this many of the reports since the last check, all of them up to that), relays (how many owner [LEAD] relays it
+// reads, and how many of the owner's decisions in the lane's thread: card answers, his messages).
+export type IntentCheck = {
   readonly reports: number;
   readonly maxReports: number;
   readonly relays: number;
-  readonly perTick: number;
 };
 
 export type AutoSignals = {
@@ -313,7 +303,7 @@ export type AutoSignals = {
   readonly conditionWords: readonly string[];
   readonly discriminationPattern: string;
   readonly targetScope: "clause" | "sentence";
-  readonly ownerCheck: OwnerCheck;
+  readonly intentCheck: IntentCheck;
 };
 
 // dori handover: switch the lead to a new agent session. prompt starts the first message of the new session (the note's
@@ -405,8 +395,8 @@ export type DoriConfig = {
   // the host's own file with its directives and links (empty: none); links a file of { id, source } rows another Dori
   // pushed, which only sets the source of fork entries (empty: none); linkPeers "<user>:<absolute path>" the Dori this one
   // pushes the links of its local ledger to (dori directives links --push, and freshness when the local ledger changed)
-  // memory: the lead's omo memory repo an owner message's inbox row recalls notes from (empty: the repo of a session in
-  // handover.cwd, else defaultCwd; "off": no recall)
+  // memory: the lead's omo memory repo dori directive-audit reads for directives kept twice (DIRECTIVE_DUPLICATE; empty:
+  // the repo of a session in handover.cwd, else defaultCwd; "off": no check)
   readonly directives: { readonly common: string; readonly local: string; readonly links?: string; readonly linkPeers?: readonly string[]; readonly memory?: string };
   readonly sessionsDir: string;
   readonly nudgeAfterMin: number;
@@ -502,6 +492,9 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   reviewers: {
     models: ["chatgpt-subscription/gpt-6-astra", "anthropic-subscription/claude-fable-5-1", "xai/grok-4.7", "chatgpt-subscription/gpt-6.1-sol", "anthropic-subscription/claude-opus-5-5", "xai/grok-4.6", "chatgpt-subscription/gpt-6-luna"],
     allowSameFamily: false,
+    first: "chatgpt-subscription/gpt-6.1-sol",
+    command: ["omo", "-p", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--omo-senpi-disabled", "--system-prompt", "{system}", "--model", "{model}", "{prompt}"],
+    minutes: 4,
   },
   scorecard: {
     timeZone: "UTC",
@@ -526,7 +519,6 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
     sendResearchToLane: true,
     researchText: "ulw research {question} First read the ulw-research SKILL.md (the omo-ulw-research pointer names its path) and follow it, kept on this one symptom (failed attempt {n} on {metric}). Record each useful finding with dori tree add --lane {key} --kind finding --text '<source url>: <what it says, which hypothesis it supports or rules out>'. Then write your next plan to a file, have it challenged with dori challenge {key} --plan <file>, and report back to the lead what the research and the challenge change about your next step, before the next patch.",
     researchVerifyMin: 5,
-    stagePattern: "\\b(?:stage|phase|pivot|switch(?:ing)? to|next step)\\b|단계|국면|방향 전환|다음 단계",
     treeLines: 6,
     modelsCommand: ["omo", "--list-models"],
     authCommand: ["omo", "auth", "check", "--provider", "{provider}", "--json"],
@@ -547,18 +539,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
     conditionWords: ["양토", "점토", "사토", "모래", "흙", "씨앗", "깊이", "셀", "seed", "seeds", "depth", "soil", "clay", "loam", "sand", "cell"],
     discriminationPattern: "dori tree [HFD]\\d|가설 판별|판별|\\bdiscriminat|\\bfalsif|\\bablation",
     targetScope: "sentence",
-    ownerCheck: {
-      enabled: true,
-      first: "chatgpt-subscription/gpt-6.1-sol",
-      command: ["omo", "-p", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--omo-senpi-disabled", "--system-prompt", "{system}", "--model", "{model}", "{prompt}"],
-      minutes: 4,
-      minIntervalMin: 30,
-      maxPerDay: 48,
-      reports: 6,
-      maxReports: 20,
-      relays: 8,
-      perTick: 1,
-    },
+    intentCheck: { reports: 6, maxReports: 20, relays: 8 },
   },
   handover: { prompt: "Dori mode", title: "", model: "", services: [], timers: "remind", verifyMin: 15, inbox: "", cwd: "", watchers: [], readyMin: 30,
     laneContextPct: 0, laneCompactions: 0, laneAgeH: 0, laneAfterCompactK: 0, leadContextPct: 0, leadCompactions: 0, leadAgeH: 0, leadAfterCompactK: 0, autoRolloverLanes: false, autoRolloverLead: false, autoRetryMin: 30, autoWaitMin: 20,
@@ -686,7 +667,9 @@ export const migrateOldKeys = (input: Raw): { readonly raw: Raw; readonly warnin
   move("explore", "hypothesesFrom", "stuck", "hypothesesAt");
   // researchAt counted stuck signals (1 = the first attempt that needed hypotheses); stuck.researchAt counts failed attempts
   move("explore", "researchAt", "stuck", "researchAt", (v) => Number(v) + hypothesesAt - 1);
-  drop("explore", "driftBelow", "dori intent-check reads the owner's words with a reviewer model (owner-check) instead of counting shared words");
+  drop("explore", "driftBelow", "dori intent-check reads the owner's words with a reviewer model instead of counting shared words");
+  // 2026-11-02 (owner card Q442): the periodic owner check is gone; its stage ordering with it
+  drop("explore", "stagePattern", "the periodic check of lane reports it ordered was removed; lanes run dori intent-check at each stage change");
   drop("handover", "laneRepeats", "a stuck lane is due for a rollover at rung 4 of the stuck ladder");
   drop("discord", "doneText", "a close posts the lane's own summary for the owner (dori claim-done --summary, or one a model writes from its last report and REPORT.md), and a lane with a thread does not close without one");
   // owner 2026-10-20 "이건 왜 아직 기계적 구문 생성이 남아있어?": the rollover message is written, not filled in
@@ -696,16 +679,30 @@ export const migrateOldKeys = (input: Raw): { readonly raw: Raw; readonly warnin
   move("signals", "attemptPattern", "signals", "numberedAttemptPattern");
   move("autoSignals", "attemptPattern", "autoSignals", "inferAttemptPattern");
   move("explore", "challengeModels", "reviewers", "models");
+  // the periodic owner check was removed on 2026-11-02 (owner card Q442): its shared reviewer settings live in reviewers,
+  // what intent-check reads in autoSignals.intentCheck, and its schedule keys are no longer read
   const oc = raw.autoSignals?.ownerCheck as Record<string, unknown> | undefined;
-  if (oc && "models" in oc) {
+  if (oc && typeof oc === "object") {
+    delete section("autoSignals").ownerCheck;
+    const old = "autoSignals.ownerCheck";
+    const to = (key: string, target: Record<string, unknown>, where: string): void => {
+      if (!(key in oc)) return;
+      const kept = key in target;
+      if (!kept) target[key] = oc[key];
+      warnings.push(`CONFIG_OLD_KEY ${old}.${key} -> ${where}.${key}${kept ? " (both set: the new key wins)" : ""}; rename it in the config`);
+    };
     const models = oc.models;
-    const rest = { ...oc };
-    delete rest.models;
-    section("autoSignals").ownerCheck = { ...(Array.isArray(models) && models[0] && !("first" in oc) ? { first: models[0] } : {}), ...rest };
-    // both old lists set: one list holding both (challenge order first); only a reviewers.models the config sets itself wins
-    const moved = section("reviewers").models;
-    if (Array.isArray(models) && !userReviewers) section("reviewers").models = [...new Set([...(Array.isArray(moved) ? moved : []), ...models, ...(Array.isArray(moved) ? [] : defaultConfig().reviewers.models)])];
-    warnings.push("CONFIG_OLD_KEY autoSignals.ownerCheck.models -> reviewers.models (one list for challenge and owner-check) and autoSignals.ownerCheck.first; rename it in the config");
+    if (Array.isArray(models)) {
+      // both old lists set: one list holding both (challenge order first); only a reviewers.models the config sets itself wins
+      const moved = section("reviewers").models;
+      if (!userReviewers) section("reviewers").models = [...new Set([...(Array.isArray(moved) ? moved : []), ...models, ...(Array.isArray(moved) ? [] : defaultConfig().reviewers.models)])];
+      if (models[0] && !("first" in oc) && !("first" in section("reviewers"))) section("reviewers").first = models[0];
+      warnings.push(`CONFIG_OLD_KEY ${old}.models -> reviewers.models (one list) and reviewers.first; rename it in the config`);
+    }
+    for (const key of ["first", "command", "minutes"]) to(key, section("reviewers"), "reviewers");
+    const intent = (section("autoSignals").intentCheck ??= {}) as Record<string, unknown>;
+    for (const key of ["reports", "maxReports", "relays"]) to(key, intent, "autoSignals.intentCheck");
+    for (const key of ["enabled", "minIntervalMin", "maxPerDay", "perTick"]) if (key in oc) warnings.push(`CONFIG_OLD_KEY ${old}.${key} is no longer read: the periodic check of lane reports was removed; remove it from the config`);
   }
   return { raw, warnings };
 };
@@ -716,7 +713,7 @@ export const loadConfig = async (path = configPath(), home = homedir(), warn: (l
   const migrated = migrateOldKeys((await file.exists()) ? ((await file.json()) as Raw) : {});
   for (const w of migrated.warnings) warn(`${w} (${path})`);
   const raw = migrated.raw as Partial<DoriConfig>;
-  const merged: DoriConfig = { ...base, ...raw, update: { ...base.update, ...raw.update }, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, discord: { ...base.discord, ...raw.discord }, stuck: { ...base.stuck, ...raw.stuck }, reviewers: { ...base.reviewers, ...raw.reviewers }, mergeGate: { ...base.mergeGate, ...raw.mergeGate }, scorecard: { ...base.scorecard, ...raw.scorecard }, signals: { ...base.signals, ...raw.signals }, explore: { ...base.explore, ...raw.explore }, autoSignals: { ...base.autoSignals, ...raw.autoSignals, ownerCheck: { ...base.autoSignals.ownerCheck, ...raw.autoSignals?.ownerCheck } }, handover: { ...base.handover, ...raw.handover }, related: { ...base.related, ...raw.related }, stateGit: { ...base.stateGit, ...raw.stateGit, backup: { ...base.stateGit.backup, ...raw.stateGit?.backup } }, heavyQueue: { ...base.heavyQueue, ...raw.heavyQueue } };
+  const merged: DoriConfig = { ...base, ...raw, update: { ...base.update, ...raw.update }, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, discord: { ...base.discord, ...raw.discord }, stuck: { ...base.stuck, ...raw.stuck }, reviewers: { ...base.reviewers, ...raw.reviewers }, mergeGate: { ...base.mergeGate, ...raw.mergeGate }, scorecard: { ...base.scorecard, ...raw.scorecard }, signals: { ...base.signals, ...raw.signals }, explore: { ...base.explore, ...raw.explore }, autoSignals: { ...base.autoSignals, ...raw.autoSignals, intentCheck: { ...base.autoSignals.intentCheck, ...raw.autoSignals?.intentCheck } }, handover: { ...base.handover, ...raw.handover }, related: { ...base.related, ...raw.related }, stateGit: { ...base.stateGit, ...raw.stateGit, backup: { ...base.stateGit.backup, ...raw.stateGit?.backup } }, heavyQueue: { ...base.heavyQueue, ...raw.heavyQueue } };
   const heavyProblem = heavyQueueProblem(merged.heavyQueue);
   if (heavyProblem) throw new ConfigError(`${path}: ${heavyProblem}`);
   if (!OWNER_SPEECHES.includes(merged.discord.ownerSpeech)) throw new ConfigError(`${path}: discord.ownerSpeech must be "" (follow discord.locale), "casual" or "polite", not ${JSON.stringify(merged.discord.ownerSpeech)}`);

@@ -822,13 +822,13 @@ test("rollover-stats gives counts, approval time, step times and the lane's qual
     { kind: "proposal", who: "lane", at: "2026-10-11T10:00:00Z", key: "demo", pane: OLD, card: "Q4", signals: { contextPct: 75 }, crossed: ["context 75% >= 70%"], blockers: "" },
     { kind: "rollover", who: "lane", at: "2026-10-11T10:30:00Z", key: "demo", from: OLD, to: NEW, approvedBy: "Q4", proposedAt: "2026-10-11T10:00:00Z", approvalMin: 30, signals: { contextPct: 75, compactions: 2 }, steps: [{ step: "open", ms: 4000, ok: true }, { step: "verify", ms: 60000, ok: true }], result: "done", reasons: [] },
   ] as const;
-  const watch = ["2026-10-11T09:00:00Z freshness NUDGED demo 16 min silent", "2026-10-11T09:30:00Z freshness NUDGED demo 20 min silent", "2026-10-11T09:40:00Z owner-check OWNER_CHECK demo OK 6 recent reports", "2026-10-11T09:45:00Z owner-check OWNER_CHECK demo GOAL_LOSS owner x", "2026-10-11T09:50:00Z stuck STUCK demo \"loss\" rung 3 (tagged 3)", "2026-10-11T11:00:00Z freshness NO-REPORT demo pane", "2026-10-11T11:00:00Z freshness NUDGED other 1"];
+  const watch = ["2026-10-11T09:00:00Z freshness NUDGED demo 16 min silent", "2026-10-11T09:30:00Z freshness NUDGED demo 20 min silent", "2026-10-11T09:40:00Z intent-check INTENT_CHECK demo OK 6 recent reports", "2026-10-11T09:45:00Z intent-check INTENT_CHECK demo GOAL_LOSS owner x", "2026-10-11T09:50:00Z stuck STUCK demo \"loss\" rung 3 (tagged 3)", "2026-10-11T11:00:00Z freshness NO-REPORT demo pane", "2026-10-11T11:00:00Z freshness NUDGED other 1"];
   // When
   const out = rolloverStats(entries as never, watch, Date.parse("2026-10-11T12:30:00Z"));
   // Then
   expect(out[0]).toBe("ROLLOVER_STATS proposals=1 rollovers=1 (done 1) approval_median_min=30 window=24h");
   expect(out[1]).toBe("ROLLOVER_STEPS open median 4s fail 0; verify median 60s fail 0");
-  expect(out).toContain(`QUALITY demo 2026-10-11T10:30:00Z before 24h: NUDGED 2, OWNER_CHECK 1, STUCK 1 | after 2h: NO-REPORT 1`);
+  expect(out).toContain(`QUALITY demo 2026-10-11T10:30:00Z before 24h: NUDGED 2, INTENT_CHECK 1, STUCK 1 | after 2h: NO-REPORT 1`);
   const lead = rolloverStats([{ ...entries[1], approvedBy: "lead:STUCK rung 4", decidedBy: "lead", reason: "STUCK rung 4", ownerReport: { message: "m1" } }, { ...entries[1], decidedBy: "lead", ownerReport: { error: "429" } }] as never, [], Date.parse("2026-10-11T12:30:00Z"));
   expect(lead[2]).toContain("; decided by the lead (STUCK rung 4), owner told: m1");
   expect(lead[4]).toContain("owner told: MISSING (429)");
@@ -1508,7 +1508,7 @@ test("the owner's rollover message names one cause from the approval or the sign
     ["lead:문맥 초과로 멈춤, context 317%", {}, "full"],
     ["lead:owner https://discord.com/channels/1/2/3 asked for it", {}, "owner"],
     ["lead:STUCK rung 4 on loss after research", {}, "stuck"],
-    ["lead:OWNER_CHECK rung4 VIOLATION", {}, "drift"],
+    ["lead:INTENT_CHECK rung4 VIOLATION", {}, "drift"],
     ["lead:rollover due: context after compaction 596k >= 300k", {}, "afterCompact"],
     ["auto:handover.autoRolloverLanes", { afterCompactK: 323 }, "afterCompact"],
     ["auto:handover.autoRolloverLanes", { contextPct: 85 }, "context"],

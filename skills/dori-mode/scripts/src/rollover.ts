@@ -121,7 +121,7 @@ export const rolloverCause = (ref: string, signals: Signals, limits: Limits): Ca
   if (words && OWNER_REF.test(words)) return { kind: "owner" };
   if (/COMPACTION_STUCK|compaction did not complete|압축 ?실패/i.test(words) || (!words && (signals.compactionStuck ?? 0) > 0)) return { kind: "compactionStuck" };
   if (/문맥 ?(?:초과|가득|꽉)|context (?:overflow|full|limit)/i.test(words) || (pct ?? 0) >= 100) return { kind: "full" };
-  if (/OWNER_CHECK|owner[- ]check|VIOLATION|CONTRADICTION|GOAL_LOSS|맥락 (?:이상|단)/i.test(words)) return { kind: "drift" };
+  if (/INTENT_CHECK|intent[- ]check|VIOLATION|CONTRADICTION|GOAL_LOSS|맥락 (?:이상|단)/i.test(words)) return { kind: "drift" };
   if (/STUCK|rung ?4|SAME_FIX_3|fixated|막힘 ?4 ?단/i.test(words) || (!words && (signals.stuck?.rung ?? 0) >= 4)) return { kind: "stuck" };
   if (afterK !== undefined) return { kind: "afterCompact", n: afterK };
   if (pct !== undefined) return { kind: "context", n: pct };
@@ -207,9 +207,9 @@ export const COMPACTION_STUCK = "COMPACTION_STUCK";
 export const AUTO_PREFIX = "auto:";
 export const LEAD_PREFIX = "lead:";
 
-// a lead's approval names the signal it acts on (a STUCK rung, an owner-check finding, a measured threshold)
+// a lead's approval names the signal it acts on (a STUCK rung, an intent-check finding, a measured threshold)
 // whole tokens only: "age" in "message" or 단 in 단계 is no signal (challenge, grok-4.7)
-const SIGNAL_WORD = /(?<![\w])(?:COMPACTION_STUCK|compaction did not complete|STUCK|rung ?4|OWNER_CHECK|VIOLATION|CONTRADICTION|GOAL_LOSS|ROLLOVER_DUE|SAME_FIX_3|fixated|context \d+ ?%|context after compaction \d+ ?k|compactions? \d+|\d+ compactions?|age \d+(?:\.\d+)? ?h)(?![\w])|막힘 ?4 ?단|맥락 (?:이상|단)|압축 \d+/i;
+const SIGNAL_WORD = /(?<![\w])(?:COMPACTION_STUCK|compaction did not complete|STUCK|rung ?4|INTENT_CHECK|VIOLATION|CONTRADICTION|GOAL_LOSS|ROLLOVER_DUE|SAME_FIX_3|fixated|context \d+ ?%|context after compaction \d+ ?k|compactions? \d+|\d+ compactions?|age \d+(?:\.\d+)? ?h)(?![\w])|막힘 ?4 ?단|맥락 (?:이상|단)|압축 \d+/i;
 
 // the thresholds of one side, from handover.lane* or handover.lead*
 export const limitsFor = (who: Who, h: DoriConfig["handover"]): Limits =>
@@ -295,7 +295,7 @@ export const approvalProblem = (ref: string | undefined, card: (id: string) => Q
       const problem = ownerRefProblem(cited, owner);
       if (problem) return `${JSON.stringify(r)} cites the owner, but ${problem}`;
       if (why.replace(cited[0], "").replace(/[\s,;:.()-]+/g, " ").trim().length < 8) return `${JSON.stringify(r)} does not say the reason: --approved-by "${LEAD_PREFIX}<reason>, owner <message id>"`;
-    } else if (why.length < 8 || !SIGNAL_WORD.test(why)) return `${JSON.stringify(r)} does not say the reason and the signal behind it: --approved-by "${LEAD_PREFIX}<reason>, <signal: STUCK rung 4 on X, OWNER_CHECK GOAL_LOSS twice, context 85%>" or "${LEAD_PREFIX}<reason>, owner <id or link of the owner's message that asked for it>"`;
+    } else if (why.length < 8 || !SIGNAL_WORD.test(why)) return `${JSON.stringify(r)} does not say the reason and the signal behind it: --approved-by "${LEAD_PREFIX}<reason>, <signal: STUCK rung 4 on X, INTENT_CHECK GOAL_LOSS twice, context 85%>" or "${LEAD_PREFIX}<reason>, owner <id or link of the owner's message that asked for it>"`;
     return canReport ? undefined : "a lead's rollover needs a way to tell the owner afterwards: set DORI_DISCORD_TOKEN and DORI_DISCORD_CHANNEL (or give the lane a discord:<id> thread)";
   }
   if (r.startsWith(AUTO_PREFIX)) {
@@ -489,9 +489,10 @@ export const readRollovers = (stateDir: string): RolloverEntry[] => {
 export const lastProposal = (entries: readonly RolloverEntry[], key: string): Extract<RolloverEntry, { kind: "proposal" }> | undefined =>
   entries.findLast((e): e is Extract<RolloverEntry, { kind: "proposal" }> => e.kind === "proposal" && e.key === key);
 
-// Watch-log kinds that show a lane going wrong: silence (NUDGED, NO-REPORT), a stuck rung, an owner-check finding, lost
-// input, a blocked pane. SAME_FIX_3, REPEAT_SUSPECT and INTENT_DRIFT are the names older versions wrote; they still count.
-export const QUALITY_KINDS = ["NUDGED", "NO-REPORT", "STUCK", "OWNER_CHECK", "NOT_SUBMITTED", "LANE_BLOCKED", "SAME_FIX_3", "REPEAT_SUSPECT", "INTENT_DRIFT"] as const;
+// Watch-log kinds that show a lane going wrong: silence (NUDGED, NO-REPORT), a stuck rung, an intent-check finding, lost
+// input, a blocked pane. SAME_FIX_3, REPEAT_SUSPECT, INTENT_DRIFT and OWNER_CHECK (the periodic check removed 2026-11-02)
+// are the names older versions wrote; they still count in old logs.
+export const QUALITY_KINDS = ["NUDGED", "NO-REPORT", "STUCK", "INTENT_CHECK", "NOT_SUBMITTED", "LANE_BLOCKED", "SAME_FIX_3", "REPEAT_SUSPECT", "INTENT_DRIFT", "OWNER_CHECK"] as const;
 
 type Counts = Record<string, number>;
 
@@ -502,8 +503,8 @@ const countsIn = (lines: readonly string[], key: string, from: number, to: numbe
     if (!w || w.key !== key) continue;
     const at = Date.parse(w.at);
     const kind = QUALITY_KINDS.find((k) => k === w.kind);
-    // an owner check that found nothing is not a quality signal
-    if (kind === "OWNER_CHECK" && w.detail.startsWith("OK")) continue;
+    // a check that found nothing is not a quality signal
+    if ((kind === "INTENT_CHECK" || kind === "OWNER_CHECK") && w.detail.startsWith("OK")) continue;
     if (kind && at >= from && at < to) out[kind] = (out[kind] ?? 0) + 1;
   }
   return out;
@@ -618,7 +619,7 @@ export const userLines = (log: string | undefined): Said[] => {
 
 // [LEAD] lines that run the machinery (nudges, handover and rollover steps, checks, the directive top-up that the brief
 // also gets) are not instructions the conversation alone holds
-const MACHINE = /^\[LEAD\]\s*(your work thread has had no update|Handover of|An automatic rollover|지침 보충|The handover of)|HANDOVER_|dori handover (ready|ack)|OWNER_CHECK|DIRECTIVE_AUDIT|\bSTUCK\b/;
+const MACHINE = /^\[LEAD\]\s*(your work thread has had no update|Handover of|An automatic rollover|지침 보충|The handover of)|HANDOVER_|dori handover (ready|ack)|INTENT_CHECK|DIRECTIVE_AUDIT|\bSTUCK\b/;
 
 // The lead's own instructions among a log's user lines (the [LEAD] lines that are not machinery), from since (ms) on.
 export const leadLines = (said: readonly Said[], since: number): Said[] => said.filter((s) => s.text.startsWith("[LEAD]") && !MACHINE.test(s.text) && (Date.parse(s.at) || 0) >= since);

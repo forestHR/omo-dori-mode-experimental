@@ -1,7 +1,6 @@
 import { repeatTick } from "./auto-signals.ts";
 import { type DoriConfig, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
-import { runOwnerCheck } from "./owner-check.ts";
 import { researchCheck, stuckTop } from "./explore.ts";
 import { paneTranscript, readScreen, sendVerified } from "./panes.ts";
 import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
@@ -270,19 +269,9 @@ export const autoReadyLine = (h: DoriConfig["handover"]): string => {
     : `ROLLOVER_AUTO_OFF ${sides}; rollovers wait for the lead's decision`;
 };
 
-// A milestone report that announces a new stage or phase is the moment to compare the lane's direction with the owner's goal:
-// that lane's owner check goes first in the sweep.
-export const stageChange = (report: string, pattern: string): boolean => /\| milestone \|/.test(report) && new RegExp(pattern, "i").test(report.replace(/^\[REPORT\][^|]*\|[^|]*\|/, ""));
-
 const lastHeard = (lane: Lane): number => lane.lastReplyAt ?? Date.parse(lane.openedAt);
 
 const stuckAct = (lane: string, line: string): SweepAct => ({ kind: "stuck", lane, detail: line.replace(/^STUCK \S+ /, "") });
-
-// a lane heard from since its last owner check, past the per-lane interval: worth reading its reports again
-const ownerCheckDue = (lane: Lane, now: number, minIntervalMin: number): boolean => {
-  const last = lane.ownerCheck ? Date.parse(lane.ownerCheck.at) : 0;
-  return (lane.lastReplyAt ?? 0) > last && now - last >= minIntervalMin * 60_000;
-};
 
 // Lanes send [REPORT] lines to the lead pane, so that is where they are read first; the lane's own screen is the fallback.
 // A report not seen before counts as hearing from the lane.
@@ -298,7 +287,6 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
   }, ...given };
   const acts: SweepAct[] = [];
   const now = deps.clock.now();
-  const staged = new Set<string>();
   let leadScreen: string | undefined;
   let leadLines: readonly string[] | undefined;
   for (const lane of await deps.registry.open()) {
@@ -329,7 +317,6 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
         watchLog(deps.config.watchLog, deps.clock, { source: "auto-signals", line: `AUTO_SIGNALS_WARN ${lane.key} repeat check failed: ${String(e).slice(0, 200)}` });
       }
       current = (await deps.registry.read(lane.key)) ?? current;
-      if (stageChange(report, deps.config.explore.stagePattern)) staged.add(lane.key);
     }
     // a ulw research text sent to the lane: does its session log show the skill starting (RESEARCH_STARTED / _NOT_STARTED)
     if (lane.research && !lane.research.result) {
@@ -365,24 +352,6 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
         lead = !pane ? "; lead not told: leadPane is not configured" : (await sendVerified(deps.run, deps.clock, deps.config, pane, note)) ? "; lead told" : `; lead not told: the note did not reach pane ${pane}`;
       }
       acts.push({ kind: "posted", lane: lane.key, detail: `${text}${lead}` });
-    }
-  }
-  // owner-instruction check: a reviewer model reads the newest reports of a lane heard from since its last check (a lane whose
-  // milestone report announced a new stage first); a finding is the stuck ladder's context rung (its STUCK line)
-  const oc = deps.config.autoSignals.ownerCheck;
-  if (oc.enabled) {
-    let budget = oc.perTick;
-    const lanes = (await deps.registry.open()).sort((a, b) => Number(staged.has(b.key)) - Number(staged.has(a.key)));
-    for (const lane of lanes) {
-      if (budget <= 0) break;
-      if (statusOf(lane) !== "working" || !ownerCheckDue(lane, now, oc.minIntervalMin)) continue;
-      const r: { readonly lines: readonly string[]; readonly skipped?: string } = await runOwnerCheck(deps, lane).catch((e: unknown) => {
-        watchLog(deps.config.watchLog, deps.clock, { source: "owner-check", line: `OWNER_CHECK_FAILED ${lane.key} ${String(e).slice(0, 200)}` });
-        return { lines: [] };
-      });
-      // a check skipped before any model call (no report in the session files yet) does not use up the sweep's budget
-      if (!r.skipped?.startsWith("OWNER_CHECK_SKIP")) budget--;
-      for (const line of r.lines) if (line.startsWith("STUCK ")) acts.push(stuckAct(lane.key, line));
     }
   }
   const lead = deps.config.leadPane;

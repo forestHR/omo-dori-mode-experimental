@@ -49,6 +49,9 @@ const bareModel = (model: string): string => (model.split("/").pop() ?? model).r
 export const reviewers = (laneModel: string, candidates: readonly string[], sameFamily = false): string[] =>
   candidates.filter((m) => (sameFamily ? bareModel(m) !== bareModel(laneModel) : familyOf(m) !== familyOf(laneModel)));
 
+// reviewers.models with reviewers.first in front (intent-check, the directives check, the close summary, the rollover audit)
+export const reviewerOrder = (models: readonly string[], first: string): string[] => (first ? [first, ...models.filter((m) => m !== first)] : [...models]);
+
 export const SECTIONS = ["Reasons this will fail", "Missing alternatives", "Cheapest falsifying test"] as const;
 
 const MAX_PLAN = 60_000;

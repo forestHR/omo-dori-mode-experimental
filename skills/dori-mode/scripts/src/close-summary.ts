@@ -106,7 +106,7 @@ export const parseSummary = (out: string): string | undefined => /<<<SUMMARY\s*\
 export type OwnerSummary = { readonly text?: string; readonly source: string; readonly why?: string };
 
 // The lane's own summary (dori claim-done --summary, dori close --summary) when it reads as plain words in the owner's
-// speech; otherwise one a reviewer model writes from that refused summary alone (its facts kept), or without one from the lane's notes (autoSignals.ownerCheck.first, then reviewers.models, with ownerCheck's
+// speech; otherwise one a reviewer model writes from that refused summary alone (its facts kept), or without one from the lane's notes (reviewers.first, then reviewers.models, with reviewers'
 // command and time limit), checked the same way; otherwise none, and why.
 export const ownerSummary = async (deps: FlowDeps, lane: Lane, given: string | undefined, maxModels = 3): Promise<OwnerSummary> => {
   const { locale, ownerSpeech } = deps.config.discord;
@@ -121,7 +121,7 @@ export const ownerSummary = async (deps: FlowDeps, lane: Lane, given: string | u
   }
   const sources = refused.length ? refused : summarySources(lane);
   if (!sources.length) return { source: "none", why: [...problems, "no report, claim or REPORT.md to write one from"].join("; ") };
-  const cfg = deps.config.autoSignals.ownerCheck;
+  const cfg = deps.config.reviewers;
   const first = cfg.first;
   const listed = (first ? [first, ...deps.config.reviewers.models.filter((m) => m !== first)] : [...deps.config.reviewers.models]).slice(0, maxModels);
   let checks: Awaited<ReturnType<typeof checkReviewers>> = [];

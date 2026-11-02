@@ -149,10 +149,10 @@ test("old keys of the stuck ladder, the reviewer list and the attempt patterns s
     const file = join(fixture.dir, "config.json");
     writeFileSync(file, JSON.stringify({
       sameFix: { after: 4, sendToLane: true },
-      explore: { hypothesesFrom: 3, researchAt: 2, driftBelow: 0.2, challengeModels: ["xai/grok-4.7"] },
+      explore: { hypothesesFrom: 3, researchAt: 2, driftBelow: 0.2, stagePattern: "phase", challengeModels: ["xai/grok-4.7"] },
       handover: { laneRepeats: 3, reportText: "I moved {who} ({from} -> {to})", frozenText: "{from} frozen", sizeText: "{old}k -> {now}k" },
       signals: { attemptPattern: "try (\\d)" },
-      autoSignals: { repeatAfter: 5, attemptPattern: "처방", ownerCheck: { models: ["chatgpt-subscription/gpt-6-luna"], minutes: 2 } },
+      autoSignals: { repeatAfter: 5, attemptPattern: "처방", ownerCheck: { models: ["chatgpt-subscription/gpt-6-luna"], minutes: 2, reports: 4, enabled: true, perTick: 1 } },
       stuck: { fixatedAfter: 5 },
     }));
     const warned: string[] = [];
@@ -164,11 +164,15 @@ test("old keys of the stuck ladder, the reviewer list and the attempt patterns s
     expect(config.autoSignals.inferAttemptPattern).toBe("처방");
     // both old lists: one list holding both, the challenge order first (challenge, grok-4.7)
     expect(config.reviewers.models).toEqual(["xai/grok-4.7", "chatgpt-subscription/gpt-6-luna"]);
-    expect(config.autoSignals.ownerCheck).toMatchObject({ first: "chatgpt-subscription/gpt-6-luna", minutes: 2 });
-    expect("models" in config.autoSignals.ownerCheck).toBe(false);
+    // the removed periodic check (2026-11-02): its reviewer settings move to reviewers, what intent-check reads to
+    // autoSignals.intentCheck, its schedule keys are dropped
+    expect(config.reviewers).toMatchObject({ first: "chatgpt-subscription/gpt-6-luna", minutes: 2 });
+    expect(config.autoSignals.intentCheck).toEqual({ reports: 4, maxReports: 20, relays: 8 });
+    expect(Object.keys(config.autoSignals)).not.toContain("ownerCheck");
+    expect("stagePattern" in config.explore).toBe(false);
     expect("laneRepeats" in config.handover).toBe(false);
     expect(["reportText", "frozenText", "sizeText"].filter((k) => k in config.handover)).toEqual([]);
-    expect(warned.map((w) => w.split(" ")[1])).toEqual(["sameFix.after", "sameFix.sendToLane", "explore.hypothesesFrom", "explore.researchAt", "explore.driftBelow", "handover.laneRepeats", "handover.reportText", "handover.frozenText", "handover.sizeText", "autoSignals.repeatAfter", "signals.attemptPattern", "autoSignals.attemptPattern", "explore.challengeModels", "autoSignals.ownerCheck.models"]);
+    expect(warned.map((w) => w.split(" ")[1])).toEqual(["sameFix.after", "sameFix.sendToLane", "explore.hypothesesFrom", "explore.researchAt", "explore.driftBelow", "explore.stagePattern", "handover.laneRepeats", "handover.reportText", "handover.frozenText", "handover.sizeText", "autoSignals.repeatAfter", "signals.attemptPattern", "autoSignals.attemptPattern", "explore.challengeModels", "autoSignals.ownerCheck.models", "autoSignals.ownerCheck.minutes", "autoSignals.ownerCheck.reports", "autoSignals.ownerCheck.enabled", "autoSignals.ownerCheck.perTick"]);
     expect(warned[0]).toBe(`CONFIG_OLD_KEY sameFix.after -> stuck.fixatedAfter (both set: the new key wins); rename it in the config (${file})`);
     expect(warned.every((w) => w.startsWith("CONFIG_OLD_KEY "))).toBe(true);
     // a config without old keys loads quietly, and scorecard.lanesLog defaults to the watch log

@@ -37,14 +37,13 @@ import { heavySpread, isKind, spreadPlan, withPipefail, type SpreadJob } from ".
 import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
 import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, reopenLaneThread, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
-import { memoryRepoFor, MemoryRecallError, recallNotes } from "./memory-recall.ts";
 import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, ledgerProblems, ledgerTable, loadLedger, messageLines, promptTable, textDirectives } from "./directives.ts";
-import { applyDirectives, auditOrReport, checkMeaning, linkRows, pushLinks, sinceIso } from "./directive-audit.ts";
+import { applyDirectives, auditOrReport, checkMeaning, linkRows, memoryRepoFor, pushLinks, sinceIso } from "./directive-audit.ts";
 import { addNode, formatIntent, formatTree, gateFix, intentView, laneArea, loadTree, NODE_KINDS, type NodeKind, recordBranch, recordOverride, recordRefusal, requiredMessage, researchCheck, researchFacts, researchHint, sendResearch, setStatus, stuckTop, stuckView, type TreeArea, TreeError, updateTree } from "./explore.ts";
 import { challengeMissing, ChallengeError, checkReviewers, familyOf, reviewers, runChallenge } from "./challenge.ts";
 import { gateMissing, GateRefusal, mergePr, parsePr, reviewPr } from "./merge-gate.ts";
 import { canonical, evidenceLines, inferredLine, inferRepeats, laneEvents, type MetricRepeat, suspects } from "./auto-signals.ts";
-import { runOwnerCheck, sendReread } from "./owner-check.ts";
+import { runIntentCheck, sendReread } from "./intent-check.ts";
 import { branchesFrom, ForkError, forkExplore, type Mode } from "./fork-explore.ts";
 import { Registry, statusOf } from "./registry.ts";
 import { realClock, run } from "./run.ts";
@@ -120,10 +119,6 @@ const USAGE = `dori <command> [options]
                                        message, and adds them to its brief under "## 추가 지침(리드, launch 뒤)"
                                        (DIRECTIVES_APPLIED; none missing: DIRECTIVES_APPLY_NONE; not submitted:
                                        DIRECTIVES_APPLY_NOT_SENT, exit 1, brief unchanged)
-  recall <text>                        the lead's own memory notes (directives.memory, else the omo memory repo of
-                                       handover.cwd or defaultCwd under this account's home: notes/, reference/, people/*/card.md) the text points at, at most 3,
-                                       as path and description with secrets blanked (MEMORY_RECALL lines); the inbound
-                                       listener puts the same into an owner message's row as memory
   directive-audit [--since 24h|Nd|ISO] [--dry-run]
                                        the lanes opened since then against the ledger (directives in scope missing from
                                        the brief, a lane without a thread) and the owner's messages that read like a
@@ -212,33 +207,25 @@ const USAGE = `dori <command> [options]
                                        omo-ulw-research:skill-pointer and a read of ulw-research/SKILL.md (RESEARCH_STARTED),
                                        not yet (RESEARCH_PENDING), or not within explore.researchVerifyMin (RESEARCH_NOT_STARTED,
                                        exit 6). freshness runs the same check on every tick
-  intent-check <key> [--direction TEXT] [--next TEXT] [--goal "owner words"]
-                                       the owner's goal next to the lane's current direction and next step, then the
-                                       owner check on them at once (no interval): OWNER_CHECK <key> OK, or a finding as the
-                                       stuck ladder's context rung (STUCK). --direction/--next record what the lane says it
-                                       does now; --goal sets a missing goal
+  intent-check <key> [--direction TEXT] [--next TEXT] [--goal "owner words"] | intent-check <key> --reread
+                                       the owner's goal next to the lane's current direction and next step, then a reviewer
+                                       of another family (reviewers.models, reviewers.first first) reads them, the brief,
+                                       the owner's words in it and in the lead's [LEAD] relays, his card answers and
+                                       messages in the lane's thread (dated, the newest wins; in a thread other lanes share,
+                                       only those tied to this lane) and the newest reports: INTENT_CHECK <key> OK, or
+                                       VIOLATION|CONTRADICTION|GOAL_LOSS with quoted evidence as the stuck ladder's context
+                                       rung (STUCK "@context"; again after a confirmed re-read, rung 4). An owner quote not
+                                       in his words is dropped (INTENT_CHECK_UNGROUNDED), one in a shared thread's message
+                                       for another lane too (INTENT_CHECK_SHARED), a report an earlier check read is not
+                                       flagged again (INTENT_CHECK_STALE). --direction/--next record what the lane says it
+                                       does now; --goal sets a missing goal. --reread: you confirmed the last finding, so
+                                       the lane gets stuck.rereadText (its brief and the owner's words to re-read; REREAD_SENT)
   repeat-check <key> [--since ISO|Nd|Nh] [--until ISO] [--repo DIR ...] [--backtest]
                                        untagged repeats: a gate line (metric) that failed and was re-targeted by a new
                                        prescription or patch, from the lane's [REPORT] lines, its branch commits (worktrees,
                                        cwd, --repo) and tree entries; INFERRED <key> "<metric>" <n> with the evidence from
                                        stuck.researchAt cycles (the inferred half of the stuck count). Default window: the
                                        lane's current session. --backtest prints each time a count reached it, with its time
-  owner-check <key> [--force | --reread]
-                                       a reviewer of another family (reviewers.models, autoSignals.ownerCheck.first first)
-                                       reads the brief, the owner's words in it and in the lead's [LEAD] relays, his card
-                                       answers and messages in the lane's thread (dated, the newest wins; in a thread
-                                       other lanes share, only those tied to this lane: a [LEAD] relay or brief link to
-                                       it, a reply to its post or card, its card's answer, its key named, or no other
-                                       lane open then; a finding on another one is OWNER_CHECK_SHARED, no rung), and the
-                                       newest reports: OWNER_CHECK <key> VIOLATION|CONTRADICTION|GOAL_LOSS|OK with quoted
-                                       evidence. An owner quote not in his words (goal, brief, quoted part of a relay,
-                                       his decisions) is dropped (OWNER_CHECK_UNGROUNDED); a report an earlier check read
-                                       is not flagged again (OWNER_CHECK_STALE); a report quote not found is marked
-                                       unverified. A finding is the
-                                       stuck ladder's context rung (STUCK "@context"); again in the next check, rung 4.
-                                       Only on a report newer than the last check; --force skips the interval and daily
-                                       limit. --reread: you confirmed the last finding, so the lane gets stuck.rereadText
-                                       (its brief and the owner's words to re-read; REREAD_SENT). freshness runs it on new reports
   signals [--lane K | --cwd DIR | --tag T]
                                        what earlier lanes tried and how it went: numbered fix attempts and the root-cause
                                        switch, tagged fixes by metric, rejected done claims, re-sends, nudges, outcome,
@@ -733,8 +720,8 @@ const hintLedger = (opts: { readonly strict?: boolean } = {}): Ledger => {
   return checkedLedger(config, { tolerant: !opts.strict });
 };
 
-// The omo memory repo of this Dori's lead: directives.memory, else the repo omo keeps for its cwd (handover.cwd, else
-// defaultCwd) under this account's home.
+// The omo memory repo of this Dori's lead that dori directive-audit reads for DIRECTIVE_DUPLICATE: directives.memory, else
+// the repo omo keeps for its cwd (handover.cwd, else defaultCwd) under this account's home.
 const leadMemoryRepo = (): string => config.directives.memory || memoryRepoFor(config.handover.cwd || config.defaultCwd, homedir());
 // the owner's message a thread starts from, as the inbox has it (text or voice transcript); empty when it is not there
 const inboxText = (id: string): string => {
@@ -1069,6 +1056,12 @@ try {
     }
     case "intent-check": {
       let l = await lane(key ?? die("intent-check needs a lane key"));
+      if (flags.values.reread) {
+        const sent = await sendReread(deps, l);
+        console.log(sent.line);
+        if (!sent.ok) process.exit(1);
+        break;
+      }
       const at = new Date().toISOString();
       const patch = {
         ...(opt("goal") ? { goal: opt("goal") } : {}),
@@ -1079,11 +1072,11 @@ try {
         l = { ...l, ...patch };
       }
       for (const line of formatIntent(l, intentView(l, await loadTree(config.stateDir, laneArea(l, config))))) console.log(line);
-      // the verdict is the owner check's, run now on the direction just stated
-      const r = await runOwnerCheck(deps, l, { force: true, direction: true });
+      // the verdict: a reviewer of another family reads the direction just stated
+      const r = await runIntentCheck(deps, l);
       if (r.skipped) {
         console.log(r.skipped);
-        if (r.skipped.startsWith("OWNER_CHECK_FAILED")) process.exit(1);
+        if (r.skipped.startsWith("INTENT_CHECK_FAILED")) process.exit(1);
         break;
       }
       for (const line of r.lines) console.log(line);
@@ -1117,23 +1110,6 @@ try {
         for (const line of evidenceLines(r)) console.log(line);
       }
       if (!hits.length) console.log(`REPEAT_NONE ${l.key} no metric re-targeted ${after}+ times after failing (counts: ${[...state.counts.values()].map((r) => `${r.metric} ${r.n}`).join(", ") || "none"})`);
-      break;
-    }
-    case "owner-check": {
-      const l = await lane(key ?? die("owner-check needs a lane key"));
-      if (flags.values.reread) {
-        const sent = await sendReread(deps, l);
-        console.log(sent.line);
-        if (!sent.ok) process.exit(1);
-        break;
-      }
-      const r = await runOwnerCheck(deps, l, { force: Boolean(flags.values.force) });
-      if (r.skipped) {
-        console.log(r.skipped);
-        if (r.skipped.startsWith("OWNER_CHECK_FAILED")) process.exit(1);
-        break;
-      }
-      for (const line of r.lines) console.log(line);
       break;
     }
     case "resume":
@@ -1589,8 +1565,6 @@ try {
           ...(config.hooks.transcribe?.length ? { transcribe: transcribeUrl } : {}),
           // read per message, so a ledger edited while the listener runs is what the next message gets
           hints: (text) => messageLines(text, hintLedger()),
-          // this Dori's own lead memory only (its account's home, its lead's cwd), read per message like the ledger
-          recall: (text) => recallNotes(text, leadMemoryRepo()).map((n) => n.line),
         });
         listener.start();
         await new Promise(() => {});
@@ -1920,14 +1894,6 @@ try {
       console.log(ledgerTable(ledger));
       break;
     }
-    case "recall": {
-      const text = flags.positionals.join(" ").trim() || die("usage: dori recall <text>");
-      const repo = leadMemoryRepo();
-      const found = recallNotes(text, repo);
-      for (const n of found) console.log(`MEMORY_RECALL ${n.line}`);
-      if (!found.length) console.log(`MEMORY_RECALL_NONE: no note in ${repo} that the text points at`);
-      break;
-    }
     case "directive-audit": {
       const since = sinceIso(opt("since") ?? "24h", Date.now());
       const r = await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), memory: leadMemoryRepo(), dryRun: Boolean(flags.values["dry-run"]) });
@@ -1943,6 +1909,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof MemoryRecallError) die(e.message);
+  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError) die(e.message);
   throw e;
 }

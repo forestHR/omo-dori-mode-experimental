@@ -358,7 +358,7 @@ export const treeContext = async (deps: FlowDeps, draft: Lane): Promise<string |
 const draftLane = (deps: FlowDeps, input: LaunchInput): Lane => ({
   ...(input.noThread?.trim() ? { noThread: input.noThread.trim() } : {}),
   ...(input.whyNew?.trim() ? { whyNew: input.whyNew.trim() } : {}),
-  // the brief as an absolute path: the audit, owner-check and freshness read it from another directory than the lead's
+  // the brief as an absolute path: the audit, intent-check and freshness read it from another directory than the lead's
   key: input.key, title: input.title, thread: input.thread ?? "none", brief: resolve(input.brief), done: input.done, cwd: input.cwd ?? deps.config.defaultCwd, model: input.model ?? deps.config.defaultModel,
   ...(input.tags?.length ? { tags: input.tags } : {}), ...intentFields(input), openedAt: iso(deps.clock),
 });

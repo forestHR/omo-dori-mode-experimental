@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 import { readLeadRelays, readReports, laneSessionFiles, type ReportLine } from "./auto-signals.ts";
-import { ChallengeError, checkReviewers, familyOf, reviewers } from "./challenge.ts";
+import { ChallengeError, checkReviewers, familyOf, reviewerOrder, reviewers } from "./challenge.ts";
 import { fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { stuckContext } from "./explore.ts";
@@ -9,21 +9,22 @@ import { sendVerified } from "./panes.ts";
 import type { Lane } from "./registry.ts";
 import { iso } from "./run.ts";
 import { watchLog } from "./watch-log.ts";
-import { blockTexts, laneDirectiveGaps, laneDirectiveWords } from "./directive-audit.ts";
+import { blockTexts, laneDirectiveWords } from "./directive-audit.ts";
 import { launchLedger } from "./launch.ts";
 import { leadSessionFiles } from "./lead-sessions.ts";
 
-// dori owner-check: a model of another family than the lane's reads the lane brief, the owner's own words for the lane (the
-// brief and the lead's [LEAD] relays that link or quote them) and the lane's recent reports, and answers in a fixed format
-// whether a report breaks an owner instruction (VIOLATION), contradicts a stated fact or state (CONTRADICTION), or no longer
-// works toward the owner's goal (GOAL_LOSS). Korean stays Korean: quotes are checked against the inputs. A finding whose
-// owner quote is not in the owner's words (the goal, the brief, the quoted part of a relay, the owner's own decisions) is
-// dropped (OWNER_CHECK_UNGROUNDED), and one whose report quote is only in reports an earlier check already read is dropped
-// too (OWNER_CHECK_STALE); a report quote not in the reports marks it unverified. The owner's decisions in the lane's thread
-// (question-card answers, the owner's messages) go to the reviewer dated, newest wins. A finding is the context rung of the stuck ladder (a STUCK line for the lead;
-// the same in the next check is rung 4); it never stops or moves a lane, and the re-read goes to the lane only when the lead
-// confirms it (--reread). It runs on new reports only, at most once per ownerCheck.minIntervalMin and ownerCheck.maxPerDay
-// per lane; dori intent-check runs it at once on the direction the lane states.
+// dori intent-check: at each stage change a lane states its direction and next step, and a model of another family than
+// the lane's reads them with the lane brief, the owner's own words for the lane (the brief and the lead's [LEAD] relays
+// that link or quote them, the directives in scope) and the lane's recent reports, and answers in a fixed format whether
+// the lane breaks an owner instruction (VIOLATION), contradicts a stated fact or state (CONTRADICTION), or no longer works
+// toward the owner's goal (GOAL_LOSS). Korean stays Korean: quotes are checked against the inputs. A finding whose owner
+// quote is not in the owner's words (the goal, the brief, the quoted part of a relay, the owner's own decisions) is dropped
+// (INTENT_CHECK_UNGROUNDED), and one whose report quote is only in reports an earlier check already read is dropped too
+// (INTENT_CHECK_STALE); a report quote not in the reports marks it unverified. The owner's decisions in the lane's thread
+// (question-card answers, the owner's messages) go to the reviewer dated, newest wins. A finding is the context rung of the
+// stuck ladder (a STUCK line for the lead; the same in the next check after a confirmed re-read is rung 4); it never stops
+// or moves a lane, and the re-read goes to the lane only when the lead confirms it (--reread). It runs only when the lane
+// asks (dori intent-check); the periodic check of every lane's reports was removed on 2026-11-02 (owner card Q442).
 
 export const OWNER_KINDS = ["VIOLATION", "CONTRADICTION", "GOAL_LOSS", "OK"] as const;
 export type OwnerKind = (typeof OWNER_KINDS)[number];
@@ -239,9 +240,9 @@ export const parseOwnerReply = (reply: string, ownerSource: string, reportSource
 };
 
 export const findingLine = (key: string, f: OwnerFinding, model: string): string =>
-  `OWNER_CHECK ${key} ${f.kind} owner "${f.owner.slice(0, 200)}" vs report "${f.report.slice(0, 200)}": ${f.why.slice(0, 200)}${f.verified ? "" : " (unverified: the report quote is not in the reports read, or it names a claim not on record)"} [reviewer ${model}]`;
+  `INTENT_CHECK ${key} ${f.kind} owner "${f.owner.slice(0, 200)}" vs report "${f.report.slice(0, 200)}": ${f.why.slice(0, 200)}${f.verified ? "" : " (unverified: the report quote is not in the reports read, or it names a claim not on record)"} [reviewer ${model}]`;
 
-export type OwnerState = NonNullable<Lane["ownerCheck"]>;
+export type OwnerState = NonNullable<Lane["intentCheck"]>;
 
 // SHARED: the owner quote is only in the owner's messages in a shared thread that are not tied to this lane (note: why)
 export type Dropped = { readonly finding: OwnerFinding; readonly why: "UNGROUNDED" | "STALE" | "SHARED"; readonly note?: string };
@@ -283,20 +284,10 @@ export const groundFindings = (findings: readonly OwnerFinding[], src: { readonl
 
 export const droppedLine = (key: string, d: Dropped, model: string, last?: OwnerState): string =>
   d.why === "SHARED"
-    ? `OWNER_CHECK_SHARED ${key} ${d.finding.kind} owner "${d.finding.owner.slice(0, 200)}" is the owner's message in a thread other lanes share, ${d.note ?? "not tied to this lane"}; not this lane's instruction, dropped, no rung [reviewer ${model}]`
+    ? `INTENT_CHECK_SHARED ${key} ${d.finding.kind} owner "${d.finding.owner.slice(0, 200)}" is the owner's message in a thread other lanes share, ${d.note ?? "not tied to this lane"}; not this lane's instruction, dropped, no rung [reviewer ${model}]`
     : d.why === "UNGROUNDED"
-    ? `OWNER_CHECK_UNGROUNDED ${key} ${d.finding.kind} owner "${d.finding.owner.slice(0, 200)}" is not in the owner's words given to the check (goal, quoted parts of the brief and relays, linked owner messages, owner decisions); dropped, no rung [reviewer ${model}]`
-    : `OWNER_CHECK_STALE ${key} ${d.finding.kind} report "${d.finding.report.slice(0, 200)}" was read by an earlier check (${last?.at ?? ""}, reports up to ${last?.lastReportAt ?? ""}); not flagged again, no rung [reviewer ${model}]`;
-
-// Due when a report newer than the last checked one exists, minIntervalMin has passed and today's count is under maxPerDay.
-export const ownerDue = (state: OwnerState | undefined, newest: string | undefined, now: number, cfg: { readonly minIntervalMin: number; readonly maxPerDay: number }): string | undefined => {
-  if (!newest) return "no report on record";
-  if (state && newest <= state.lastReportAt) return `no new report since the last check (${state.at})`;
-  if (state && now - Date.parse(state.at) < cfg.minIntervalMin * 60_000) return `rate limit: last check ${state.at}, next after ${new Date(Date.parse(state.at) + cfg.minIntervalMin * 60_000).toISOString()}`;
-  const day = new Date(now).toISOString().slice(0, 10);
-  if (state && state.day === day && state.today >= cfg.maxPerDay) return `daily limit: ${state.today} checks today (ownerCheck.maxPerDay ${cfg.maxPerDay})`;
-  return undefined;
-};
+    ? `INTENT_CHECK_UNGROUNDED ${key} ${d.finding.kind} owner "${d.finding.owner.slice(0, 200)}" is not in the owner's words given to the check (goal, quoted parts of the brief and relays, linked owner messages, owner decisions); dropped, no rung [reviewer ${model}]`
+    : `INTENT_CHECK_STALE ${key} ${d.finding.kind} report "${d.finding.report.slice(0, 200)}" was read by an earlier check (${last?.at ?? ""}, reports up to ${last?.lastReportAt ?? ""}); not flagged again, no rung [reviewer ${model}]`;
 
 export type OwnerResult = { readonly skipped?: string; readonly findings: readonly OwnerFinding[]; readonly dropped?: readonly Dropped[]; readonly lines: readonly string[]; readonly model?: string };
 
@@ -305,27 +296,20 @@ export type OwnerResult = { readonly skipped?: string; readonly findings: readon
 export const claimCheck = (f: OwnerFinding, lane: Pick<Lane, "claim">): OwnerFinding =>
   f.kind === "CONTRADICTION" && !lane.claim && /claim-done/.test(f.report) ? { ...f, verified: false, why: `${f.why} [no done claim is on record; the quote only names the claim-done command]` } : f;
 
-// reviewers.models with ownerCheck.first in front (it reads Korean relays best); another family than the lane's is picked later
-export const ownerModels = (models: readonly string[], first: string): string[] => (first ? [first, ...models.filter((m) => m !== first)] : [...models]);
-
-// direction: dori intent-check's call, on the direction the lane just stated: no limits, and no new report needed
-export const runOwnerCheck = async (deps: FlowDeps, lane: Lane, opts: { readonly force?: boolean; readonly direction?: boolean; readonly files?: readonly string[]; readonly inbox?: string; readonly owner?: string; readonly cards?: string } = {}): Promise<OwnerResult> => {
-  const cfg = deps.config.autoSignals.ownerCheck;
-  const now = deps.clock.now();
+// dori intent-check's verdict on the direction the lane just stated (and its recent reports): no interval, no new report needed
+export const runIntentCheck = async (deps: FlowDeps, lane: Lane, opts: { readonly files?: readonly string[]; readonly inbox?: string; readonly owner?: string; readonly cards?: string } = {}): Promise<OwnerResult> => {
+  const cfg = deps.config.autoSignals.intentCheck;
+  const rev = deps.config.reviewers;
   const files = opts.files ?? laneSessionFiles(deps.config, lane);
   const since = Date.parse(lane.openedAt) || 0;
-  // every report since the last check (up to maxReports, newest kept), and at least the newest `reports` for context: a
-  // violation followed by routine reports before the next check is still read
+  // every report since the last check (up to maxReports, newest kept), and at least the newest `reports` for context
   const all = await readReports(files, lane.key, since);
   // a lane's first check reads the newest reports only: its whole history is not a backlog of unchecked reports
-  const unseen = lane.ownerCheck ? all.filter((r) => r.at > (lane.ownerCheck?.lastReportAt ?? "")).length : 0;
+  const unseen = lane.intentCheck ? all.filter((r) => r.at > (lane.intentCheck?.lastReportAt ?? "")).length : 0;
   const reports = all.slice(-Math.min(Math.max(cfg.reports, unseen), cfg.maxReports));
   const unread = Math.max(0, unseen - cfg.maxReports);
   const newest = reports.at(-1)?.at;
-  // intent-check (direction): no interval and no new report needed, but the daily limit holds
-  const day = new Date(now).toISOString().slice(0, 10);
-  const why = opts.direction ? (!newest && !lane.direction?.text ? "no report and no stated direction on record" : !opts.force && lane.ownerCheck?.day === day && lane.ownerCheck.today >= cfg.maxPerDay ? `daily limit: ${lane.ownerCheck.today} checks today (ownerCheck.maxPerDay ${cfg.maxPerDay})` : undefined) : ownerDue(lane.ownerCheck, newest, now, opts.force ? { minIntervalMin: 0, maxPerDay: Number.POSITIVE_INFINITY } : cfg);
-  if (why) return { skipped: `OWNER_CHECK_SKIP ${lane.key} ${why}`, findings: [], lines: [] };
+  if (!newest && !lane.direction?.text) return { skipped: `INTENT_CHECK_SKIP ${lane.key} no report and no stated direction on record`, findings: [], lines: [] };
   const briefFile = Bun.file(lane.brief);
   const brief = briefForCheck((await briefFile.exists()) ? await briefFile.text() : "");
   // relays from the lane's own sessions only (those that carry its reports): lanes sharing a cwd share a session folder
@@ -343,24 +327,21 @@ export const runOwnerCheck = async (deps: FlowDeps, lane: Lane, opts: { readonly
   const decisions = tied.filter((d) => d.to === "lane").slice(-cfg.relays).map((d) => (sharing.length ? { ...d, text: `${d.text} (for this lane: ${d.why})` } : d));
   const shared = tied.filter((d) => d.to !== "lane");
   const context = shared.filter((d) => d.to === "unknown").slice(-cfg.relays);
-  // the brief against the directive ledger: a directive in scope that is not in it is a DIRECTIVE_GAP line; the directives
-  // in scope go to the reviewer as the owner's words
+  // the directives in scope go to the reviewer as the owner's words (gaps in the brief are dori directive-audit's)
   const ledger = launchLedger(deps);
   const blocks = await blockTexts();
-  const directiveLines = (await laneDirectiveGaps(deps, lane, ledger, blocks, files)).map((g) => `OWNER_CHECK_${g.line}`);
-  for (const line of directiveLines) watchLog(deps.config.watchLog, deps.clock, { source: "owner-check", line });
   const directives = await laneDirectiveWords(deps, lane, ledger);
   const prompt = ownerPrompt(lane, brief, relays, reports, decisions, directives, context);
   const ownerSource = [lane.goal ?? "", ...directives, ...briefBlockWords(brief, blocks), ownerWords(brief), ...linkedWords(brief, inbox, owner), ...relays.flatMap((r) => [ownerWords(r.text), ...linkedWords(r.text, inbox, owner)]), ...decisions.map((d) => d.words)].join("\n");
   // the direction the lane stated (dori intent-check) is evidence too: a finding may quote it
   const reportSource = [...reports.map((r) => r.text), lane.direction?.text ?? "", lane.direction?.next ?? ""].join("\n");
-  const ground = { ownerSource, briefSource: brief, reports, direction: lane.direction, checkedUpTo: lane.ownerCheck?.lastReportAt, checkedAt: lane.ownerCheck?.at, shared };
+  const ground = { ownerSource, briefSource: brief, reports, direction: lane.direction, checkedUpTo: lane.intentCheck?.lastReportAt, checkedAt: lane.intentCheck?.at, shared };
   const sharedNote = sharing.length ? `, ${shared.length} owner messages in the thread it shares with ${sharing.map((l) => l.key).join(", ")} not tied to it` : "";
   const family = lane.model ?? deps.config.defaultModel;
   const failures: string[] = [];
   let checks: Awaited<ReturnType<typeof checkReviewers>> = [];
   try {
-    checks = await checkReviewers(deps, reviewers(family, ownerModels(deps.config.reviewers.models, cfg.first)));
+    checks = await checkReviewers(deps, reviewers(family, reviewerOrder(rev.models, rev.first)));
   } catch (e) {
     if (!(e instanceof ChallengeError)) throw e;
     failures.push(e.message);
@@ -370,38 +351,37 @@ export const runOwnerCheck = async (deps: FlowDeps, lane: Lane, opts: { readonly
       failures.push(`${c.listed}: ${c.note}`);
       continue;
     }
-    const r = await deps.run(fill(cfg.command, { model: c.call, prompt, system: OWNER_SYSTEM }), { timeoutMs: cfg.minutes * 60_000 });
+    const r = await deps.run(fill(rev.command, { model: c.call, prompt, system: OWNER_SYSTEM }), { timeoutMs: rev.minutes * 60_000 });
     const answer = r.code === 0 ? parseOwnerReply(r.out, `${ownerSource}\n${brief}`, reportSource)?.map((f) => claimCheck(f, lane)) : undefined;
     if (!answer) {
       failures.push(`${c.call}: ${r.code !== 0 ? `exit ${r.code} ${r.err.split("\n").find((l) => l.trim())?.slice(0, 120) ?? ""}` : `no VERDICT line in "${r.out.trim().slice(0, 80)}"`}`);
       continue;
     }
     const { kept: findings, dropped } = groundFindings(answer, ground);
-    const today = lane.ownerCheck?.day === day ? lane.ownerCheck.today + 1 : 1;
-    const gap = unread ? ` (${unread} older unchecked reports not read: autoSignals.ownerCheck.maxReports ${cfg.maxReports})` : "";
-    const drops = dropped.map((d) => droppedLine(lane.key, d, c.call ?? "", lane.ownerCheck));
-    for (const line of drops) watchLog(deps.config.watchLog, deps.clock, { source: "owner-check", line });
-    const lines = findings.length ? findings.map((f) => `${findingLine(lane.key, f, c.call ?? "")}${gap}`) : dropped.length ? [] : [`OWNER_CHECK ${lane.key} OK ${reports.length} recent reports read against the brief, ${relays.length} owner relays and ${decisions.length} owner decisions${sharedNote}${gap} [reviewer ${c.call} (${familyOf(c.call)})]`];
+    const gap = unread ? ` (${unread} older unchecked reports not read: autoSignals.intentCheck.maxReports ${cfg.maxReports})` : "";
+    const drops = dropped.map((d) => droppedLine(lane.key, d, c.call ?? "", lane.intentCheck));
+    for (const line of drops) watchLog(deps.config.watchLog, deps.clock, { source: "intent-check", line });
+    const lines = findings.length ? findings.map((f) => `${findingLine(lane.key, f, c.call ?? "")}${gap}`) : dropped.length ? [] : [`INTENT_CHECK ${lane.key} OK the stated direction and ${reports.length} recent reports read against the brief, ${relays.length} owner relays and ${decisions.length} owner decisions${sharedNote}${gap} [reviewer ${c.call} (${familyOf(c.call)})]`];
     // a check whose findings were all dropped leaves the last finding on record (the lead may still confirm it with --reread)
-    const last = lane.ownerCheck;
+    const last = lane.intentCheck;
     // ... only while its own owner quote still holds (a finding recorded before this check could rest on lead text)
     const lastOwner = /owner "(.*?)" vs report/.exec(last?.finding ?? "")?.[1];
     const pending = !findings.length && dropped.length && last?.finding && lastOwner && quoted(lastOwner, ownerSource);
     const record = findings.length ? { kinds: findings.map((f) => f.kind), finding: lines[0]?.slice(0, 600) } : pending && last?.finding ? { kinds: last.kinds, finding: last.finding } : { kinds: ["OK"] };
     // a re-read the lead sent stays on record: the context rung reads it
-    const rereadAt = (await deps.registry.read(lane.key))?.ownerCheck?.rereadAt ?? lane.ownerCheck?.rereadAt;
-    await deps.registry.patch(lane.key, { ownerCheck: { at: iso(deps.clock), lastReportAt: (newest ?? lane.ownerCheck?.lastReportAt) ?? "", day, today, model: c.call, ...record, ...(rereadAt ? { rereadAt } : {}) } });
+    const rereadAt = (await deps.registry.read(lane.key))?.intentCheck?.rereadAt ?? lane.intentCheck?.rereadAt;
+    await deps.registry.patch(lane.key, { intentCheck: { at: iso(deps.clock), lastReportAt: (newest ?? lane.intentCheck?.lastReportAt) ?? "", model: c.call, ...record, ...(rereadAt ? { rereadAt } : {}) } });
     // a clean check and an unverified finding (a quote not in the inputs, a claim that is not on record) go to the log as
-    // OWNER_CHECK lines; a verified finding is the stuck ladder's context rung, one STUCK line
+    // INTENT_CHECK lines; a verified finding is the stuck ladder's context rung, one STUCK line
     const verified = findings.filter((f) => f.verified);
-    if (!verified.length) for (const line of lines) watchLog(deps.config.watchLog, deps.clock, { source: "owner-check", line });
+    if (!verified.length) for (const line of lines) watchLog(deps.config.watchLog, deps.clock, { source: "intent-check", line });
     // only unverified or dropped findings: nothing for the ladder, and an earlier context rung stays as it was
     const stuck = verified.length || (!findings.length && !dropped.length) ? await stuckContext(deps, lane.key, verified, c.call, verified[0]?.reportAt) : [];
-    return { findings, dropped, lines: [...directiveLines, ...drops, ...lines, ...stuck], model: c.call };
+    return { findings, dropped, lines: [...drops, ...lines, ...stuck], model: c.call };
   }
-  const line = `OWNER_CHECK_FAILED ${lane.key} no reviewer answered in the format: ${failures.join(" | ") || "no reviewer of another family in reviewers.models"}`;
-  watchLog(deps.config.watchLog, deps.clock, { source: "owner-check", line });
-  return { skipped: line, findings: [], lines: directiveLines };
+  const line = `INTENT_CHECK_FAILED ${lane.key} no reviewer answered in the format: ${failures.join(" | ") || "no reviewer of another family in reviewers.models"}`;
+  watchLog(deps.config.watchLog, deps.clock, { source: "intent-check", line });
+  return { skipped: line, findings: [], lines: [] };
 };
 
 // What ties owner messages to a lane: its own session files (those that typed its reports; the lead's sessions, which get
@@ -434,17 +414,17 @@ const threadLane = async (deps: FlowDeps, lane: Lane, opts: { readonly files?: r
   return { key: lane.key, openedAt: lane.openedAt, ...(lane.closedAt ? { closedAt: lane.closedAt } : {}), ...(lane.pane ? { pane: lane.pane } : {}), posts: new Set([...texts.flatMap(postedIds), ...asked]), relayed: new Set([...relayed, ...linkedIds(briefText)]) };
 };
 
-// dori owner-check <key> --reread: the lead confirmed the last finding, so the lane gets stuck.rereadText (its brief and the
+// dori intent-check <key> --reread: the lead confirmed the last finding, so the lane gets stuck.rereadText (its brief and the
 // owner's words to read again, the finding quoted). Refused when the last check found nothing.
 export const sendReread = async (deps: FlowDeps, lane: Lane): Promise<{ readonly ok: boolean; readonly line: string }> => {
-  const last = lane.ownerCheck;
-  if (!last || !last.kinds.some((k) => k !== "OK")) return { ok: false, line: `REREAD_REFUSED ${lane.key}: the last owner check found nothing to re-read for (${last ? `${last.at}: ${last.kinds.join(",")}` : "no check on record"})` };
+  const last = lane.intentCheck;
+  if (!last || !last.kinds.some((k) => k !== "OK")) return { ok: false, line: `REREAD_REFUSED ${lane.key}: the last intent check found nothing to re-read for (${last ? `${last.at}: ${last.kinds.join(",")}` : "no check on record"})` };
   if (!lane.pane) return { ok: false, line: `REREAD_REFUSED ${lane.key}: the lane has no pane` };
-  const finding = (last.finding ?? last.kinds.join(", ")).replace(/^OWNER_CHECK \S+ /, "").replace(/`/g, "'").replaceAll("$(", "$ (").slice(0, 400);
+  const finding = (last.finding ?? last.kinds.join(", ")).replace(/^INTENT_CHECK \S+ /, "").replace(/`/g, "'").replaceAll("$(", "$ (").slice(0, 400);
   const text = fill([deps.config.stuck.rereadText], { key: lane.key, brief: lane.brief, finding })[0] ?? deps.config.stuck.rereadText;
   const ok = await sendVerified(deps.run, deps.clock, deps.config, lane.pane, text);
-  if (ok) await deps.registry.patch(lane.key, { ownerCheck: { ...last, rereadAt: iso(deps.clock) } });
-  const line = ok ? `REREAD_SENT ${lane.key}: the lead confirmed the owner-check finding of ${last.at}; the lane got its brief and the owner's words to re-read` : `REREAD_FAILED ${lane.key}: the re-read did not reach pane ${lane.pane}`;
-  watchLog(deps.config.watchLog, deps.clock, { source: "owner-check", line });
+  if (ok) await deps.registry.patch(lane.key, { intentCheck: { ...last, rereadAt: iso(deps.clock) } });
+  const line = ok ? `REREAD_SENT ${lane.key}: the lead confirmed the intent-check finding of ${last.at}; the lane got its brief and the owner's words to re-read` : `REREAD_FAILED ${lane.key}: the re-read did not reach pane ${lane.pane}`;
+  watchLog(deps.config.watchLog, deps.clock, { source: "intent-check", line });
   return { ok, line };
 };

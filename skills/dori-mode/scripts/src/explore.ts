@@ -402,8 +402,8 @@ export const stuckStep = async (deps: FlowDeps, key: string, metric: string): Pr
   return [line];
 };
 
-// After an owner check: a finding (VIOLATION, CONTRADICTION, GOAL_LOSS) is the context rung, a re-read of the brief and the
-// owner's words that the lead confirms first (dori owner-check <key> --reread); the same in the next check is rung 4. A
+// After an intent check: a finding (VIOLATION, CONTRADICTION, GOAL_LOSS) is the context rung, a re-read of the brief and the
+// owner's words that the lead confirms first (dori intent-check <key> --reread); the same in the next check is rung 4. A
 // clean check ends it. A finding on the report the last one rested on (report) is not counted again. Returns the watch-log lines.
 export const stuckContext = async (deps: FlowDeps, key: string, findings: readonly { readonly kind: string; readonly owner: string; readonly report: string; readonly why: string; readonly verified: boolean }[], model: string, report?: string): Promise<string[]> => {
   const lane = await deps.registry.read(key);
@@ -422,7 +422,7 @@ export const stuckContext = async (deps: FlowDeps, key: string, findings: readon
   // rung 4 only when the lead confirmed a re-read after the first finding and the lane is still off the owner's words
   // ... and the finding rests on a report (or a stated direction) from after that re-read
   const evidenceAt = report?.replace(/^direction@/, "");
-  const reread = lane.ownerCheck?.rereadAt && prev ? lane.ownerCheck.rereadAt >= prev.at && (!evidenceAt || evidenceAt > lane.ownerCheck.rereadAt) : false;
+  const reread = lane.intentCheck?.rereadAt && prev ? lane.intentCheck.rereadAt >= prev.at && (!evidenceAt || evidenceAt > lane.intentCheck.rereadAt) : false;
   const rung = prev ? (reread ? 4 : prev.rung) : 1;
   const n = (prev?.n ?? 0) + 1;
   await deps.registry.patch(key, { stuck: { ...marks, [CONTEXT]: { rung, n, at: iso(deps.clock), ...(lane.pane ? { pane: lane.pane } : {}), ...(report ? { report } : {}) } } });
@@ -430,9 +430,9 @@ export const stuckContext = async (deps: FlowDeps, key: string, findings: readon
   const f = findings[0];
   const detail = `${findings.map((x) => x.kind).join(", ")}: owner "${clip(f?.owner ?? "", 160)}" vs report "${clip(f?.report ?? "", 160)}": ${clip(f?.why ?? "", 160)}${f?.verified ? "" : " (unverified quote)"}; reviewer ${model}`;
   const action = rung === 4
-    ? rolloverAction(key, `the owner check found the lane off the owner's words again (${n} checks in a row)`)
-    : `confirm the finding, then dori owner-check ${key} --reread sends the lane its brief and the owner's words to re-read; the same finding in the next check is rung 4`;
-  const line = stuckLine(key, CONTEXT, rung === 4 ? 4 : "context", detail, action, [...findings.map((x) => `OWNER_CHECK_${x.kind}`), ...(rung === 4 ? ["ROLLOVER_DUE"] : [])]);
+    ? rolloverAction(key, `the intent check found the lane off the owner's words again (${n} checks in a row)`)
+    : `confirm the finding, then dori intent-check ${key} --reread sends the lane its brief and the owner's words to re-read; the same finding in the next check is rung 4`;
+  const line = stuckLine(key, CONTEXT, rung === 4 ? 4 : "context", detail, action, [...findings.map((x) => `INTENT_CHECK_${x.kind}`), ...(rung === 4 ? ["ROLLOVER_DUE"] : [])]);
   watchLog(deps.config.watchLog, deps.clock, { source: "stuck", line });
   return [line];
 };
@@ -647,7 +647,7 @@ export const researchCheck = async (deps: FlowDeps, lane: Lane): Promise<Researc
 
 const NEXT = /(?:next(?: step)?|다음(?: 단계)?)\s*[:：=-]\s*([^|;\n]+)/i;
 
-// What dori intent-check shows next to the owner check's verdict: the owner's goal, the lane's direction and next step.
+// What dori intent-check shows next to its reviewer's verdict: the owner's goal, the lane's direction and next step.
 export type IntentView = { readonly goal?: string; readonly direction: string; readonly next: string };
 
 export const intentView = (lane: Lane, tree: Tree): IntentView => {

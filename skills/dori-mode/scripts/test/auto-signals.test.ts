@@ -7,7 +7,7 @@ import { loadTree, researchDone, stuckView } from "../src/explore.ts";
 import { eightSteps } from "../src/launch.ts";
 import { defaultConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
-import { briefForCheck, claimCheck, groundFindings, linkedWords, ownerDecisions, ownerDue, ownerWords, parseOwnerReply, quoted, runOwnerCheck, sendReread, tieDecisions } from "../src/owner-check.ts";
+import { briefForCheck, claimCheck, groundFindings, linkedWords, ownerDecisions, ownerWords, parseOwnerReply, quoted, runIntentCheck, sendReread, tieDecisions } from "../src/intent-check.ts";
 import type { Lane } from "../src/registry.ts";
 import { crossed, dueReasons } from "../src/rollover.ts";
 import { recordFix } from "../src/same-fix.ts";
@@ -264,7 +264,7 @@ test("a fix the lead records (dori fix-attempt) sees the research and challenge 
   expect(sent(world)).toEqual([]);
 });
 
-test("owner-check reads every report since the last check, not only the newest six (challenge, gpt-6-astra)", async () => {
+test("intent-check reads every report since the last check, not only the newest six (challenge, gpt-6-astra)", async () => {
   writeFileSync(join(state.dir, "brief.md"), "# \ube0c\ub9ac\ud504\n\ud615: \"\ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0\"");
   const reports = Array.from({ length: 9 }, (_, i) => sessionLine(10 + i, "assistant", `[REPORT] rl-e7 | milestone | \uc9c4\ud589 ${i}: ${i === 0 ? "\ud559\uc2b5\uc744 \uba48\ucda4" : "\uc815\uc0c1 \uc9c4\ud589"}`));
   const file = writeSession([sessionLine(1, "assistant", "[REPORT] rl-e7 | milestone | \uc2dc\uc791"), ...reports]);
@@ -277,10 +277,10 @@ test("owner-check reads every report since the last check, not only the newest s
   };
   const explore = { ...defaultConfig("/home/test").explore, modelsCommand: [] };
   const deps = { ...depsFor(world, fakeClock(T0 + 60 * 60_000), state.dir, { sessionsDir: join(state.dir, "sessions"), explore }), run };
-  const checked = { ...lane(state.dir), ownerCheck: { at: at(5), lastReportAt: at(1), day: at(0).slice(0, 10), today: 1, model: "m", kinds: ["OK"] } };
+  const checked = { ...lane(state.dir), intentCheck: { at: at(5), lastReportAt: at(1), model: "m", kinds: ["OK"] } };
   await deps.registry.write(checked);
-  const r = await runOwnerCheck(deps, checked, { files: [file] });
-  expect(r.lines[0]).toContain("OWNER_CHECK rl-e7 OK 9 recent reports");
+  const r = await runIntentCheck(deps, checked, { files: [file] });
+  expect(r.lines[0]).toContain("INTENT_CHECK rl-e7 OK the stated direction and 9 recent reports");
   expect(prompts[0]).toContain("\uc9c4\ud589 0: \ud559\uc2b5\uc744 \uba48\ucda4");
 });
 
@@ -299,7 +299,7 @@ test("reports are read once each, from the lane's typing and the lead's copy, wi
 
 const VIOLATION = 'VERDICT: VIOLATION\nOWNER: "\ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0"\nREPORT: "\ud559\uc2b5\uc744 \uba48\ucd94\uace0 \ube44\uad50\ud45c\ub97c \ub9cc\ub4e6"\nWHY: the owner said keep training running.';
 
-test("an owner-check reply is parsed in its fixed format, and a quote not in the inputs is marked unverified", () => {
+test("an intent-check reply is parsed in its fixed format, and a quote not in the inputs is marked unverified", () => {
   const owner = "[LEAD] \ud615 \uc9c8\ubb38(\uc6d0\ubb38 https://discord.com/channels/1/2/3): \ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0 \ube44\uad50\ud45c\ub97c \ub9cc\ub4e4\uc5b4\ub77c";
   const reports = "\uc9c4\ud589: \ud559\uc2b5\uc744 \uba48\ucd94\uace0 \ube44\uad50\ud45c\ub97c \ub9cc\ub4e6";
   expect(parseOwnerReply(VIOLATION, owner, reports)).toEqual([{ kind: "VIOLATION", owner: "\ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0", report: "\ud559\uc2b5\uc744 \uba48\ucd94\uace0 \ube44\uad50\ud45c\ub97c \ub9cc\ub4e6", why: "the owner said keep training running.", verified: true }]);
@@ -309,17 +309,7 @@ test("an owner-check reply is parsed in its fixed format, and a quote not in the
   expect(quoted("\ud559\uc2b5\uc740 \uba48\ucd94\uc9c0\u2026\ube44\uad50\ud45c\ub97c \ub9cc\ub4e4\uc5b4\ub77c", owner)).toBe(true);
 });
 
-test("owner-check runs only on a newer report, past the interval and under the daily limit", () => {
-  const limits = { minIntervalMin: 30, maxPerDay: 2 };
-  const st = { at: at(0), lastReportAt: at(0), day: at(0).slice(0, 10), today: 1, model: "m", kinds: ["OK"] };
-  expect(ownerDue(undefined, undefined, T0, limits)).toBe("no report on record");
-  expect(ownerDue(st, at(0), T0 + 60 * 60_000, limits)).toContain("no new report");
-  expect(ownerDue(st, at(5), T0 + 29 * 60_000, limits)).toContain("rate limit");
-  expect(ownerDue(st, at(5), T0 + 30 * 60_000, limits)).toBeUndefined();
-  expect(ownerDue({ ...st, today: 2 }, at(5), T0 + 31 * 60_000, limits)).toContain("daily limit");
-});
-
-test("owner-check asks a reviewer of another family from the one reviewers list, ownerCheck.first in front, and skips the next run until a new report", async () => {
+test("intent-check asks a reviewer of another family from the one reviewers list, reviewers.first in front", async () => {
   writeFileSync(join(state.dir, "brief.md"), "# \ube0c\ub9ac\ud504\n\ud615: \"\ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0 \ube44\uad50\ud45c\ub97c \ub9cc\ub4e4\uc5b4\ub77c\"\n\n## Past signals (written by dori launch)\n- \uc9c0\ub09c lane \uae30\ub85d");
   const file = writeSession([sessionLine(1, "assistant", "[REPORT] rl-e7 | milestone | \uc9c4\ud589: \ud559\uc2b5\uc744 \uba48\ucd94\uace0 \ube44\uad50\ud45c\ub97c \ub9cc\ub4e6"), sessionLine(2, "user", "[LEAD] \ud615 \uc9c0\uc2dc(\uc6d0\ubb38 https://discord.com/channels/1/2/3): \ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0")]);
   const asked: string[][] = [];
@@ -333,28 +323,25 @@ test("owner-check asks a reviewer of another family from the one reviewers list,
   const config = { ...defaultConfig("/home/test"), explore: { ...defaultConfig("/home/test").explore, modelsCommand: [] } };
   const deps = { ...depsFor(world, fakeClock(T0 + 10 * 60_000), state.dir, { sessionsDir: join(state.dir, "sessions"), explore: config.explore }), run };
   await deps.registry.write(lane(state.dir));
-  const r = await runOwnerCheck(deps, lane(state.dir), { files: [file] });
+  const r = await runIntentCheck(deps, lane(state.dir), { files: [file] });
   expect(asked.map((a) => a[a.indexOf("--model") + 1])).toEqual(["chatgpt-subscription/gpt-6.1-sol", "chatgpt-subscription/gpt-6-astra"]);
   const prompt = asked[1]?.at(-1) ?? "";
   expect(prompt).toContain("\ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0 \ube44\uad50\ud45c\ub97c \ub9cc\ub4e4\uc5b4\ub77c");
   expect(prompt).not.toContain("\uc9c0\ub09c lane \uae30\ub85d");
   expect(prompt).toContain("[LEAD] \ud615 \uc9c0\uc2dc(\uc6d0\ubb38 https://discord.com/channels/1/2/3)");
   expect(r.lines).toHaveLength(2);
-  expect(r.lines[0]).toMatch(/^OWNER_CHECK rl-e7 VIOLATION owner "\ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0" vs report .*\[reviewer chatgpt-subscription\/gpt-6-astra\]$/);
+  expect(r.lines[0]).toMatch(/^INTENT_CHECK rl-e7 VIOLATION owner "\ud559\uc2b5\uc740 \uba48\ucd94\uc9c0 \ub9d0\uace0" vs report .*\[reviewer chatgpt-subscription\/gpt-6-astra\]$/);
   // the finding is the stuck ladder's context rung: one STUCK line in the log, and the lead confirms before the lane re-reads
-  expect(r.lines[1]).toMatch(/^STUCK rl-e7 "@context" rung context \(VIOLATION: owner .*-> confirm the finding, then dori owner-check rl-e7 --reread .*\[OWNER_CHECK_VIOLATION\]$/);
+  expect(r.lines[1]).toMatch(/^STUCK rl-e7 "@context" rung context \(VIOLATION: owner .*-> confirm the finding, then dori intent-check rl-e7 --reread .*\[INTENT_CHECK_VIOLATION\]$/);
   const log = await Bun.file(deps.config.watchLog).text();
   expect(log).toContain('stuck STUCK rl-e7 "@context" rung context');
-  expect(log).not.toContain("owner-check OWNER_CHECK rl-e7 VIOLATION");
+  expect(log).not.toContain("intent-check INTENT_CHECK rl-e7 VIOLATION");
   expect(sent(world)).toEqual([]);
   const after = (await deps.registry.read("rl-e7")) as Lane;
-  expect(after.ownerCheck?.kinds).toEqual(["VIOLATION"]);
-  const again = await runOwnerCheck(deps, after, { files: [file], force: true });
-  expect(again.skipped).toContain("OWNER_CHECK_SKIP rl-e7 no new report");
-  expect(asked).toHaveLength(2);
+  expect(after.intentCheck?.kinds).toEqual(["VIOLATION"]);
 });
 
-test("intent-check's call needs no new report; a finding again in the next check is rung 4, a clean check ends the context rung, and --reread sends the lane its brief only on a finding", async () => {
+test("intent-check needs no new report; a finding again in the next check is rung 4, a clean check ends the context rung, and --reread sends the lane its brief only on a finding", async () => {
   writeFileSync(join(state.dir, "brief.md"), "# 브리프\n형: \"학습은 멈추지 말고\"");
   const file = writeSession([sessionLine(1, "assistant", "[REPORT] rl-e7 | milestone | 진행: 학습을 멈추고 비교표를 만듦")]);
   let reply = VIOLATION;
@@ -365,16 +352,14 @@ test("intent-check's call needs no new report; a finding again in the next check
   const deps = { ...depsFor(world, clock, state.dir, { sessionsDir: join(state.dir, "sessions"), explore }), run };
   const l = { ...lane(state.dir), direction: { at: at(2), text: "비교표 만들기", next: "학습 재개" } };
   await deps.registry.write(l);
-  expect((await sendReread(deps, l)).line).toStartWith("REREAD_REFUSED rl-e7: the last owner check found nothing");
-  const first = await runOwnerCheck(deps, l, { files: [file] });
+  expect((await sendReread(deps, l)).line).toStartWith("REREAD_REFUSED rl-e7: the last intent check found nothing");
+  const first = await runIntentCheck(deps, l, { files: [file] });
   expect(first.lines.at(-1)).toContain('"@context" rung context');
-  // no new report since: a regular check skips, the intent-check call (direction) runs anyway
-  expect((await runOwnerCheck(deps, (await deps.registry.read("rl-e7")) as Lane, { files: [file], force: true })).skipped).toContain("no new report");
   // the same report flagged again by the intent-check call: it was read by the first check, so it is dropped (STALE) and
   // the context rung and the finding on record stay as they were
-  const second = await runOwnerCheck(deps, (await deps.registry.read("rl-e7")) as Lane, { files: [file], direction: true });
+  const second = await runIntentCheck(deps, (await deps.registry.read("rl-e7")) as Lane, { files: [file] });
   expect(second.lines).toHaveLength(1);
-  expect(second.lines[0]).toStartWith("OWNER_CHECK_STALE rl-e7 VIOLATION report");
+  expect(second.lines[0]).toStartWith("INTENT_CHECK_STALE rl-e7 VIOLATION report");
   const reread = await sendReread(deps, (await deps.registry.read("rl-e7")) as Lane);
   expect(reread.ok).toBe(true);
   expect(sent(world)).toHaveLength(1);
@@ -382,16 +367,16 @@ test("intent-check's call needs no new report; a finding again in the next check
   clock.at = T0 + 20 * 60_000;
   const file2 = writeSession([sessionLine(1, "assistant", "[REPORT] rl-e7 | milestone | 진행: 학습을 멈추고 비교표를 만듦"), sessionLine(15, "assistant", "[REPORT] rl-e7 | milestone | n3: 학습을 다시 멈추고 표를 고침")]);
   reply = 'VERDICT: VIOLATION\nOWNER: "학습은 멈추지 말고"\nREPORT: "학습을 다시 멈추고 표를 고침"\nWHY: still stopped.';
-  const third = await runOwnerCheck(deps, (await deps.registry.read("rl-e7")) as Lane, { files: [file2], direction: true });
-  expect(third.lines.at(-1)).toMatch(/^STUCK rl-e7 "@context" rung 4 \(VIOLATION: .*the owner check found the lane off the owner's words again \(2 checks in a row\).*\[OWNER_CHECK_VIOLATION ROLLOVER_DUE\]$/);
+  const third = await runIntentCheck(deps, (await deps.registry.read("rl-e7")) as Lane, { files: [file2] });
+  expect(third.lines.at(-1)).toMatch(/^STUCK rl-e7 "@context" rung 4 \(VIOLATION: .*the intent check found the lane off the owner's words again \(2 checks in a row\).*\[INTENT_CHECK_VIOLATION ROLLOVER_DUE\]$/);
   expect(sent(world)[0]).toStartWith("[LEAD] Your last report breaks what the owner asked (VIOLATION owner");
   expect(sent(world)[0]).toContain(join(state.dir, "brief.md"));
   reply = "VERDICT: OK";
-  const clean = await runOwnerCheck(deps, (await deps.registry.read("rl-e7")) as Lane, { files: [file2], direction: true });
+  const clean = await runIntentCheck(deps, (await deps.registry.read("rl-e7")) as Lane, { files: [file2] });
   expect(clean.lines).toHaveLength(1);
-  expect(clean.lines[0]).toStartWith("OWNER_CHECK rl-e7 OK");
+  expect(clean.lines[0]).toStartWith("INTENT_CHECK rl-e7 OK");
   expect(((await deps.registry.read("rl-e7")) as Lane).stuck?.["@context"]).toBeUndefined();
-  expect((await sendReread(deps, (await deps.registry.read("rl-e7")) as Lane)).line).toStartWith("REREAD_REFUSED rl-e7: the last owner check found nothing");
+  expect((await sendReread(deps, (await deps.registry.read("rl-e7")) as Lane)).line).toStartWith("REREAD_REFUSED rl-e7: the last intent check found nothing");
   expect(sent(world)).toHaveLength(1);
 });
 
@@ -402,7 +387,7 @@ const E7_WAIT = "진행(17:34 KST): Q96 설계 한 장 완료·보고(88328e5). 
 const E7_LINE1 = 'VERDICT: VIOLATION\nOWNER: "학습은 멈추지 말고"\nREPORT: "진행 중인 GPU 작업·감시 없음, 학습 없음."\nWHY: 학습을 멈추지 말라는 지시와 달리, 작업자는 자신이 제시한 선택지의 결정을 기다리며 학습이 중단된 상태라고 보고했다.';
 const E7_LINE2 = 'VERDICT: VIOLATION\nOWNER: "학습은 멈추지 말고"\nREPORT: "진행 중인 GPU 작업·감시 없음, 학습 없음. 다음: 형의 (가) 노출+P4 시험 학습 / (나) H8 진단 / (다) 쏟기 경로+장부 비교 선택을 기다림 — 고르시면 바로 착수."\nWHY: 학습을 멈추지 말라는 지시와 달리, 학습 없이 선택을 기다리고 있다고 보고했다.';
 
-const ownerCheckDeps = (minute: number, reply: string, prompts: string[]) => {
+const intentCheckDeps = (minute: number, reply: string, prompts: string[]) => {
   const base = fakeRunner(world);
   const run: Runner = async (argv, opts) => {
     if (argv[0] !== "omo") return base(argv, opts);
@@ -413,7 +398,7 @@ const ownerCheckDeps = (minute: number, reply: string, prompts: string[]) => {
   return { ...depsFor(world, fakeClock(T0 + minute * 60_000), state.dir, { sessionsDir: join(state.dir, "sessions"), explore }), run };
 };
 
-test("replay hr35-e7 09:46:57Z: an owner quote that is only the lead's words around a relayed quote is dropped as OWNER_CHECK_UNGROUNDED, no rung, and the reviewer gets the owner's later card answer", async () => {
+test("replay hr35-e7 09:46:57Z: an owner quote that is only the lead's words around a relayed quote is dropped as INTENT_CHECK_UNGROUNDED, no rung, and the reviewer gets the owner's later card answer", async () => {
   writeFileSync(join(state.dir, "brief.md"), "# HR35 E7\n\"정지된 상태에서 작업을 잘 한 후에 이동하는 거를 한번 만들어 보자\"");
   const file = writeSession([sessionLine(10, "user", E7_RELAY), sessionLine(30, "assistant", `[REPORT] rl-e7 | milestone | ${E7_WAIT}`)]);
   const inbox = join(state.dir, "inbox.jsonl");
@@ -423,24 +408,24 @@ test("replay hr35-e7 09:46:57Z: an owner quote that is only the lead's words aro
     { ts: "2026-10-10T00:22:00.000000+00:00", channel_id: "1558257428561137764", author_id: "bot-2", content: "봇 메시지" },
   ].map((e) => JSON.stringify(e)).join("\n"));
   const prompts: string[] = [];
-  const deps = ownerCheckDeps(40, E7_LINE1, prompts);
+  const deps = intentCheckDeps(40, E7_LINE1, prompts);
   // on record: the live 09:46 finding (the fake quote), from a check before this report
-  const l: Lane = { ...lane(state.dir), thread: "discord:1558257428561137764", ownerCheck: { at: at(5), lastReportAt: at(1), day: at(5).slice(0, 10), today: 1, model: "m", kinds: ["VIOLATION"], finding: 'OWNER_CHECK rl-e7 VIOLATION owner "학습은 멈추지 말고" vs report "진행 중인 GPU 작업·감시 없음, 학습 없음.": ... [reviewer m]' } };
+  const l: Lane = { ...lane(state.dir), thread: "discord:1558257428561137764", intentCheck: { at: at(5), lastReportAt: at(1), model: "m", kinds: ["VIOLATION"], finding: 'INTENT_CHECK rl-e7 VIOLATION owner "학습은 멈추지 말고" vs report "진행 중인 GPU 작업·감시 없음, 학습 없음.": ... [reviewer m]' } };
   await deps.registry.write(l);
   // another lane in the same cwd got a relay that quotes the phrase: not this lane's
   const other = join(file, "..", "2026-10-10T00-00-00-000Z_11111111-1111-1111-1111-111111111111.jsonl");
   writeFileSync(other, `${sessionLine(12, "user", '[LEAD] 형 원문 https://discord.com/channels/1/2/3: "학습은 멈추지 말고 계속 돌려"')}\n${sessionLine(13, "assistant", "[REPORT] rl-other | milestone | 진행")}\n`);
-  const r = await runOwnerCheck(deps, l, { files: [file, other], inbox, owner: "owner-1" });
+  const r = await runIntentCheck(deps, l, { files: [file, other], inbox, owner: "owner-1" });
   expect(r.lines).toHaveLength(1);
-  expect(r.lines[0]).toStartWith('OWNER_CHECK_UNGROUNDED rl-e7 VIOLATION owner "학습은 멈추지 말고"');
+  expect(r.lines[0]).toStartWith('INTENT_CHECK_UNGROUNDED rl-e7 VIOLATION owner "학습은 멈추지 말고"');
   expect(r.findings).toEqual([]);
   const log = await Bun.file(deps.config.watchLog).text();
-  expect(log).toContain("owner-check OWNER_CHECK_UNGROUNDED rl-e7");
+  expect(log).toContain("intent-check INTENT_CHECK_UNGROUNDED rl-e7");
   expect(log).not.toContain("STUCK");
   const after = (await deps.registry.read("rl-e7")) as Lane;
   expect(after.stuck?.["@context"]).toBeUndefined();
   // the earlier finding rests on the same fake quote: it is not kept as pending, so no re-read can deliver it
-  expect(after.ownerCheck?.kinds).toEqual(["OK"]);
+  expect(after.intentCheck?.kinds).toEqual(["OK"]);
   expect((await sendReread(deps, after)).line).toStartWith("REREAD_REFUSED rl-e7");
   // the owner's own decisions in the lane's thread, dated, and only the owner's
   expect(prompts[0]).toContain("[2026-10-10T00:20:00.123Z] card Q96");
@@ -448,23 +433,23 @@ test("replay hr35-e7 09:46:57Z: an owner quote that is only the lead's words aro
   expect(prompts[0]).toContain("[2026-10-10T00:21:00.000Z] 설계 먼저 보여줘");
   expect(prompts[0]).not.toContain("봇 메시지");
   // the owner's words inside the relay's quote still ground a finding
-  const quotedOwner = await runOwnerCheck(ownerCheckDeps(41, E7_LINE1.replace("학습은 멈추지 말고", "왜 진도가 안 나가는지 알려줘"), []), { ...l, ownerCheck: undefined }, { files: [file], inbox, owner: "owner-1" });
+  const quotedOwner = await runIntentCheck(intentCheckDeps(41, E7_LINE1.replace("학습은 멈추지 말고", "왜 진도가 안 나가는지 알려줘"), []), { ...l, intentCheck: undefined }, { files: [file], inbox, owner: "owner-1" });
   expect(quotedOwner.findings.map((f) => f.verified)).toEqual([true]);
 });
 
-test("replay pingpong-false-point 2026-11-01T09:50:30Z: a finding on the owner's eight steps in the brief stands; a line in parentheses under a step is the lead's and is OWNER_CHECK_UNGROUNDED", async () => {
+test("replay pingpong-false-point 2026-11-01T09:50:30Z: a finding on the owner's eight steps in the brief stands; a line in parentheses under a step is the lead's and is INTENT_CHECK_UNGROUNDED", async () => {
   writeFileSync(join(state.dir, "brief.md"), `ulw\n\n[목표] 헛점 판정\n\n${await eightSteps()}\n`);
   const file = writeSession([sessionLine(30, "assistant", "[REPORT] rl-e7 | question | 기준점을 A로 할지 B로 할지 골라 주세요")]);
   const reply = (owner: string) => `VERDICT: VIOLATION\nOWNER: "${owner}"\nREPORT: "기준점을 A로 할지 B로 할지 골라 주세요"\nWHY: 미리 허가한 계획 선택을 다시 물었다.`;
-  const step = await runOwnerCheck(ownerCheckDeps(40, reply("plan approval은 모두 허가하니 더 이상 질문하지 말고 바로 진행하라."), []), lane(state.dir), { files: [file] });
+  const step = await runIntentCheck(intentCheckDeps(40, reply("plan approval은 모두 허가하니 더 이상 질문하지 말고 바로 진행하라."), []), lane(state.dir), { files: [file] });
   expect(step.findings.map((f) => [f.kind, f.verified])).toEqual([["VIOLATION", true]]);
-  expect(step.lines.join("\n")).not.toContain("OWNER_CHECK_UNGROUNDED");
-  const rule = await runOwnerCheck(ownerCheckDeps(41, reply("질문은 [넘으면 안 되는 선]을 넘어야 하거나 오너만 정할 수 있는 선택일 때만"), []), lane(state.dir), { files: [file] });
+  expect(step.lines.join("\n")).not.toContain("INTENT_CHECK_UNGROUNDED");
+  const rule = await runIntentCheck(intentCheckDeps(41, reply("질문은 [넘으면 안 되는 선]을 넘어야 하거나 오너만 정할 수 있는 선택일 때만"), []), lane(state.dir), { files: [file] });
   expect(rule.findings).toEqual([]);
-  expect(rule.lines[0]).toStartWith("OWNER_CHECK_UNGROUNDED rl-e7 VIOLATION");
+  expect(rule.lines[0]).toStartWith("INTENT_CHECK_UNGROUNDED rl-e7 VIOLATION");
 });
 
-test("replay hr35-e7 11:18:41Z: a finding on a report an earlier check already read is OWNER_CHECK_STALE and moves no rung, even after a confirmed re-read", async () => {
+test("replay hr35-e7 11:18:41Z: a finding on a report an earlier check already read is INTENT_CHECK_STALE and moves no rung, even after a confirmed re-read", async () => {
   // the owner's quote is made to hold here, so only the superseded report decides
   writeFileSync(join(state.dir, "brief.md"), "# HR35 E7\n형: \"학습은 멈추지 말고\"");
   const file = writeSession([
@@ -472,46 +457,46 @@ test("replay hr35-e7 11:18:41Z: a finding on a report an earlier check already r
     sessionLine(44, "assistant", "[REPORT] rl-e7 | milestone | Q99 n3 학습 시작(19:46 KST): 등록·코드 fb96b1c"),
     sessionLine(46, "assistant", "[REPORT] rl-e7 | milestone | Q99 n3 시작 보고(20:02 KST, 문서 0e76616)"),
   ]);
-  const deps = ownerCheckDeps(80, E7_LINE2, []);
+  const deps = intentCheckDeps(80, E7_LINE2, []);
   // the 09:46 finding is the context rung, the lead confirmed a re-read, and the 10:48 check read up to the 19:46 report
   const context = { rung: 1, n: 1, at: at(32), pane: "w:p1" };
   // and the lane states, after that check, that it waits for the owner's choice (a piece of the old report; challenge, grok-4.7)
-  const l: Lane = { ...lane(state.dir), direction: { at: at(49), text: "형의 선택을 기다림" }, stuck: { "@context": context }, ownerCheck: { at: at(48), lastReportAt: at(44), day: at(48).slice(0, 10), today: 13, model: "m", kinds: ["VIOLATION"], finding: "OWNER_CHECK rl-e7 VIOLATION owner ...", rereadAt: at(35) } };
+  const l: Lane = { ...lane(state.dir), direction: { at: at(49), text: "형의 선택을 기다림" }, stuck: { "@context": context }, intentCheck: { at: at(48), lastReportAt: at(44), model: "m", kinds: ["VIOLATION"], finding: "INTENT_CHECK rl-e7 VIOLATION owner ...", rereadAt: at(35) } };
   await deps.registry.write(l);
-  const r = await runOwnerCheck(deps, l, { files: [file], inbox: join(state.dir, "none.jsonl") });
+  const r = await runIntentCheck(deps, l, { files: [file], inbox: join(state.dir, "none.jsonl") });
   expect(r.lines).toHaveLength(1);
-  expect(r.lines[0]).toStartWith("OWNER_CHECK_STALE rl-e7 VIOLATION report");
+  expect(r.lines[0]).toStartWith("INTENT_CHECK_STALE rl-e7 VIOLATION report");
   expect(r.lines.join("\n")).not.toContain("ROLLOVER_DUE");
   expect(await Bun.file(deps.config.watchLog).text()).not.toContain("STUCK");
   const after = (await deps.registry.read("rl-e7")) as Lane;
   expect(after.stuck?.["@context"]).toEqual(context);
-  expect(after.ownerCheck?.lastReportAt).toBe(at(46));
+  expect(after.intentCheck?.lastReportAt).toBe(at(46));
 });
 
 test("a finding on the same stated direction moves the context rung once; a new direction after a confirmed re-read is rung 4", async () => {
   writeFileSync(join(state.dir, "brief.md"), "# 브리프\n형: \"학습은 멈추지 말고\"");
   const reply = 'VERDICT: VIOLATION\nOWNER: "학습은 멈추지 말고"\nREPORT: "학습을 멈추고 비교표만 만든다"\nWHY: stops training.';
-  const deps = ownerCheckDeps(10, reply, []);
+  const deps = intentCheckDeps(10, reply, []);
   const l = { ...lane(state.dir), direction: { at: at(2), text: "학습을 멈추고 비교표만 만든다" } };
   await deps.registry.write(l);
-  const opts = { files: [], inbox: join(state.dir, "none.jsonl"), direction: true };
-  expect((await runOwnerCheck(deps, l, opts)).lines.at(-1)).toContain('"@context" rung context');
+  const opts = { files: [], inbox: join(state.dir, "none.jsonl") };
+  expect((await runIntentCheck(deps, l, opts)).lines.at(-1)).toContain('"@context" rung context');
   expect((await sendReread(deps, (await deps.registry.read("rl-e7")) as Lane)).ok).toBe(true);
   // the same direction again: the report under the finding did not change, so no rung 4
-  const same = await runOwnerCheck(deps, (await deps.registry.read("rl-e7")) as Lane, opts);
+  const same = await runIntentCheck(deps, (await deps.registry.read("rl-e7")) as Lane, opts);
   // the direction was read by the first check: stale
-  expect(same.lines[0]).toStartWith("OWNER_CHECK_STALE rl-e7 VIOLATION");
+  expect(same.lines[0]).toStartWith("INTENT_CHECK_STALE rl-e7 VIOLATION");
   expect(same.lines.join("\n")).not.toContain("STUCK");
   expect(((await deps.registry.read("rl-e7")) as Lane).stuck?.["@context"]?.n).toBe(1);
   // restated at minute 8, before the re-read of minute 10: not evidence that the lane ignored the re-read
   const early = { ...((await deps.registry.read("rl-e7")) as Lane), direction: { at: at(8), text: "학습을 멈추고 비교표만 만든다" } };
   await deps.registry.write(early);
-  expect((await runOwnerCheck(deps, early, opts)).lines.join("\n")).not.toContain("rung 4");
+  expect((await runIntentCheck(deps, early, opts)).lines.join("\n")).not.toContain("rung 4");
   // restated at minute 15, after the re-read: rung 4
   (deps.clock as ReturnType<typeof fakeClock>).at = T0 + 20 * 60_000;
   const restated = { ...((await deps.registry.read("rl-e7")) as Lane), direction: { at: at(15), text: "학습을 멈추고 비교표만 만든다" } };
   await deps.registry.write(restated);
-  expect((await runOwnerCheck(deps, restated, opts)).lines.at(-1)).toMatch(/^STUCK rl-e7 "@context" rung 4 .*ROLLOVER_DUE\]$/);
+  expect((await runIntentCheck(deps, restated, opts)).lines.at(-1)).toMatch(/^STUCK rl-e7 "@context" rung 4 .*ROLLOVER_DUE\]$/);
 });
 
 test("only the owner's own words ground a quote, and a report quote stitched from already-read reports is stale (challenge, gpt-6-astra)", () => {
@@ -560,13 +545,13 @@ test("a quoted report template is no report, and a CONTRADICTION that only names
   const explore = { ...defaultConfig("/home/test").explore, modelsCommand: [] };
   const deps = { ...depsFor(world, fakeClock(T0 + 10 * 60_000), state.dir, { sessionsDir: join(state.dir, "sessions"), explore }), run };
   await deps.registry.write(lane(state.dir));
-  const r = await runOwnerCheck(deps, lane(state.dir), { files: [file] });
+  const r = await runIntentCheck(deps, lane(state.dir), { files: [file] });
   expect(prompts[0]).toContain("Done claim on record: none: the lane has not run dori claim-done (status working)");
   expect(prompts[0]).not.toContain("| done | ...");
   expect(r.findings[0]).toMatchObject({ kind: "CONTRADICTION", verified: false });
   expect(r.lines).toHaveLength(1);
   const log = await Bun.file(deps.config.watchLog).text();
-  expect(log).toContain("owner-check OWNER_CHECK rl-e7 CONTRADICTION");
+  expect(log).toContain("intent-check INTENT_CHECK rl-e7 CONTRADICTION");
   expect(log).toContain("[no done claim is on record; the quote only names the claim-done command]");
   expect(log).not.toContain("STUCK");
   expect(((await deps.registry.read("rl-e7")) as Lane).stuck).toBeUndefined();
@@ -598,7 +583,7 @@ test("intent-check's direction is evidence: a finding that quotes it is verified
   const deps = { ...depsFor(world, fakeClock(T0 + 10 * 60_000), state.dir, { sessionsDir: join(state.dir, "sessions"), explore }), run };
   const l = { ...lane(state.dir), direction: { at: at(1), text: "\ud559\uc2b5\uc744 \uba48\ucd94\uace0 \ube44\uad50\ud45c\ub9cc \ub9cc\ub4e0\ub2e4", next: "\ud45c \uc815\ub9ac" } };
   await deps.registry.write(l);
-  const r = await runOwnerCheck(deps, l, { files: [], direction: true });
+  const r = await runIntentCheck(deps, l, { files: [] });
   expect(r.findings[0]?.verified).toBe(true);
   expect(r.lines.at(-1)).toContain('"@context" rung context');
 });
@@ -668,31 +653,31 @@ const gpuInbox = (extra: readonly object[] = []): string => {
   return file;
 };
 
-test("replay spark-oss-4eae 2026-10-20 12:30:06Z: in a thread three lanes share, the owner's answer relayed to jev-local is not spark-oss-4eae's goal (OWNER_CHECK_SHARED, no rung); before any relay it is tied to no lane, and still not raised", async () => {
+test("replay spark-oss-4eae 2026-10-20 12:30:06Z: in a thread three lanes share, the owner's answer relayed to jev-local is not spark-oss-4eae's goal (INTENT_CHECK_SHARED, no rung); before any relay it is tied to no lane, and still not raised", async () => {
   const spark = gpuLane("spark-oss-4eae", 25, "aoe_spark");
   const sparkFile = gpuSession("spark", [sessionLine(29.9, "assistant", "[REPORT] spark-oss-4eae | milestone | " + SPARK_REPORT)]);
   const jevFile = gpuSession("jev", [sessionLine(27, "assistant", "[REPORT] jev-local | milestone | 시작"), sessionLine(29.3, "user", "[LEAD] 형 추가(음성 " + GPU_LINK + "1562079971768279060): '" + JEV_WORDS + "' 그걸 1순위로 찾아 줘.")]);
   const prompts: string[] = [];
-  const deps = ownerCheckDeps(30, SPARK_GOAL_LOSS, prompts);
+  const deps = intentCheckDeps(30, SPARK_GOAL_LOSS, prompts);
   for (const l of [spark, gpuLane("jev-local", 26.7, "aoe_jev"), gpuLane("moodori-shadow-judge", 19.5, "aoe_moodori")]) await deps.registry.write(l);
   const opts = { files: [sparkFile, jevFile], inbox: gpuInbox(), owner: "owner-1", cards: join(state.dir, "no-cards.json") };
-  const r = await runOwnerCheck(deps, spark, opts);
+  const r = await runIntentCheck(deps, spark, opts);
   expect(r.findings).toEqual([]);
   expect(r.lines).toHaveLength(1);
-  expect(r.lines[0]).toMatch(/^OWNER_CHECK_SHARED spark-oss-4eae GOAL_LOSS owner "그래 좋아\. .*" is the owner's message in a thread other lanes share, message 1562079971768279060 at 2026-10-10T00:28:07\.312Z: for another lane \(the lead relayed it to jev-local\); not this lane's instruction, dropped, no rung \[reviewer /);
+  expect(r.lines[0]).toMatch(/^INTENT_CHECK_SHARED spark-oss-4eae GOAL_LOSS owner "그래 좋아\. .*" is the owner's message in a thread other lanes share, message 1562079971768279060 at 2026-10-10T00:28:07\.312Z: for another lane \(the lead relayed it to jev-local\); not this lane's instruction, dropped, no rung \[reviewer /);
   // the message for jev-local is left out; the one tied to no lane is context only, never a decision of this lane
   expect(prompts[0]).not.toContain("JEV-like 모델이 있었던");
   expect(prompts[0]).toMatch(/<<<OWNER DECISIONS[^\n]*\n\(none\)\nOWNER DECISIONS>>>\n<<<SHARED THREAD[^\n]*\n\[2026-10-10T00:25:41\.029Z\] 근데 내 원래 목적은/);
   const log = await Bun.file(deps.config.watchLog).text();
-  expect(log).toContain("owner-check OWNER_CHECK_SHARED spark-oss-4eae GOAL_LOSS");
+  expect(log).toContain("intent-check INTENT_CHECK_SHARED spark-oss-4eae GOAL_LOSS");
   expect(log).not.toContain("STUCK");
   const after = (await deps.registry.read("spark-oss-4eae")) as Lane;
   expect(after.stuck?.["@context"]).toBeUndefined();
-  expect(after.ownerCheck?.kinds).toEqual(["OK"]);
+  expect(after.intentCheck?.kinds).toEqual(["OK"]);
   // at 12:28, before the lead relayed it anywhere: no sign it is for spark-oss-4eae while two other lanes have the thread open
-  const early = await runOwnerCheck(ownerCheckDeps(31, SPARK_GOAL_LOSS, []), spark, { ...opts, files: [sparkFile] });
+  const early = await runIntentCheck(intentCheckDeps(31, SPARK_GOAL_LOSS, []), spark, { ...opts, files: [sparkFile] });
   expect(early.findings).toEqual([]);
-  expect(early.lines[0]).toStartWith("OWNER_CHECK_SHARED spark-oss-4eae GOAL_LOSS");
+  expect(early.lines[0]).toStartWith("INTENT_CHECK_SHARED spark-oss-4eae GOAL_LOSS");
   expect(early.lines[0]).toContain("not tied to this lane (no sign it is for this lane; other lanes open in the thread: ");
   expect(early.lines[0]).toContain("jev-local");
   expect(early.lines[0]).toContain("moodori-shadow-judge");
@@ -704,10 +689,10 @@ test("in a shared thread the owner's real redirect still counts: his reply to th
   const posted = JSON.stringify({ type: "message", timestamp: at(27.5), message: { role: "toolResult", content: [{ type: "text", text: "POSTED 1562080000000000001" }] } });
   const sparkFile = gpuSession("spark", [sessionLine(27, "assistant", "[REPORT] spark-oss-4eae | milestone | 비교 시작"), posted, sessionLine(29.9, "assistant", "[REPORT] spark-oss-4eae | milestone | gpt-oss 비교 2회차 시작")]);
   const prompts: string[] = [];
-  const deps = ownerCheckDeps(30, 'VERDICT: VIOLATION\nOWNER: "' + STOP + '"\nREPORT: "gpt-oss 비교 2회차 시작"\nWHY: 형이 멈추라고 했다.', prompts);
+  const deps = intentCheckDeps(30, 'VERDICT: VIOLATION\nOWNER: "' + STOP + '"\nREPORT: "gpt-oss 비교 2회차 시작"\nWHY: 형이 멈추라고 했다.', prompts);
   for (const l of [spark, gpuLane("jev-local", 26.7, "aoe_jev")]) await deps.registry.write(l);
   const inbox = gpuInbox([{ ts: "2026-10-10T00:29:00.000000+00:00", id: "1562080100000000002", channel_id: GPU, author_id: "owner-1", reply_to: "1562080000000000001", content: STOP }]);
-  const r = await runOwnerCheck(deps, spark, { files: [sparkFile], inbox, owner: "owner-1", cards: join(state.dir, "no-cards.json") });
+  const r = await runIntentCheck(deps, spark, { files: [sparkFile], inbox, owner: "owner-1", cards: join(state.dir, "no-cards.json") });
   expect(r.findings.map((f) => [f.kind, f.verified])).toEqual([["VIOLATION", true]]);
   expect(r.lines.at(-1)).toMatch(/^STUCK spark-oss-4eae "@context" rung context \(VIOLATION: /);
   expect(prompts[0]).toContain(STOP + " (for this lane: a reply to this lane's post)");
