@@ -7,8 +7,8 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
-import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "./backlog.ts";
-import { poolFree, tailOf } from "./lead-limit.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, instanceOf, itemLine, laneKeyOf, lastRun, listItems, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
+import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
 import { ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers } from "./handover.ts";
@@ -109,24 +109,21 @@ const USAGE = `dori <command> [options]
                                        stops the launch (LAUNCH_DIRECTIVE_MISSING, exit 4, nothing opened) unless
                                        --waive <id> "<reason>" (repeatable) leaves it out: LAUNCH_DIRECTIVE_WAIVED in the
                                        watch log and the registry, and discord.waiveText to the owner
-  backlog [list [--all]|add <id> --title T --brief FILE --done "..." [--priority 1-9] [--cwd DIR] [--thread REF|new | --no-thread "<reason>"] [--why-new R] [--goal "owner words"] [--tag T ...] [--ask "<question for the owner>"] [--read-only] [--owner-link URL] [--by owner|lead]|drop <id> [--reason R]|decide <id> [--question Q --hash H] --text "<the owner's answer>"|tick [--force]]
-                                       the list of work the owner or the lead put by (no GitHub import): with config
-                                       backlog.enabled, the freshness loop of dori-lanes runs a pass every tick: new work
-                                       comes in (other Doris' #dori-pair posts by backlog.pairRepairPattern /
-                                       pairRequestPattern, a request only with an owner message link that holds; the owner's
-                                       orders by backlog.orderKinds; at each backlog.everyMin sweep the backlog.feedCommand
-                                       list: an entry whose current content the owner approved works within its own scope,
-                                       any other only drafts; the limit is added at each launch from the item's state), a running item whose lane closed is done (BACKLOG_DONE), an
-                                       item with --ask puts one backlog-ask row in the lead's inbox and never starts before
-                                       decide (BACKLOG_ASK), and the next open items start at once by priority through dori
-                                       launch (its directives, eight steps and work thread; --thread new by default) while
-                                       fewer than backlog.maxLanes backlog lanes of this Dori and backlog.hostMaxLanes of all
-                                       Doris on the host run, at most backlog.maxStarts a pass, a model account is free and
-                                       dori can-launch and the load guard allow (BACKLOG_STARTED; BACKLOG_HOLD and
-                                       BACKLOG_WAIT when that changes or at a sweep). With backlog.writeNeedsOwnerLink an
-                                       item without --read-only and without a checked --owner-link asks the owner first. A
-                                       refused launch or two failed starts hold the item (BACKLOG_HELD, a backlog-held row)
-                                       until add replaces it or drop; backlog.dayReportAt sends one backlog-day row a day.
+  backlog [list [--all]|add <id> --title T --brief FILE --done "..." [--priority 1-9] [--cwd DIR] [--thread REF|new | --no-thread "<reason>"] [--why-new R] [--goal "owner words"] [--tag T ...] [--ask "<question for the owner>"] [--read-only] [--owner-link URL] [--by owner|lead]|drop <id> [--reason R]|decide <id> --text "<the owner's answer>"|tick [--force]]
+                                       the list of work the owner or the lead put by hand (no GitHub import): with
+                                       config backlog.enabled, the freshness loop of dori-lanes runs a pass every tick: a
+                                       running item whose lane closed is done (BACKLOG_DONE), an item with --ask puts one
+                                       backlog-ask row in the lead's inbox and never starts before decide (BACKLOG_ASK), and
+                                       the next open items start at once by priority through dori launch (its directives,
+                                       eight steps and work thread; --thread new by default) under the lane key bl-<id>
+                                       while fewer than backlog.maxLanes backlog lanes of this Dori and backlog.hostMaxLanes
+                                       of all Doris on the host run, at most backlog.maxStarts a pass, and, checked before
+                                       each start, a model account is free and dori can-launch and the load guard allow
+                                       (BACKLOG_STARTED; BACKLOG_HOLD and BACKLOG_WAIT when that changes or at a
+                                       backlog.everyMin sweep). With backlog.writeNeedsOwnerLink an item without --read-only
+                                       and without a checked --owner-link asks the owner first; --read-only items launch
+                                       with a read-only rule. A refused launch holds the item at once, a backend failure
+                                       after two tries (BACKLOG_HELD, a backlog-held row) until add replaces it or drop.
                                        tick runs a pass by hand (--force: a sweep now, even when off)
   directives [table|prompts|check [--static]|apply <key> [--dry-run]|hint <text>|links [--push]]
                                        hint prints the directives (at most five) an owner message with that text carries
@@ -517,7 +514,7 @@ const flags = parseArgs({
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
-    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
+    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -805,33 +802,6 @@ const backlogDeps = (): TickDeps => ({
     return poolFree(config.sessionsDir, provider, Date.now()) ? undefined : `usage limit: no ${provider} account is free in omo's credential pool`;
   },
   host: { dir: config.backlog.hostDir, user: userInfo().username, instance: instanceOf(config.stateDir), max: config.backlog.hostMaxLanes },
-  intake: async (sweep) => {
-    // the last 2 MB of the inbox: a pass runs every freshness tick, and new rows are at the end
-    const rows = (): InboxRow[] => (existsSync(auditInbox()) ? tailOf(auditInbox(), 2 * 1024 * 1024) : "").split("\n").flatMap((line): InboxRow[] => {
-      try {
-        return line.trim().startsWith("{") ? [JSON.parse(line) as InboxRow] : [];
-      } catch {
-        return [];
-      }
-    });
-    const base = { stateDir: config.stateDir, settings: config.backlog, rows, now: realClock.now };
-    const feed = async (): Promise<{ readonly todos: readonly FeedTodo[] } | { readonly why: string }> => {
-      const r = await run(config.backlog.feedCommand.map((p) => p.replace(/^~(?=\/)/, homedir())), { timeoutMs: 120_000 });
-      if (r.code !== 0) return { why: (r.err || r.out).trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code}` };
-      try {
-        const v = JSON.parse(r.out) as unknown;
-        const list = Array.isArray(v) ? v : (v as { todos?: unknown }).todos;
-        return Array.isArray(list) ? { todos: list as FeedTodo[] } : { why: "the output is not a JSON list" };
-      } catch {
-        return { why: "the output is not JSON" };
-      }
-    };
-    return [
-      ...(await pairIntake({ ...base, pairBots: idList(process.env.DORI_DISCORD_PAIR_BOT), guild: process.env.DORI_DISCORD_GUILD?.trim() ?? "", ownerLink: ownerLinkProblem })),
-      ...orderIntake(base),
-      ...(sweep ? await feedIntake({ ...base, feed }) : []),
-    ];
-  },
   inbox: (kind, id, content) => {
     const inbox = auditInbox();
     mkdirSync(join(inbox, ".."), { recursive: true });
@@ -1590,7 +1560,7 @@ try {
         } else if (sub === "decide") {
           const kst = `${new Date(Date.now() + 9 * 3_600_000).toISOString().slice(0, 16).replace("T", " ")} KST`;
           const decideId = id ?? die("usage: dori backlog decide <id> --text \"<the owner's answer>\"");
-          const item = await withBacklogLock(config.stateDir, 120, () => decideItem(config.stateDir, decideId, opt("text") ?? "", at, kst, opt("question"), flags.values.hash === undefined ? undefined : String(flags.values.hash)));
+          const item = await withBacklogLock(config.stateDir, 120, () => decideItem(config.stateDir, decideId, opt("text") ?? "", at, kst));
           console.log(`BACKLOG_DECIDED ${item.id}: the answer is in its brief; it starts at a pass when its turn comes`);
         } else if (sub === "tick") {
           if (!config.backlog.enabled && !flags.values.force) die(state, 4);
