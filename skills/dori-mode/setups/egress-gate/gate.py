@@ -41,7 +41,6 @@ PEOPLE_READS = re.compile(r"v1/(?:people:(?:searchContacts|batchGet)|otherContac
                           r"|people/me/connections|people/[A-Za-z0-9_-]+)")
 BAD_SCOPES = {"gmail.send", "gmail.compose", "gmail.insert", "gmail.modify",
               "gmail.settings.basic", "gmail.settings.sharing"}
-SHEET = "application/vnd.google-apps.spreadsheet"
 READS = {"GET", "HEAD"}
 # Dashboard order states that still stand for an owner command (done and cancelled orders do not).
 OPEN_ORDER_STATUSES = ("받음", "넘김", "처리 중")
@@ -469,13 +468,6 @@ def caller_uid(peer: tuple, local: tuple, paths: list[str]) -> int | None:
 
 def forbidden_scope(scope: str) -> bool:
     return scope == "https://mail.google.com/" or scope.rsplit("/", 1)[-1] in BAD_SCOPES
-
-
-def hidden_doc_key(value) -> bool:
-    if isinstance(value, dict):
-        return any(k in {"uri", "insertInlineImage", "replaceImage"} or hidden_doc_key(v)
-                   for k, v in value.items())
-    return isinstance(value, list) and any(hidden_doc_key(v) for v in value)
 
 
 async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str], bytes]:
@@ -1090,10 +1082,15 @@ class Gate:
         route = "/" + route
         if host == "gmail.googleapis.com" or route.startswith("/gmail/"):
             raise Refused("mail-send-not-here")
+        # Owner 2026-11-02 21:35 KST Q447 "바깥 사람에게 가는 것만: 메일·바깥 초대·바깥 공유": a card only for a write
+        # that reaches someone other than the owner (an invite, a share, a comment, a non-owned or public target).
+        # In-account writes (sheets, conversions, images by URL, many writes, many deletes) go straight, journaled.
         if host == "sheets.googleapis.com":
-            if not re.fullmatch(r"/v4/spreadsheets(?:/[^/]+(?::[^/]+)?(?:/.*)?)?(?::batchUpdate)?", route):
+            sheet = re.fullmatch(r"/v4/spreadsheets(?:/([^/:]+)(?::[^/]+)?(?:/.*)?)?(?::batchUpdate)?", route)
+            if not sheet:
                 raise Refused("write-not-allowed")
-            reasons.append("sheets-write")
+            if sheet[1]:
+                await self.drive_owned(sheet[1], reasons)
             return "sheets", "spreadsheets.write", None
         data = self.metadata(headers, body, route.startswith("/upload/drive/v3/"))
         if host == "www.googleapis.com" and route.startswith("/calendar/v3/"):
@@ -1165,11 +1162,7 @@ class Gate:
             if not match or not ((method == "POST" and (not match[1] or match[2]))
                                  or (method == "PATCH" and match[1] and not match[2])):
                 raise Refused("write-not-allowed")
-            if data.get("mimeType") == SHEET:
-                reasons.append("spreadsheet-write")
             snapshot = await self.drive_owned(match[1], reasons) if match[1] else None
-            if snapshot and snapshot.get("mimeType") == SHEET:
-                reasons.append("spreadsheet-write")
             parents = data.get("parents", [])
             if not isinstance(parents, list) or not all(isinstance(p, str) for p in parents):
                 raise Refused("invalid-parents", 400)
@@ -1179,8 +1172,6 @@ class Gate:
                 if key == "uploadType" and value == "resumable":
                     # A session URL bypasses metadata checks; the gate supports media/multipart only.
                     raise Refused("resumable-upload-not-allowed")
-                if key == "convert" and value.lower() == "true":
-                    reasons.append("spreadsheet-conversion")
             for parent in parents:
                 await self.drive_owned(parent, reasons)
             return "drive", "files." + ("update" if method == "PATCH" else "copy" if match[2] else "create"), snapshot if method == "PATCH" else None
@@ -1188,8 +1179,6 @@ class Gate:
             match = re.fullmatch(r"/v1/documents(?:/([^/:]+):batchUpdate)?", route)
             if method != "POST" or not match:
                 raise Refused("write-not-allowed")
-            if hidden_doc_key(data):
-                reasons.append("docs-image")
             snapshot = None
             if match[1]:
                 await self.drive_owned(match[1], reasons)
@@ -1639,21 +1628,22 @@ class Gate:
         rows = self.records(since="1970-01-01T00:00:00+00:00")
         waiting = self.pending()
         reasons = []
-        if proof not in self.order_facts and (sum(r["owner_message"] == proof for r in rows) +
-                sum(r["owner_message"] == proof for r in waiting)
-                >= limits.get("writes_per_owner_message", 30)):
+        # Both limits are off unless the config sets them (owner Q447: in-account writes need no card).
+        if (limits.get("writes_per_owner_message") is not None and proof not in self.order_facts and
+                sum(r["owner_message"] == proof for r in rows) + sum(r["owner_message"] == proof for r in waiting)
+                >= limits["writes_per_owner_message"]):
             reasons.append("owner-message-write-limit")
         deleting = (op in {"events.delete", "tasks.delete"} or
                     op == "files.update" and data.get("trashed") is True)
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
-        if deleting:
+        if deleting and limits.get("deletes_per_hour") is not None:
             count = sum(r["uid"] == uid and dt.datetime.fromisoformat(r["ts"]) >= cutoff and
                         (r["op"].removeprefix("restore.") in {"events.delete", "tasks.delete"} or
                          r.get("delete", False)) for r in rows)
             # Drive trash bodies are not journaled: snapshot/current op gets an explicit marker.
             count += sum(r["uid"] == uid and r.get("delete") and
                          dt.datetime.fromisoformat(r["ts"]) >= cutoff for r in waiting)
-            if count >= limits.get("deletes_per_hour", 10):
+            if count >= limits["deletes_per_hour"]:
                 reasons.append("delete-rate-limit")
         return reasons
 

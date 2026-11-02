@@ -43,7 +43,7 @@ The owner's one voice webhook also counts as an owner message (owner 2026-10-31 
 `owner_proof.owner_webhook_channel` both set, a message passes when its `webhook_id` and `author.id` both equal
 that id and the proof's channel is that channel. A thread of the channel does not count. Another webhook, another
 channel or a bot's post is refused with `owner-message-required`, and with either key empty only the owner's account
-counts. Everything else about a proof stays: the 24 hours, the write limit per message, the outbound cards. Card
+counts. Everything else about a proof stays: the 24 hours, the write limit per message (when configured), the outbound cards. Card
 buttons and reactions are still the owner's account only. The id goes in the root-owned config and nowhere else.
 
 A dashboard order is the other proof (owner 2026-10-21 23:23 KST "문지기가 대시보드 지시도
@@ -70,16 +70,22 @@ approval card, and Gmail send stays refused. The dashboard keeps its gate token 
 account (0600); the owner's root apply copies it to `/etc/dori-gate/dashboard-orders-token`
 (root:dori-gate 0640) and again whenever the dashboard makes a new one.
 
+A card is only for a write that reaches someone other than the owner (owner 2026-11-02 21:35 KST Q447
+"바깥 사람에게 가는 것만: 메일·바깥 초대·바깥 공유", and 21:41 KST "파일 바꾸는 것도 승인 없이 구글 드라이브 다 승인 없이").
+Writes inside the owner's account (spreadsheets, conversions, images by URL, any number of writes or deletes)
+go straight and keep the journal, snapshots, daily summary and restores. The two count limits below are off
+unless the config sets `limits`.
+
 | API | Direct writes | Approval card | Always refused |
 | --- | --- | --- | --- |
 | Calendar | Own/private events, calendars.create, owner ACL, ACL removal | External attendees, foreign organizer, public/non-owned calendar, external ACL | watch, quickAdd, import, move, calendar deletion/update, calendarList writes |
-| Tasks | Tasklist create/update; task create/update/delete/move | Limits | clear, tasklist deletion |
-| Drive | Own/private files create/update/copy/trash, owner permission, permission removal | Public/shared/non-owned targets/parents, external permission, comments/replies, spreadsheets | Permanent file deletion, emptyTrash, watch, shared-drive management |
-| Docs | Create and owned/private batchUpdate | Image/URI requests, public/non-owned documents | Other writes |
-| Sheets | Reads | Writes | Non-API routes |
+| Tasks | Tasklist create/update; task create/update/delete/move | Configured limits only | clear, tasklist deletion |
+| Drive | Own/private files create/update/copy/trash, spreadsheets and conversions, owner permission, permission removal | Public/shared/non-owned targets/parents, external permission, comments/replies | Permanent file deletion, emptyTrash, watch, shared-drive management |
+| Docs | Create and owned/private batchUpdate, images and links by URL included | Public/non-owned documents | Other writes |
+| Sheets | Create and writes on owned/private spreadsheets | Public/shared/non-owned spreadsheets | Non-API routes |
 | Gmail | Reads | Never | Every write; send-capable OAuth scopes |
 | Contacts (`people.googleapis.com`) | GET `people:searchContacts`, `people:batchGet`, `people/<id>`, `people/me/connections`, `otherContacts`, `otherContacts:search` | Never | Every write, contact groups, directory, other paths (`403 contacts-read-only`) |
-| Vault | Owner-initiated Markdown writes | Limits | Delete API, traversal, hidden paths, symlinks |
+| Vault | Owner-initiated Markdown writes | Configured limits only | Delete API, traversal, hidden paths, symlinks |
 
 Direct event writes force `sendUpdates=none` and disable legacy notifications.
 Approved external invites use `sendUpdates=all`. Attachments remain refused.
@@ -203,7 +209,9 @@ batch item that write is, ready to copy onto a batch list so the card merges.
 ### Batch approval
 
 Owner 2026-10-30 10:56 KST Q390 "묶음 승인 만들기: 정리 목록 전체를 카드 하나로 보여 주고 ✅ 한 번이면 그 목록만 실행,
-지금 29장도 거기 합침". A cleanup with more in-account Drive writes than the owner-message limit goes on one card:
+지금 29장도 거기 합침". A cleanup with more in-account Drive writes than the owner-message limit goes on one card.
+Since Q447 (2026-11-02) that limit is off unless `limits.writes_per_owner_message` is set, so with the default
+config no in-account write is parked and a batch is not needed; it stays for a config that sets the limit:
 
 ```
 POST /_gate/batch                      (google port, X-Dori-Owner-Message: <channel>/<message>)
@@ -259,7 +267,7 @@ reactions. When the batch card is decided they close with it: ✅ runs each once
 reason and cards not on the list stay as they are. If the batch card goes missing or is edited, its merged
 cards go back to waiting on their own.
 
-For the Dori: "한 형 글에서 형 드라이브 안 쓰기(폴더 만들기·올리기·옮기기)가 30건을 넘을 것 같으면 하나씩 카드를 만들지 말고
+For the Dori, only when the config sets the write limit: "한 형 글에서 형 드라이브 안 쓰기(폴더 만들기·올리기·옮기기)가 30건을 넘을 것 같으면 하나씩 카드를 만들지 말고
 목록 전체를 POST /_gate/batch로 한 번 내고, 형 ✅ 뒤 각 쓰기에 X-Dori-Batch 머리를 붙인다."
 
 Changes/denials are in `changes.jsonl`/`denials.jsonl` (0600), snapshots in
