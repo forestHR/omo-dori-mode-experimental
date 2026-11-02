@@ -578,9 +578,9 @@ export const orderBrief = (row: InboxRow, text: string): string => [
 
 /**
  * New inbox rows of backlog.orderKinds (the owner's own orders) become items at once, priority 2. The first pass only sets
- * where it starts: an order before that is the lead's; every later one is the backlog's alone (the lead leaves order rows to
- * it and gets one back only as a backlog-held row). An order keeps the todo it is about; a pass never runs two lanes for one
- * todo, so an order about a todo whose lane runs waits for that lane (see backlogTick).
+ * where it starts (and never moves it): an order stamped before that is the lead's; every later one is the backlog's alone,
+ * taken once under its row id. An order keeps the todo it is about; one about a todo whose lane runs is handed to the lead
+ * at once for that lane (see backlogTick).
  */
 export const orderIntake = (d: { readonly stateDir: string; readonly settings: BacklogSettings; readonly rows: () => readonly InboxRow[]; readonly now: () => number }): string[] => {
   if (!d.settings.orderKinds.length) return [];
@@ -591,9 +591,9 @@ export const orderIntake = (d: { readonly stateDir: string; readonly settings: B
     return [`BACKLOG_ORDERS_FROM ${at}: ${d.settings.orderKinds.join(", ")} rows after this are taken; earlier ones are the lead's`];
   }
   const lines: string[] = [];
-  let newest = from;
+  // the start stays where the first pass set it: a row is taken once, by the item its id names, however late or out of
+  // order it reached the inbox
   for (const row of d.rows().filter((r) => d.settings.orderKinds.includes(r.kind ?? "") && typeof r.id === "string" && (r.ts ?? "") > from)) {
-    if ((row.ts ?? "") > newest) newest = row.ts ?? newest;
     const id = rowItemId(row.id);
     if (!LANE_KEY.test(id) || readItem(d.stateDir, id)) continue;
     const text = (row.content ?? "").trim();
@@ -603,7 +603,6 @@ export const orderIntake = (d: { readonly stateDir: string; readonly settings: B
     addItem(d.stateDir, { id, title, brief, done: d.settings.intakeDone.replaceAll("{id}", id).replaceAll("{stateDir}", d.stateDir), priority: "2", by: "owner", row: row.id, ...(row.todo_id ? { todo: String(row.todo_id) } : {}), noThread: `형이 ${row.kind}로 넣은 지시(진행은 보드에서 봄)` }, { registered: false, at });
     lines.push(`BACKLOG_INTAKE ${id} (owner order): ${title}`);
   }
-  if (newest !== from) writeCursor(d.stateDir, { ordersFrom: newest });
   return lines;
 };
 
@@ -753,7 +752,8 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
     // 2c. an owner's order about a todo whose lane runs now is the lead's at once (lead 2026-11-02: a stop or a change of
     // direction must reach that lane now, not after it): handed over with a backlog-held row, never touched again; checked
     // after running items followed their lanes, so a lane that closed is not taken for a running one
-    for (const order of listItems(d.stateDir).filter((i) => i.status === "open" && i.row !== undefined && i.by === "owner")) {
+    // an order is known by the inbox row it came from, which a lead's replacement (dori backlog add) keeps
+    for (const order of listItems(d.stateDir).filter((i) => i.status === "open" && i.row !== undefined && !i.by.startsWith("pair:"))) {
       const todo = todoOf(order);
       const sibling = todo === undefined ? undefined : listItems(d.stateDir).find((o) => o.id !== order.id && o.status === "running" && todoOf(o) === todo);
       if (!sibling) continue;
@@ -828,17 +828,6 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
         if (heldWhy) d.inbox("backlog-held", `backlog-held-${item.id}-${at}`, `BACKLOG_HELD ${item.id} (${item.title}): ${heldWhy} -> fix it with dori backlog add ${item.id} ... (replaces it), or dori backlog drop ${item.id}`);
         lines.push(heldWhy ? `BACKLOG_HELD ${item.id}: ${heldWhy}` : `BACKLOG_START_FAILED ${item.id} (${failures}/${MAX_FAILED_STARTS}): ${why}`);
       }
-    }
-    // an owner's order that could not start within backlog.orderWaitMin (and does not wait on its todo's running lane) goes back
-    // to the lead: it never waits unseen
-    for (const late of listItems(d.stateDir).filter((i) => i.status === "open" && i.row !== undefined && !i.ask && !i.approvalAsk && d.now() - Date.parse(i.addedAt) >= d.settings.orderWaitMin * 60_000)) {
-      // its todo's lane still runs: the order keeps waiting for it (it starts when that lane closes), it is not the lead's
-      const todo = todoOf(late);
-      if (todo !== undefined && listItems(d.stateDir).some((o) => o.id !== late.id && o.status === "running" && todoOf(o) === todo)) continue;
-      const why = late.held || quiet.join(" | ") || "no room";
-      save(d.stateDir, logged(late, at, `dropped: handed back to the lead (${why.slice(0, 200)})`, { status: "dropped" }));
-      d.inbox("backlog-held", `backlog-held-${late.id}-${at}`, `BACKLOG_ORDER_TO_LEAD ${late.row} (${late.title}): its backlog lane did not start within ${d.settings.orderWaitMin} min (${why.slice(0, 200)}) -> do the owner's order yourself; it is off the list`);
-      lines.push(`BACKLOG_ORDER_TO_LEAD ${late.id}: not started within ${d.settings.orderWaitMin} min; the lead does it`);
     }
     if (!quiet.length && waiting.length > room) quiet.push(`BACKLOG_WAIT ${waiting.length - room} item(s): ${runningIds.size} backlog lane(s) of this Dori run (backlog.maxLanes ${d.settings.maxLanes}), at most ${d.settings.maxStarts} start(s) a pass`);
     const day = dayReport(d.stateDir, d.settings, d.now());
