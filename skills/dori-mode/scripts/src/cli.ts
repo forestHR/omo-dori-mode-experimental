@@ -38,7 +38,7 @@ import { heavyWorker } from "./heavy-worker.ts";
 import { heavySpread, isKind, spreadPlan, withPipefail, type SpreadJob } from "./heavy-spread.ts";
 import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
-import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, reopenLaneThread, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
+import { adoptLane, asStartFailure, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, reopenLaneThread, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
 import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, ledgerProblems, ledgerTable, loadLedger, messageLines, promptTable, textDirectives } from "./directives.ts";
 import { applyDirectives, auditOrReport, checkMeaning, linkRows, memoryRepoFor, pushLinks, sinceIso } from "./directive-audit.ts";
 import { addNode, formatIntent, formatTree, gateFix, intentView, laneArea, loadTree, NODE_KINDS, type NodeKind, recordBranch, recordOverride, recordRefusal, requiredMessage, researchCheck, researchFacts, researchHint, sendResearch, setStatus, stuckTop, stuckView, type TreeArea, TreeError, updateTree } from "./explore.ts";
@@ -793,7 +793,7 @@ const backlogDeps = (): TickDeps => ({
     const leadBrief = readFileSync(brief, "utf8");
     const input = { key, backlog: true, title: item.title, brief, done: item.done, thread: item.thread, noThread: item.noThread, whyNew: item.whyNew, cwd: item.cwd, tags: [...(item.tags ?? []), "backlog"], goal: item.goal };
     const r = await launchLane(deps, input, (line) => console.log(line)).catch((e: unknown) => {
-      throw e instanceof LaunchError ? new StartRefused(e.message) : e;
+      throw asStartFailure(e);
     });
     if (r.lane.thread.startsWith("discord:") && discordToken) {
       console.log(await Promise.resolve().then(() => postLaneStart(ownDiscord(discordToken), r.lane.thread, laneStartText(config.discord.laneStartText, r.lane, leadBrief))).catch((e: unknown) => `THREAD_START_FAILED ${r.lane.thread}: ${e instanceof Error ? e.message : String(e)}`));

@@ -497,11 +497,12 @@ export const READ_ONLY_RULE = "[넘으면 안 되는 선 - 읽기만] 이 일은
 
 export const launchRules = (item: BacklogItem): string => {
   const limit = writeLimit(item);
-  const rules = [
-    ...(item.readOnly ? [READ_ONLY_RULE] : []),
-    ...(limit === "draft" ? [DRAFT_ONLY_RULE] : limit === "approved" ? [`${APPROVED_RULE}\n[승인된 할 일 내용]\n${item.feedSnapshot ?? "?"}`] : []),
-  ];
-  return rules.join("\n\n");
+  // the entry as it is now, so a lane never works from content the feed has since changed
+  const current = item.source === undefined ? [] : [`[지금 할 일 내용 - 위의 할 일 자료와 다르면 이것을 따른다]\n${item.feedSnapshot ?? "?"}`];
+  // read-only is the strongest: no write permission is added beside it, approved or not
+  if (item.readOnly) return [READ_ONLY_RULE, ...current].join("\n\n");
+  if (limit === "none") return "";
+  return [limit === "draft" ? DRAFT_ONLY_RULE : APPROVED_RULE, ...current].join("\n\n");
 };
 
 // the content an approval is bound to: the entry without its status and bookkeeping fields
@@ -619,7 +620,7 @@ export const dayReport = (stateDir: string, settings: BacklogSettings, now: numb
     `BACKLOG_DAY ${day}: tell the owner in one or two lines what was done today and what waits on him.`,
     `끝남: ${names(items.filter((i) => i.status === "done" && today(i, "done")))}`,
     `시작: ${names(items.filter((i) => today(i, "started")))}`,
-    `형 답 기다림: ${names(items.filter((i) => i.status === "open" && i.ask))}`,
+    `형 답 기다림: ${names(items.filter((i) => i.status === "open" && (i.ask || i.approvalAsk)))}`,
     `막힘: ${names(items.filter((i) => i.status === "open" && i.held))}`,
     ...(stale.length ? [`7일 넘게 안 끝난 것(정리 제안): ${names(stale)}`] : []),
     ...(twice.length ? [`겹쳐 보이는 것(합치기 제안): ${twice.join(", ")}`] : []),

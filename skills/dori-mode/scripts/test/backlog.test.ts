@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, feedItemId, DRAFT_ONLY_RULE, APPROVED_RULE, READ_ONLY_RULE, laneKeyOf, writeLimit, type FeedTodo, flockDir, followUpId, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
-import { validateLaunch } from "../src/launch.ts";
+import { asStartFailure, LaunchError, LaunchFailed, validateLaunch } from "../src/launch.ts";
 
 const SETTINGS: BacklogSettings = { enabled: true, everyMin: 60, maxLanes: 3, maxStarts: 1, hostMaxLanes: 2, hostDir: "", pairRepairPattern: "", pairRequestPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, orderKinds: [], feedCommand: [], dayReportAt: "", timeZone: "UTC" };
 const T0 = Date.parse("2026-11-02T15:00:00Z");
@@ -556,7 +556,7 @@ test("the write limit comes from the item's state at each launch: a draft the le
   await backlogTick(deps(), { force: true });
   // Then
   expect(writeLimit(readItem(state, "todo-pb-565656565656-1")!)).toBe("draft");
-  expect(sentBrief("todo-pb-565656565656-1").trimEnd().endsWith(DRAFT_ONLY_RULE)).toBe(true);
+  expect(sentBrief("todo-pb-565656565656-1").indexOf(DRAFT_ONLY_RULE)).toBeGreaterThan(sentBrief("todo-pb-565656565656-1").indexOf("read a file"));
 });
 
 test("an approval is bound to the content it was given for: changed content voids it and asks again; the owner's answer approves the new content", async () => {
@@ -576,7 +576,7 @@ test("an approval is bound to the content it was given for: changed content void
   expect(launched).toEqual(["todo-pb-343434343434-1"]);
   const sent = sentBrief("todo-pb-343434343434-1");
   expect(sent).toContain(APPROVED_RULE);
-  expect(sent.slice(sent.indexOf("[승인된 할 일 내용]"))).toContain("파일 B 고치기");
+  expect(sent.slice(sent.indexOf("[지금 할 일 내용"))).toContain("파일 B 고치기");
 });
 
 test("backlog lanes run under bl-<id>; an ordinary lane registered under that key during the pass is never taken as the start", async () => {
@@ -675,7 +675,7 @@ test("content that changes again while the owner is being asked (A, B, C): only 
   expect(currentIdOldHash).toContain("Nothing was recorded");
   expect(held.some((l) => l.startsWith("BACKLOG_STARTED"))).toBe(false);
   expect(launched).toEqual(["todo-pb-888888888888-1"]);
-  expect(sentBrief("todo-pb-888888888888-1").slice(sentBrief("todo-pb-888888888888-1").indexOf("[승인된 할 일 내용]"))).toContain('"title": "C"');
+  expect(sentBrief("todo-pb-888888888888-1").slice(sentBrief("todo-pb-888888888888-1").indexOf("[지금 할 일 내용"))).toContain('"title": "C"');
 });
 
 test("an item added --read-only launches with the read-only rule, whatever its brief says", async () => {
@@ -685,4 +685,54 @@ test("an item added --read-only launches with the read-only rule, whatever its b
   await backlogTick(deps());
   // Then
   expect(sentBrief("ro1")).toContain(READ_ONLY_RULE);
+});
+
+test("read-only is the strongest limit: an approved feed item replaced --read-only gets no write permission, before or after approval", async () => {
+  // Given: one approved item replaced read-only, one draft replaced read-only and approved afterwards
+  await feedSweep([{ todo_id: "r1", title: "r1", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }, { todo_id: "r2", title: "r2", status: "진행" }]);
+  for (const id of ["todo-r1", "todo-r2"]) addItem(state, { id, title: id, brief, done: "file /tmp/x", readOnly: true }, { registered: false, at: "2026-11-02T16:00:00Z" });
+  await feedSweep([{ todo_id: "r1", title: "r1", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }, { todo_id: "r2", title: "r2", status: "진행", approved_at: "2026-11-02T16:30:00Z", auto_applied: false }]);
+  // When
+  await backlogTick(deps({}, { maxStarts: 2 }), { force: true });
+  // Then
+  for (const id of ["todo-r1", "todo-r2"]) {
+    expect(sentBrief(id)).toContain(READ_ONLY_RULE);
+    expect(sentBrief(id)).not.toContain(APPROVED_RULE);
+  }
+});
+
+test("a draft whose content changed while it waited launches with the content as it is now", async () => {
+  // Given: draft A waits (no room), then the feed changes it to B
+  await feedSweep([{ todo_id: "pb-909090909090-1", title: "내용 A", status: "진행" }]);
+  await backlogTick(deps({}, { maxStarts: 0 }), { force: true });
+  await feedSweep([{ todo_id: "pb-909090909090-1", title: "내용 B", status: "진행" }]);
+  // When
+  await backlogTick(deps(), { force: true });
+  // Then
+  const sent = sentBrief("todo-pb-909090909090-1");
+  expect(sent).toContain(DRAFT_ONLY_RULE);
+  expect(sent.slice(sent.indexOf("[지금 할 일 내용"))).toContain('"title": "내용 B"');
+});
+
+test("the day report counts content questions as waiting on the owner", () => {
+  // Given: an item waiting on a content question only
+  mkdirSync(join(state, "backlog", "items"), { recursive: true });
+  writeFileSync(join(state, "backlog", "items", "cq1.json"), JSON.stringify({ id: "cq1", title: "바뀐 할 일", brief, done: "file /tmp/x", priority: 5, by: "feed", status: "open", addedAt: "t", log: [], approvalAsk: { id: "q1", hash: "h" } }));
+  // When
+  const report = dayReport(state, { ...SETTINGS, dayReportAt: "00:00", timeZone: "UTC" }, now);
+  // Then
+  expect(report?.split("\n")).toContain("형 답 기다림: 바뀐 할 일");
+});
+
+test("a backend failure of a launch is tried again; a refusal of the launch input holds the item", async () => {
+  // Given: the launch errors as dori launch raises them, through the same conversion the CLI uses
+  add("op1", { priority: "1" });
+  add("bad1", { priority: "2" });
+  const d = deps({ launch: async (item) => {
+    throw asStartFailure(item.id === "op1" ? new LaunchFailed("aoe add failed: exit 1") : new LaunchError("Done line is not checkable: x"));
+  } }, { maxStarts: 2 });
+  // When
+  const lines = await backlogTick(d);
+  // Then
+  expect(lines).toEqual(["BACKLOG_START_FAILED op1 (1/2): aoe add failed: exit 1", "BACKLOG_HELD bad1: dori launch refused it: Done line is not checkable: x"]);
 });

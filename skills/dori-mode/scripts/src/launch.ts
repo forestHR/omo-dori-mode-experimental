@@ -10,6 +10,7 @@ import { iso } from "./run.ts";
 import { checkDone, doneSyntaxErrors, weakDone } from "./done-signals.ts";
 import { laneArea, loadTree, treeSection } from "./explore.ts";
 import { watchLog } from "./watch-log.ts";
+import { StartRefused } from "./backlog.ts";
 import { relatedLines, relatedThreads, type RelatedThread } from "./related-thread.ts";
 import { addedLine, checkedLedger, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
 import { join } from "node:path";
@@ -45,6 +46,12 @@ export type LaunchInput = {
 };
 
 export class LaunchError extends Error {}
+// The session could not be opened (the terminal backend failed): worth another try, unlike every other LaunchError, which
+// the launch input itself causes and which no retry changes.
+export class LaunchFailed extends LaunchError {}
+
+/** A launch error as the backlog pass sees it: a refusal holds the item at once, an operational failure is tried again. */
+export const asStartFailure = (e: unknown): unknown => (e instanceof LaunchError && !(e instanceof LaunchFailed) ? new StartRefused(e.message) : e);
 
 // --thread new: dori launch opens the lane's work thread in this Dori's own channel (deps.openThread), named for --title
 export const NEW_THREAD = "new";
@@ -493,7 +500,7 @@ type Opened = { readonly pane: string; readonly tab?: string; readonly failure?:
 
 const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string): Promise<Opened> => {
   const created = await deps.run(["herdr", "tab", "create", ...(deps.config.laneWorkspace ? ["--workspace", deps.config.laneWorkspace] : []), "--cwd", cwd, "--label", key, "--no-focus"]);
-  if (created.code !== 0) throw new LaunchError(`herdr tab create failed: ${created.err || created.out}`);
+  if (created.code !== 0) throw new LaunchFailed(`herdr tab create failed: ${created.err || created.out}`);
   const made = (JSON.parse(created.out) as { result: { root_pane: { pane_id: string; tab_id?: string }; tab_id?: string } }).result;
   const pane = made.root_pane.pane_id;
   const tab = made.tab_id ?? made.root_pane.tab_id;
@@ -506,7 +513,7 @@ const openAoe = async (deps: FlowDeps, key: string, cwd: string, model: string, 
   try {
     pane = await openAoeSession(deps.run, deps.clock, { title: key, cwd, tool: deps.config.agentCommand[0] ?? "omo", model, env });
   } catch (e) {
-    if (e instanceof AoeError) throw new LaunchError(e.message);
+    if (e instanceof AoeError) throw new LaunchFailed(e.message);
     throw e;
   }
   const failure = await awaitPrompt(deps, pane);
