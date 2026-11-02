@@ -8,7 +8,7 @@
 // The idea is dori-superagent's hourly loop (#23, https://github.com/sisyphuslabs/dori-superagent/pull/23, MIT), rewritten
 // here for aoe and dori launch: no GitHub issue import (owner 2026-11-02 23:14 KST "github 이슈는 필요없고"), the start goes
 // through the same launch as the lead's (directives, eight steps, work thread), and it never merges, pushes or closes.
-import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
@@ -563,45 +563,64 @@ const INBOX_FIRST_BYTES = 2 * 1024 * 1024;
 const INBOX_CHUNK_BYTES = 8 * 1024 * 1024;
 
 /**
+ * The whole lines of an open file from byte from on, up to size (what fstat said of that same descriptor): at most 8 MB, or
+ * the one longer line. A read that gives nothing ends it (the file got shorter while it was read): what was read stands.
+ * at is the byte after the last whole line read (from itself when there is none).
+ */
+export const readLines = (fd: number, from: number, size: number): { readonly lines: string[]; readonly at: number } => {
+  const chunks: Buffer[] = [];
+  const buf = Buffer.alloc(1 << 20);
+  let got = 0;
+  let end = -1;
+  while (from + got < size) {
+    const n = readSync(fd, buf, 0, Math.min(buf.length, size - from - got), from + got);
+    if (n <= 0) break;
+    const nl = buf.subarray(0, n).lastIndexOf(10);
+    chunks.push(Buffer.from(buf.subarray(0, n)));
+    if (nl >= 0) end = got + nl;
+    got += n;
+    if (got >= INBOX_CHUNK_BYTES && end >= 0) break;
+  }
+  const text = end < 0 ? "" : Buffer.concat(chunks).subarray(0, end + 1).toString("utf8");
+  return { lines: text.split("\n"), at: from + end + 1 };
+};
+
+/**
  * The inbox rows the backlog has not read yet, from where its last pass stopped (an append position, never a tail window: a
- * row is not lost however much else was written while the backlog did not run). commit() keeps the position only after the
- * intakes took the rows, so a pass cut off between reads them again and they are taken once by their ids. The very first
- * read starts at the last 2 MB (rows before the intakes' starts are not theirs anyway); a new or shorter file (rotated) is
- * read from its start; a line not yet ended is left for the next pass; a pass reads 8 MB at most (or the one longer line).
+ * row is not lost however much else was written while the backlog did not run). They are read when the reader is made,
+ * before an intake sets its start, and commit() keeps only the position of what was read then, once the intakes took it:
+ * a row written later is the next pass's, and a pass cut off before commit reads its rows again (taken once by their ids).
+ * The file is opened first and its size taken from that descriptor, so a rotation in between cannot mix two files. The very
+ * first read starts at the last 2 MB (rows before the intakes' starts are not theirs anyway); a new or shorter file
+ * (rotated) is read from its start; a line not yet ended is left for the next pass.
  */
 export const inboxReader = (stateDir: string, file: string): { readonly rows: () => readonly InboxRow[]; readonly commit: () => void } => {
-  let read: { readonly rows: InboxRow[]; readonly ino: number; readonly at: number } | undefined;
-  const load = (): { readonly rows: InboxRow[]; readonly ino: number; readonly at: number } => {
-    if (read) return read;
-    if (!existsSync(file)) return (read = { rows: [], ino: 0, at: 0 });
-    const st = statSync(file);
-    const cur = readCursor(stateDir).inbox;
-    const from = cur === undefined ? Math.max(0, st.size - INBOX_FIRST_BYTES) : cur.ino !== st.ino || cur.at > st.size ? 0 : cur.at;
-    const fd = openSync(file, "r");
+  const snap = ((): { readonly rows: InboxRow[]; readonly ino: number; readonly at: number } => {
+    let fd: number;
     try {
-      for (let len = Math.min(INBOX_CHUNK_BYTES, st.size - from); ; len = Math.min(len * 2, st.size - from)) {
-        const buf = Buffer.alloc(len);
-        const n = readSync(fd, buf, 0, len, from);
-        const end = buf.subarray(0, n).lastIndexOf(10);
-        if (end < 0 && from + n < st.size) continue;
-        const text = end < 0 ? "" : buf.subarray(0, end + 1).toString("utf8");
-        const rows = text.split("\n").flatMap((line): InboxRow[] => {
-          try {
-            return line.trim().startsWith("{") ? [JSON.parse(line) as InboxRow] : [];
-          } catch {
-            return [];
-          }
-        });
-        return (read = { rows, ino: st.ino, at: from + end + 1 });
-      }
+      fd = openSync(file, "r");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return { rows: [], ino: 0, at: 0 };
+      throw e;
+    }
+    try {
+      const st = fstatSync(fd);
+      const cur = readCursor(stateDir).inbox;
+      const from = cur === undefined ? Math.max(0, st.size - INBOX_FIRST_BYTES) : cur.ino !== st.ino || cur.at > st.size ? 0 : cur.at;
+      const { lines, at } = readLines(fd, from, st.size);
+      const rows = lines.flatMap((line): InboxRow[] => {
+        try {
+          return line.trim().startsWith("{") ? [JSON.parse(line) as InboxRow] : [];
+        } catch {
+          return [];
+        }
+      });
+      return { rows, ino: st.ino, at };
     } finally {
       closeSync(fd);
     }
-  };
-  return { rows: () => load().rows, commit: () => {
-    const { ino, at } = load();
-    writeCursor(stateDir, { inbox: { ino, at } });
-  } };
+  })();
+  return { rows: () => snap.rows, commit: () => writeCursor(stateDir, { inbox: { ino: snap.ino, at: snap.at } }) };
 };
 
 export const rowItemId = (rowId: string): string => rowId.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+/, "").slice(0, 61);

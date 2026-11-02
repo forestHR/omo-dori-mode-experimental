@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, inboxReader, type InboxRow, orderIntake, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
+import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, inboxReader, type InboxRow, orderIntake, readLines, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 import { briefGaps, COMMON_LEDGER, loadLedger } from "../src/directives.ts";
@@ -865,6 +865,53 @@ test("an order the backlog has not read is taken behind more than 2 MB of other 
   expect(lines).toEqual([expect.stringMatching(/^BACKLOG_INTAKE dashboard-order-70 \(owner order\)/)]);
   expect(readItem(state, "dashboard-order-70")?.status).toBe("open");
   expect(again).toEqual([]);
+});
+
+test("an order written between the first pass's start and its commit is the next pass's: the commit keeps only what was read before the start", () => {
+  // Given: the first pass reads the inbox, sets the start, and an order lands before it commits
+  writeFileSync(inboxFile(), otherRows(4 * 1024));
+  const inbox = inboxReader(state, inboxFile());
+  const first = orderIntake({ stateDir: state, settings: orderSettings, rows: inbox.rows, now: () => now });
+  appendFileSync(inboxFile(), `${JSON.stringify(orderRow(73, new Date(now + 60_000).toISOString()))}\n`);
+  inbox.commit();
+  // When
+  const next = filePass();
+  // Then
+  expect(first[0]).toStartWith("BACKLOG_ORDERS_FROM");
+  expect(next.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-73"]);
+});
+
+test("reading an inbox that got shorter after its size was taken ends with what was read, never waits on bytes that are gone", () => {
+  // Given: two whole lines and a size that still counts 1 MB the file no longer has (cut while it was read)
+  writeFileSync(inboxFile(), '{"id":"a"}\n{"id":"b"}\n');
+  const fd = openSync(inboxFile(), "r");
+  // When
+  const read = (() => {
+    try {
+      return readLines(fd, 0, 22 + 1024 * 1024);
+    } finally {
+      closeSync(fd);
+    }
+  })();
+  // Then
+  expect(read).toEqual({ lines: ['{"id":"a"}', '{"id":"b"}', ""], at: 22 });
+});
+
+test("an inbox rotated between a pass's read and its commit is read from its start by the next pass", () => {
+  // Given: the start is set; an order is read by a pass; the file is rotated before that pass commits
+  writeFileSync(inboxFile(), "");
+  filePass();
+  appendFileSync(inboxFile(), `${JSON.stringify(orderRow(74, new Date(now + 60_000).toISOString()))}\n`);
+  const inbox = inboxReader(state, inboxFile());
+  const read = orderIntake({ stateDir: state, settings: orderSettings, rows: inbox.rows, now: () => now });
+  writeFileSync(join(root, "inbox.new"), `${JSON.stringify(orderRow(75, new Date(now + 120_000).toISOString()))}\n`);
+  renameSync(join(root, "inbox.new"), inboxFile());
+  inbox.commit();
+  // When
+  const next = filePass();
+  // Then
+  expect(read.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-74"]);
+  expect(next.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-75"]);
 });
 
 test("the inbox read leaves a line not yet ended for the next pass, and reads a new (rotated) inbox file from its start", () => {
