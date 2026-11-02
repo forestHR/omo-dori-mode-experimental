@@ -49,6 +49,8 @@ export type BacklogItem = {
   // or removed the entry (it comes back if the entry is open again there)
   readonly paused?: boolean;
   readonly closedOnSource?: string;
+  // the inbox row it was taken from (an owner's order of backlog.orderKinds); handed back to the lead when it cannot start
+  readonly row?: string;
   // the owner's approval of the entry: his card (approved_at, auto_applied false) or his answer to a changed-content
   // question, bound to the content hash it was given for; another hash means no approval
   readonly approval?: { readonly at: string; readonly hash: string; readonly by: "card" | "decide" };
@@ -134,6 +136,7 @@ export type AddInput = {
   readonly feedSnapshot?: string;
   readonly feedHash?: string;
   readonly approval?: BacklogItem["approval"];
+  readonly row?: string;
 };
 
 // backlog.writeNeedsOwnerLink: work that may write starts on its own only with the owner's message behind it
@@ -181,6 +184,7 @@ export const addItem = (stateDir: string, input: AddInput, ctx: { readonly regis
     ...(input.tags?.length ? { tags: input.tags } : {}),
     ...(input.readOnly ? { readOnly: true } : {}),
     ...(input.ownerLink ? { ownerLink: input.ownerLink } : {}),
+    ...((input.row ?? (replaced ? old?.row : undefined)) ? { row: input.row ?? old?.row } : {}),
 
     // what the feed recorded stays when the lead replaces the item (the fix of a held one)
     ...((input.followUpOf ?? (replaced ? old?.followUpOf : undefined)) ? { followUpOf: input.followUpOf ?? old?.followUpOf } : {}),
@@ -353,7 +357,7 @@ export const hostReserve = async (h: HostSlots, key: string, now: number): Promi
   }
 };
 
-type Cursor = { readonly dayReported?: string };
+type Cursor = { readonly ordersFrom?: string; readonly dayReported?: string };
 const readCursor = (stateDir: string): Cursor => (existsSync(cursorFile(stateDir)) ? (JSON.parse(readFileSync(cursorFile(stateDir), "utf8")) as Cursor) : {});
 const writeCursor = (stateDir: string, patch: Cursor): void => writeAtomic(cursorFile(stateDir), JSON.stringify({ ...readCursor(stateDir), ...patch }));
 // the approved follow-up of a feed draft: "appr-" in place of the feed's "todo-", a name no feed entry can take, the
@@ -540,6 +544,66 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     save(d.stateDir, logged(gone, at, "dropped: no longer on the source", { status: "dropped", closedOnSource: at }));
     lines.push(`BACKLOG_FEED_GONE ${gone.id}: no longer on the source (finished or removed there), dropped from the list${full}`);
   }
+  return lines;
+};
+
+export type InboxRow = { readonly id: string; readonly ts?: string; readonly kind?: string | null; readonly content?: string | null; readonly url?: string; readonly order?: number; readonly todo_id?: string };
+
+export const orderBrief = (row: InboxRow, text: string, todoItem?: string): string => [
+  "ulw",
+  "",
+  `[목표] 형이 직접 넣은 지시를 처리한다 (${row.kind} ${row.id}, ${row.ts ?? "?"}${row.url ? `, ${row.url}` : ""}). 아래 지시 자료의 첫 줄이 형 원문이고, 그 아래 줄은 보드가 붙인 안내(관련 할 일, 진행 상태를 적는 법, 다른 도리에게 넘기는 법)다.`,
+  "",
+  "[사용자와 장면] 형: 보드에 한 줄 지시를 쓰면 따로 말하지 않아도 그 일이 처리되고, 보드의 지시 상태가 처리 중에서 끝(또는 맡은 도리에게 넘김)으로 바뀌어 있다.",
+  "",
+  "[넘으면 안 되는 선] 바깥 사람에게 닿는 쓰기(메일 보내기·바깥 초대·바깥 공유)는 형 ✅ 카드로만 하고 승인 버튼은 누르지 않는다. 형 계정 안 쓰기의 근거는 이 지시 번호다(문지기가 받는 지시 근거). 형 원문 밖의 일은 하지 않고, 원문이 모호하면 리드에게 [REPORT] question으로 묻는다.",
+  "",
+  "[형 지시 자료]",
+  text,
+  "",
+  `[끝난 상태] 지시한 일이 실제로 끝나고 실사용으로 확인됨(묻는 말이면 확인한 답이 형에게 감). 시작할 때 보드의 지시 상태를 처리 중으로, 끝나면 끝으로 바꾼다(안내에 적힌 방법대로). 이 도리 일이 아니면 안내대로 도리 방에 넘기고 상태를 넘김으로 둔다.${todoItem ? ` 이 지시가 다루는 할 일은 목록에도 있다(${todoItem}): 그 항목은 이 레인이 맡는 동안 멈춰 있다.` : ""}`,
+  "",
+].join("\n");
+
+/**
+ * New inbox rows of backlog.orderKinds (the owner's own orders) become items at once, priority 2. The first pass only sets
+ * where it starts: an order before that, or one the backlog does not take, is the lead's (dori backlog show <row id> finds
+ * no item). An order about a todo whose feed lane runs is handed to the lead for that lane, never a second lane; a waiting
+ * feed item of that todo is held while the order's lane has it.
+ */
+export const orderIntake = (d: { readonly stateDir: string; readonly settings: BacklogSettings; readonly rows: () => readonly InboxRow[]; readonly now: () => number; readonly inbox: (kind: string, id: string, content: string) => void }): string[] => {
+  if (!d.settings.orderKinds.length) return [];
+  const at = new Date(d.now()).toISOString();
+  const from = readCursor(d.stateDir).ordersFrom;
+  if (from === undefined) {
+    writeCursor(d.stateDir, { ordersFrom: at });
+    return [`BACKLOG_ORDERS_FROM ${at}: ${d.settings.orderKinds.join(", ")} rows after this are taken; earlier ones are the lead's`];
+  }
+  const lines: string[] = [];
+  let newest = from;
+  for (const row of d.rows().filter((r) => d.settings.orderKinds.includes(r.kind ?? "") && typeof r.id === "string" && (r.ts ?? "") > from)) {
+    if ((row.ts ?? "") > newest) newest = row.ts ?? newest;
+    const id = row.id.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+/, "").slice(0, 61);
+    if (!LANE_KEY.test(id) || readItem(d.stateDir, id)) continue;
+    const text = (row.content ?? "").trim();
+    const title = (text.split("\n")[0] ?? id).slice(0, 60);
+    const todo = row.todo_id ? readItem(d.stateDir, feedItemId(row.todo_id)) : undefined;
+    const covered = todo && todo.source === row.todo_id ? todo : undefined;
+    if (covered?.status === "running") {
+      d.inbox("backlog-order", `backlog-order-${id}-${at}`, `BACKLOG_ORDER_TO_LANE ${row.id} (${title}): the owner's order is about todo ${row.todo_id}, which lane ${covered.lane ?? laneKeyOf(covered.id)} (${covered.pane ?? "?"}) works on now -> type the order into that lane with dori type and see it through there; no second lane is opened`);
+      lines.push(`BACKLOG_ORDER_TO_LANE ${row.id}: about todo ${row.todo_id}, which lane ${covered.lane ?? laneKeyOf(covered.id)} runs; handed to the lead for that lane`);
+      continue;
+    }
+    const brief = join(dir(d.stateDir), "intake", `${id}.md`);
+    writeAtomic(brief, orderBrief(row, text, covered?.status === "open" ? covered.id : undefined));
+    addItem(d.stateDir, { id, title, brief, done: d.settings.intakeDone.replaceAll("{id}", id).replaceAll("{stateDir}", d.stateDir), priority: "2", by: "owner", row: row.id, noThread: `형이 ${row.kind}로 넣은 지시(진행은 보드에서 봄)` }, { registered: false, at });
+    lines.push(`BACKLOG_INTAKE ${id} (owner order): ${title}`);
+    if (covered?.status === "open" && !covered.held) {
+      save(d.stateDir, logged(covered, at, `held: the owner's order ${row.id} covers it`, { held: `the owner's order ${row.id} covers this todo; its lane ${laneKeyOf(id)} does it` }));
+      lines.push(`BACKLOG_HELD ${covered.id}: the owner's order ${row.id} covers it`);
+    }
+  }
+  if (newest !== from) writeCursor(d.stateDir, { ordersFrom: newest });
   return lines;
 };
 
@@ -740,6 +804,13 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
         if (heldWhy) d.inbox("backlog-held", `backlog-held-${item.id}-${at}`, `BACKLOG_HELD ${item.id} (${item.title}): ${heldWhy} -> fix it with dori backlog add ${item.id} ... (replaces it), or dori backlog drop ${item.id}`);
         lines.push(heldWhy ? `BACKLOG_HELD ${item.id}: ${heldWhy}` : `BACKLOG_START_FAILED ${item.id} (${failures}/${MAX_FAILED_STARTS}): ${why}`);
       }
+    }
+    // an owner's order that could not start within backlog.orderWaitMin goes back to the lead: it never waits unseen
+    for (const late of listItems(d.stateDir).filter((i) => i.status === "open" && i.row !== undefined && !i.ask && !i.approvalAsk && d.now() - Date.parse(i.addedAt) >= d.settings.orderWaitMin * 60_000)) {
+      const why = late.held || quiet.join(" | ") || "no room";
+      save(d.stateDir, logged(late, at, `dropped: handed back to the lead (${why.slice(0, 200)})`, { status: "dropped" }));
+      d.inbox("backlog-held", `backlog-held-${late.id}-${at}`, `BACKLOG_ORDER_TO_LEAD ${late.row} (${late.title}): its backlog lane did not start within ${d.settings.orderWaitMin} min (${why.slice(0, 200)}) -> do the owner's order yourself; it is off the list`);
+      lines.push(`BACKLOG_ORDER_TO_LEAD ${late.id}: not started within ${d.settings.orderWaitMin} min; the lead does it`);
     }
     if (!quiet.length && waiting.length > room) quiet.push(`BACKLOG_WAIT ${waiting.length - room} item(s): ${runningIds.size} backlog lane(s) of this Dori run (backlog.maxLanes ${d.settings.maxLanes}), at most ${d.settings.maxStarts} start(s) a pass`);
     const day = dayReport(d.stateDir, d.settings, d.now());

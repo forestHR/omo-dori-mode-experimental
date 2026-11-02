@@ -396,6 +396,10 @@ export type BacklogSettings = {
   // {todo_id|id, title, status, approved_at, auto_applied, ...}; run at each sweep. An entry the owner approved by card
   // (auto_applied false) works within its own scope, any other only reads and drafts and asks before it writes
   readonly feedCommand: readonly string[];
+  // inbox row kinds that are the owner's own orders (YooDori: dashboard-order): each new row becomes an item at once; one that
+  // cannot start within orderWaitMin minutes goes back to the lead
+  readonly orderKinds: readonly string[];
+  readonly orderWaitMin: number;
   // "HH:MM" in timeZone: once a day after it, one backlog-day row in the lead's inbox (done, started, waiting on the owner)
   readonly dayReportAt: string;
   readonly timeZone: string;
@@ -582,7 +586,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
     proposalText: "Move {who} to a new session? {signals}. The handover note it would get: {note}{blockers}" },
   stateGit: { dirs: [], everyMin: 10, maxFileKb: 512, timeoutSec: 60, timeZone: "", backup: BACKUP_DEFAULTS },
   mergeGate: { repos: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
-  backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], dayReportAt: "", timeZone: "UTC" },
+  backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], orderWaitMin: 10, dayReportAt: "", timeZone: "UTC" },
   instances: [],
 });
 

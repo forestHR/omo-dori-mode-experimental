@@ -7,8 +7,8 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
-import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, instanceOf, itemLine, laneKeyOf, lastRun, listItems, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
-import { poolFree } from "./lead-limit.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
+import { poolFree, tailOf } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
 import { ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers } from "./handover.ts";
@@ -784,6 +784,11 @@ const ownerLinkProblem = async (url: string, maxAgeMs?: number): Promise<string 
   return undefined;
 };
 // dori backlog: a pass starts an item through the same launch as dori launch and tells the lead in its inbox
+const backlogInbox = (kind: string, id: string, content: string): void => {
+  const inbox = auditInbox();
+  mkdirSync(join(inbox, ".."), { recursive: true });
+  appendFileSync(inbox, `${JSON.stringify({ ts: new Date().toISOString(), id, kind, content })}\n`);
+};
 const backlogDeps = (): TickDeps => ({
   stateDir: config.stateDir,
   settings: config.backlog,
@@ -810,7 +815,16 @@ const backlogDeps = (): TickDeps => ({
   },
   host: { dir: config.backlog.hostDir, user: userInfo().username, instance: instanceOf(config.stateDir), max: config.backlog.hostMaxLanes },
   intake: async (sweep) => {
-    if (!sweep || !config.backlog.feedCommand.length) return [];
+    // the owner's orders every tick, from the last 2 MB of the inbox (new rows are at its end)
+    const rows = (): InboxRow[] => (existsSync(auditInbox()) ? tailOf(auditInbox(), 2 * 1024 * 1024) : "").split("\n").flatMap((line): InboxRow[] => {
+      try {
+        return line.trim().startsWith("{") ? [JSON.parse(line) as InboxRow] : [];
+      } catch {
+        return [];
+      }
+    });
+    const orders = orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows, now: realClock.now, inbox: backlogInbox });
+    if (!sweep || !config.backlog.feedCommand.length) return orders;
     const feed = async (): Promise<{ readonly todos: readonly FeedTodo[] } | { readonly why: string }> => {
       const r = await run(config.backlog.feedCommand.map((p) => p.replace(/^~(?=\/)/, homedir())), { timeoutMs: 120_000 });
       if (r.code !== 0) return { why: (r.err || r.out).trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code}` };
@@ -822,13 +836,9 @@ const backlogDeps = (): TickDeps => ({
         return { why: "the output is not JSON" };
       }
     };
-    return feedIntake({ stateDir: config.stateDir, settings: config.backlog, feed, now: realClock.now });
+    return [...orders, ...(await feedIntake({ stateDir: config.stateDir, settings: config.backlog, feed, now: realClock.now }))];
   },
-  inbox: (kind, id, content) => {
-    const inbox = auditInbox();
-    mkdirSync(join(inbox, ".."), { recursive: true });
-    appendFileSync(inbox, `${JSON.stringify({ ts: new Date().toISOString(), id, kind, content })}\n`);
-  },
+  inbox: backlogInbox,
 });
 // every thread status change goes through this queue: coalesced, retried after a 429, decided by the open cards and
 // the lanes still working in the thread
