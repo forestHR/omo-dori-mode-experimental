@@ -8,7 +8,6 @@ import { agentGone, firstTurnRuns, GOAL_WAIT, goalReader, lastLines, noGoalWhy }
 import { AGENT, argvSessionId, descendants, ended, hasSessionSelector, procTable, sessionDirFor, shellPidOf } from "./session-id.ts";
 import { leadReplies } from "./lead-limit.ts";
 import { readScreen, sendVerified } from "./panes.ts";
-import { turnRunning } from "./submit.ts";
 import { hasThread, LANE_KEY, type Lane, NO_THREAD, threadRefProblem } from "./registry.ts";
 import { areaLabel, type AreaQuery, areaSignals, pastSignalsSection, tagsOf } from "./lane-signals.ts";
 import { iso } from "./run.ts";
@@ -95,10 +94,13 @@ const STARTUP_FAILURE = /Cannot find module|All fallback models failed|No API ke
 // without an error (a resumed session's older replies say nothing about this start).
 const OWN_ERROR = /^ ?(?:error:|All \S+ accounts for \S+ are currently blocked|The \S+ account usage limit has been reached|Pane is dead)/i;
 
+// omo draws its running-turn mark ("── • Working (4s • esc to interrupt) ──") on the border right above the ❯ line;
+// the status lines under the box may quote the words (a session title), so only the lines just above the ❯ are read
 export const startupFailure = (screen: string, answered = false): string | undefined => {
-  if (answered || turnRunning(screen)) return undefined;
   const lines = screen.split("\n");
   const box = lines.findLastIndex((l) => l.trimStart().startsWith("❯"));
+  const running = box >= 0 && lines.slice(Math.max(0, box - 3), box).some((l) => l.toLowerCase().includes(BUSY_MARK));
+  if (answered || running) return undefined;
   for (const [i, line] of lines.entries()) {
     const own = box < 0 || i < box ? OWN_ERROR.test(line) : line.startsWith("Pane is dead");
     const bad = own ? STARTUP_FAILURE.exec(line) : null;

@@ -1268,6 +1268,8 @@ test("startup failure scope: the agent's own failures stay STARTUP_ERROR: no API
     ["f3", [" say hi", ' Error: 429: {"message":"Rate limit reached for requests","type":"rate_limit_exceeded"}', "── ⠧ The model provider may be having trouble. Retrying... (2/5, in 1s; esc to cancel) ──", "❯ ", "────"].join("\n"), "Rate limit"],
     ["f4", [" All Claude accounts for anthropic-subscription are currently blocked (rate limit or auth errors).", "  Soonest automatic retry: 2026-01-01T13:00:00.000Z.", BOX].join("\n"), "rate limit"],
     ["f5", [BOX, "", "Pane is dead (status 1, Thu Jan  1 12:00:20 2026)"].join("\n"), "Pane is dead"],
+    // a session title in the status lines that quotes the running-turn mark is no running turn
+    ["f6", [' Error: 429: {"message":"Rate limit reached for requests"}', BOX, "/tmp/w • Fix esc to interrupt indicator • 40K/1M (4.0%)"].join("\n"), "Rate limit"],
   ];
   for (const [key, screen, word] of cases) expect(await scoped(key, screen)).toBe(`STARTUP_ERROR ${key} aoe_${key}_${NEW_AOE_ID.slice(0, 8)}: ${word}`);
 });
