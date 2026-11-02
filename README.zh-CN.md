@@ -95,7 +95,7 @@ dori launch fix-login --title "Fix login" --brief ~/.dori/briefs/fix-login.md \
   --done "merged acme/app#412" --thread discord:100000000000000001
 ```
 
-herdr 打开标签页。aoe 运行 `aoe add <cwd> -t <key> --tool <tool> -l --extra-args "--model <model>"`,最多等待三分钟让智能体显示 `❯` 提示符，再输入 lane 提示词。启动失败会输出 `STARTUP_ERROR`。登记表中的 pane 是 `aoe_fix-login_1a2b3c4d` 这样的 tmux 会话名；aoe 会拒绝已有的标题/路径组合，即使它还在回收站中。
+herdr 打开标签页。aoe 运行 `aoe add <cwd> -t <key> --tool <tool> -l --extra-args "--model <model>"`,最多等待三分钟让智能体显示 `❯` 提示符，再输入 lane 提示词。启动失败会输出 `STARTUP_ERROR`;使用 aoe 时，若输入 lane 提示词 20 秒后既看不到正在运行的回合也看不到 `❯` 提示符，则输出带最后几行的 `STARTUP_UNCONFIRMED`(exit 3)。登记表中的 pane 是 `aoe_fix-login_1a2b3c4d` 这样的 tmux 会话名；aoe 会拒绝已有的标题/路径组合，即使它还在回收站中。
 
 footer 要求 lane 向 lead 发送 `[REPORT] <key> | <milestone|blocker|question|done> | <text>`。aoe 用两个 argv 数组发送，不经过 shell 字符串:
 

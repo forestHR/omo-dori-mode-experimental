@@ -241,6 +241,29 @@ test("an aoe pane's session id is omo's --session-id under the tmux pane pid", a
   expect(world.calls).toContainEqual(["tmux", "display-message", "-p", "-t", `=${PANE}:`, "#{pane_pid}"]);
 });
 
+// ported from dori-superagent 40034ad (#7): no failure word is not a start; the agent has to show it runs
+const after20s = (deps: ReturnType<typeof at>, then: () => void) => ({ ...deps, clock: { ...deps.clock, sleep: async (ms: number) => { if (ms === 20_000) then(); } } });
+
+test("a lane whose screen shows no running turn and no prompt 20 s after its prompt is STARTUP_UNCONFIRMED with its last lines", async () => {
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# brief\n");
+  const deps = after20s(at(T0), () => {
+    world.screen = "Do you trust the files in /home/test/work?\n  1. Trust (this session only)\n  2. Exit";
+  });
+  const r = await launchLane(deps, { noThread: "test lane", key: "smoke", title: "smoke", brief, done: "file /tmp/ok", cwd: "/tmp/w" });
+  expect(r.startup).toBe(`STARTUP_UNCONFIRMED smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}: no running turn and no ❯ prompt on screen; last lines: Do you trust the files in (local path) / 1. Trust (this session only) / 2. Exit`);
+});
+
+test("a lane whose session ended within 20 s of its prompt is a STARTUP_ERROR, though no failure word shows", async () => {
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# brief\n");
+  const base = at(T0);
+  let ended = false;
+  const deps = { ...after20s(base, () => { ended = true; world.screen = ""; }), run: async (argv: readonly string[], o?: Parameters<typeof base.run>[1]) => (ended && argv[1] === "has-session" ? { code: 1, out: "", err: "can't find session" } : base.run(argv, o)) };
+  const r = await launchLane(deps, { noThread: "test lane", key: "smoke", title: "smoke", brief, done: "file /tmp/ok", cwd: "/tmp/w" });
+  expect(r.startup).toBe(`STARTUP_ERROR smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}: the tmux session is gone`);
+});
+
 test("an aoe pane resumed with --session <session file> gets the uuid from the file name, not the path", async () => {
   const file = "/home/u/.omo/agent/sessions/--home-u-Documents-kakaodori--/2026-10-08T13-31-43-234Z_01a11bb6-6f02-7f43-932d-4f19bae69e1c.jsonl";
   const table = [{ pid: 10, ppid: 1, cmd: "/bin/bash /tmp/aoe-pane-env-fLuABz" }, { pid: 11, ppid: 10, cmd: `/home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js --extension /x/plugin --session ${file}` }];

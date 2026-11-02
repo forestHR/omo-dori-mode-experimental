@@ -95,7 +95,7 @@ dori launch fix-login --title "Fix login" --brief ~/.dori/briefs/fix-login.md \
   --done "merged acme/app#412" --thread discord:100000000000000001
 ```
 
-herdr はタブを開きます。aoe は `aoe add <cwd> -t <key> --tool <tool> -l --extra-args "--model <model>"` を実行し、エージェントの `❯` プロンプトを最大 3 分待ってからレーンのプロンプトを入力します。起動失敗は `STARTUP_ERROR` になります。レジストリの pane は `aoe_fix-login_1a2b3c4d` のような tmux セッション名です。aoe は同じタイトル/パスの組み合わせがゴミ箱にある場合も拒否します。
+herdr はタブを開きます。aoe は `aoe add <cwd> -t <key> --tool <tool> -l --extra-args "--model <model>"` を実行し、エージェントの `❯` プロンプトを最大 3 分待ってからレーンのプロンプトを入力します。起動失敗は `STARTUP_ERROR` になります。aoe でレーンのプロンプトから 20 秒後に実行中のターンも `❯` プロンプトも見えなければ、最後の行とともに `STARTUP_UNCONFIRMED`(exit 3)になります。レジストリの pane は `aoe_fix-login_1a2b3c4d` のような tmux セッション名です。aoe は同じタイトル/パスの組み合わせがゴミ箱にある場合も拒否します。
 
 footer はレーンに `[REPORT] <key> | <milestone|blocker|question|done> | <text>` をリードへ送るよう指示します。aoe ではシェル文字列ではなく、2 つの argv 配列で送ります。
 

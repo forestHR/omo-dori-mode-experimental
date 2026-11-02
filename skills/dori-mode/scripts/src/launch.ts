@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { AoeError, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, target } from "./aoe.ts";
+import { AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
 import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { readScreen, sendVerified } from "./panes.ts";
@@ -460,9 +460,28 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   }
   if (opened.failure) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${opened.failure}` };
   await deps.clock.sleep(20_000);
-  const bad = STARTUP_FAILURE.exec(await readScreen(deps.run, deps.config.backend, opened.pane, 40));
-  return { lane, startup: bad ? `STARTUP_ERROR ${input.key} ${opened.pane}: ${bad[0]}` : `STARTUP_OK ${input.key} ${opened.pane}` };
+  const screen = await readScreen(deps.run, deps.config.backend, opened.pane, 40);
+  const bad = STARTUP_FAILURE.exec(screen);
+  if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${bad[0]}` };
+  if (deps.config.backend !== "aoe") return { lane, startup: `STARTUP_OK ${input.key} ${opened.pane}` };
+  return { lane, startup: await aoeStartup(deps, input.key, opened.pane, screen) };
 };
+
+// No failure word on screen is not a start (ported from dori-superagent 40034ad, #7, MIT,
+// https://github.com/sisyphuslabs/dori-superagent/commit/40034ad1a557b92a34aa1450565adcafd3352c96, with tmux and the
+// agent's own screen in place of herdr's agent_status): STARTUP_OK only when the session still runs and its agent shows a
+// running turn, a wake mark or its ❯ input line 20 s after the lane prompt; a session that ended is a STARTUP_ERROR, and
+// anything else is STARTUP_UNCONFIRMED with its last lines, for the lead to look at (exit 3 like an error).
+export const aoeStartup = async (deps: FlowDeps, key: string, pane: string, screen: string): Promise<string> => {
+  const life = await paneLife(deps.run, pane);
+  if (!life.live) return `STARTUP_ERROR ${key} ${pane}: ${life.how === "gone" ? "the tmux session is gone" : `the agent exited (status ${life.status})`}`;
+  const full = await readScreen(deps.run, "aoe", pane);
+  const shows = [screen, full].some((s) => s.toLowerCase().includes(BUSY_MARK) || WAKE_MARKS.some((m) => s.includes(m)) || inputLine(s) !== undefined);
+  return shows ? `STARTUP_OK ${key} ${pane}` : `STARTUP_UNCONFIRMED ${key} ${pane}: no running turn and no ❯ prompt on screen; last lines: ${lastLines(full || screen)}`;
+};
+
+const lastLines = (screen: string): string =>
+  screen.split("\n").map((s) => s.trim()).filter(Boolean).slice(-3).join(" / ").replace(/\/(Users|home|Volumes|private|tmp)\/\S+/g, "(local path)").slice(0, 240) || "(blank)";
 
 type Opened = { readonly pane: string; readonly tab?: string; readonly failure?: string };
 

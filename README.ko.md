@@ -95,7 +95,7 @@ dori launch fix-login --title "Fix login" --brief ~/.dori/briefs/fix-login.md \
   --done "merged acme/app#412" --thread discord:100000000000000001
 ```
 
-herdr는 탭을 엽니다. aoe는 `aoe add <cwd> -t <key> --tool <tool> -l --extra-args "--model <model>"`을 실행하고, 에이전트의 `❯` 프롬프트를 최대 3분 기다린 다음 레인 프롬프트를 입력합니다. 시작 실패는 `STARTUP_ERROR`로 나옵니다. 레지스트리의 pane은 `aoe_fix-login_1a2b3c4d` 같은 tmux 세션 이름이며, aoe는 휴지통에 있는 경우에도 같은 제목/경로 조합을 거부합니다.
+herdr는 탭을 엽니다. aoe는 `aoe add <cwd> -t <key> --tool <tool> -l --extra-args "--model <model>"`을 실행하고, 에이전트의 `❯` 프롬프트를 최대 3분 기다린 다음 레인 프롬프트를 입력합니다. 시작 실패는 `STARTUP_ERROR`로 나옵니다. aoe에서 레인 프롬프트 20초 뒤에도 진행 중인 턴도 `❯` 프롬프트도 보이지 않으면 마지막 줄과 함께 `STARTUP_UNCONFIRMED`(exit 3)가 나옵니다. 레지스트리의 pane은 `aoe_fix-login_1a2b3c4d` 같은 tmux 세션 이름이며, aoe는 휴지통에 있는 경우에도 같은 제목/경로 조합을 거부합니다.
 
 footer는 레인이 `[REPORT] <key> | <milestone|blocker|question|done> | <text>`를 리드에게 보내도록 안내합니다. aoe에서는 셸 문자열 대신 argv 배열 두 개로 보냅니다.
 
