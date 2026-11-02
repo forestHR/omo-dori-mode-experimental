@@ -7,8 +7,8 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
-import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
-import { poolFree, tailOf } from "./lead-limit.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
+import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
 import { ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers } from "./handover.ts";
@@ -815,15 +815,10 @@ const backlogDeps = (): TickDeps => ({
   },
   host: { dir: config.backlog.hostDir, user: userInfo().username, instance: instanceOf(config.stateDir), max: config.backlog.hostMaxLanes },
   intake: async (sweep) => {
-    // the owner's orders every tick, from the last 2 MB of the inbox (new rows are at its end)
-    const rows = (): InboxRow[] => (existsSync(auditInbox()) ? tailOf(auditInbox(), 2 * 1024 * 1024) : "").split("\n").flatMap((line): InboxRow[] => {
-      try {
-        return line.trim().startsWith("{") ? [JSON.parse(line) as InboxRow] : [];
-      } catch {
-        return [];
-      }
-    });
-    const orders = orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows, now: realClock.now });
+    // the owner's orders every tick, from where the last pass stopped reading the inbox (kept once they are taken)
+    const inbox = inboxReader(config.stateDir, auditInbox());
+    const orders = orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows: inbox.rows, now: realClock.now });
+    inbox.commit();
     if (!sweep || !config.backlog.feedCommand.length) return orders;
     const feed = async (): Promise<{ readonly todos: readonly FeedTodo[] } | { readonly why: string }> => {
       const r = await run(config.backlog.feedCommand.map((p) => p.replace(/^~(?=\/)/, homedir())), { timeoutMs: 120_000 });

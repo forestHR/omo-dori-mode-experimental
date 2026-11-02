@@ -8,7 +8,7 @@
 // The idea is dori-superagent's hourly loop (#23, https://github.com/sisyphuslabs/dori-superagent/pull/23, MIT), rewritten
 // here for aoe and dori launch: no GitHub issue import (owner 2026-11-02 23:14 KST "github 이슈는 필요없고"), the start goes
 // through the same launch as the lead's (directives, eight steps, work thread), and it never merges, pushes or closes.
-import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
@@ -361,7 +361,8 @@ export const hostReserve = async (h: HostSlots, key: string, now: number): Promi
   }
 };
 
-type Cursor = { readonly ordersFrom?: string; readonly dayReported?: string };
+// inbox: where the backlog's inbox reading stopped, the file's inode and the byte after the last whole line the intakes took
+type Cursor = { readonly ordersFrom?: string; readonly dayReported?: string; readonly inbox?: { readonly ino: number; readonly at: number } };
 const readCursor = (stateDir: string): Cursor => (existsSync(cursorFile(stateDir)) ? (JSON.parse(readFileSync(cursorFile(stateDir), "utf8")) as Cursor) : {});
 const writeCursor = (stateDir: string, patch: Cursor): void => writeAtomic(cursorFile(stateDir), JSON.stringify({ ...readCursor(stateDir), ...patch }));
 // the approved follow-up of a feed draft: "appr-" in place of the feed's "todo-", a name no feed entry can take, the
@@ -558,6 +559,51 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
 export type InboxRow = { readonly id: string; readonly ts?: string; readonly kind?: string | null; readonly content?: string | null; readonly url?: string; readonly order?: number; readonly todo_id?: string };
 
 // the item an inbox row becomes: an owner's order under its own row id
+const INBOX_FIRST_BYTES = 2 * 1024 * 1024;
+const INBOX_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The inbox rows the backlog has not read yet, from where its last pass stopped (an append position, never a tail window: a
+ * row is not lost however much else was written while the backlog did not run). commit() keeps the position only after the
+ * intakes took the rows, so a pass cut off between reads them again and they are taken once by their ids. The very first
+ * read starts at the last 2 MB (rows before the intakes' starts are not theirs anyway); a new or shorter file (rotated) is
+ * read from its start; a line not yet ended is left for the next pass; a pass reads 8 MB at most (or the one longer line).
+ */
+export const inboxReader = (stateDir: string, file: string): { readonly rows: () => readonly InboxRow[]; readonly commit: () => void } => {
+  let read: { readonly rows: InboxRow[]; readonly ino: number; readonly at: number } | undefined;
+  const load = (): { readonly rows: InboxRow[]; readonly ino: number; readonly at: number } => {
+    if (read) return read;
+    if (!existsSync(file)) return (read = { rows: [], ino: 0, at: 0 });
+    const st = statSync(file);
+    const cur = readCursor(stateDir).inbox;
+    const from = cur === undefined ? Math.max(0, st.size - INBOX_FIRST_BYTES) : cur.ino !== st.ino || cur.at > st.size ? 0 : cur.at;
+    const fd = openSync(file, "r");
+    try {
+      for (let len = Math.min(INBOX_CHUNK_BYTES, st.size - from); ; len = Math.min(len * 2, st.size - from)) {
+        const buf = Buffer.alloc(len);
+        const n = readSync(fd, buf, 0, len, from);
+        const end = buf.subarray(0, n).lastIndexOf(10);
+        if (end < 0 && from + n < st.size) continue;
+        const text = end < 0 ? "" : buf.subarray(0, end + 1).toString("utf8");
+        const rows = text.split("\n").flatMap((line): InboxRow[] => {
+          try {
+            return line.trim().startsWith("{") ? [JSON.parse(line) as InboxRow] : [];
+          } catch {
+            return [];
+          }
+        });
+        return (read = { rows, ino: st.ino, at: from + end + 1 });
+      }
+    } finally {
+      closeSync(fd);
+    }
+  };
+  return { rows: () => load().rows, commit: () => {
+    const { ino, at } = load();
+    writeCursor(stateDir, { inbox: { ino, at } });
+  } };
+};
+
 export const rowItemId = (rowId: string): string => rowId.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+/, "").slice(0, 61);
 
 export const orderBrief = (row: InboxRow, text: string): string => [

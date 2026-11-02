@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, type InboxRow, orderIntake, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
+import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, inboxReader, type InboxRow, orderIntake, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 import { briefGaps, COMMON_LEDGER, loadLedger } from "../src/directives.ts";
@@ -838,6 +838,53 @@ test("a feed list with a bad entry is not read at all, and a failing intake neve
 const orderRow = (n: number, ts: string, todo = "pb-0123456789ab-1"): InboxRow => ({ ts, id: `dashboard-order-${n}`, kind: "dashboard-order", order: n, todo_id: todo, url: `https://board/#order/${n}`, content: `[대시보드 지시 #${n}] 이거 한거 아니야?\n관련: 할 일 「보안교육」 (id ${todo})\n형이 대시보드에 쓴 지시다. 할 일·일정·메일 일이면 유돌이 바로 처리하고, 나머지는 도리 방에 넘긴다. 진행은 order-status로 적는다.` });
 const orderSettings = { ...SETTINGS, orderKinds: ["dashboard-order"] };
 const orderPass = (list: InboxRow[]) => orderIntake({ stateDir: state, settings: orderSettings, rows: () => list, now: () => now });
+
+// a pass as the dori-lanes loop runs it: the inbox file read from where the last pass stopped, kept once the orders are taken
+const inboxFile = (): string => join(root, "inbox.jsonl");
+const filePass = (): string[] => {
+  const inbox = inboxReader(state, inboxFile());
+  const lines = orderIntake({ stateDir: state, settings: orderSettings, rows: inbox.rows, now: () => now });
+  inbox.commit();
+  return lines;
+};
+const otherRows = (bytes: number): string => {
+  const one = `${JSON.stringify({ ts: "2026-11-02T16:00:00.000Z", id: "watch-x", kind: "watch", content: "x".repeat(900) })}\n`;
+  return one.repeat(Math.ceil(bytes / one.length));
+};
+
+test("an order the backlog has not read is taken behind more than 2 MB of other inbox rows written while it did not run, and read once", () => {
+  // Given: the start is set; then an order comes in, and 3 MB of other rows after it before the next pass
+  writeFileSync(inboxFile(), otherRows(64 * 1024));
+  filePass();
+  appendFileSync(inboxFile(), `${JSON.stringify(orderRow(70, new Date(now + 60_000).toISOString()))}\n`);
+  appendFileSync(inboxFile(), otherRows(3 * 1024 * 1024));
+  // When
+  const lines = filePass();
+  const again = filePass();
+  // Then
+  expect(lines).toEqual([expect.stringMatching(/^BACKLOG_INTAKE dashboard-order-70 \(owner order\)/)]);
+  expect(readItem(state, "dashboard-order-70")?.status).toBe("open");
+  expect(again).toEqual([]);
+});
+
+test("the inbox read leaves a line not yet ended for the next pass, and reads a new (rotated) inbox file from its start", () => {
+  // Given: the start is set; then half of an order's line is written
+  writeFileSync(inboxFile(), "");
+  filePass();
+  const line = `${JSON.stringify(orderRow(71, new Date(now + 60_000).toISOString()))}\n`;
+  appendFileSync(inboxFile(), line.slice(0, 40));
+  // When: a pass, the line is ended, a pass; then the file is replaced by a new one holding another order, a pass
+  const half = filePass();
+  appendFileSync(inboxFile(), line.slice(40));
+  const whole = filePass();
+  writeFileSync(join(root, "inbox.new"), `${JSON.stringify(orderRow(72, new Date(now + 120_000).toISOString()))}\n`);
+  renameSync(join(root, "inbox.new"), inboxFile());
+  const rotated = filePass();
+  // Then
+  expect(half).toEqual([]);
+  expect(whole.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-71"]);
+  expect(rotated.map((l) => l.split(" ")[1])).toEqual(["dashboard-order-72"]);
+});
 
 test("the owner's orders (backlog.orderKinds) become items at once; rows before the first pass stay the lead's", () => {
   // Given: an order before the first pass
