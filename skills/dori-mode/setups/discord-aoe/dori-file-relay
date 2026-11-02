@@ -4,7 +4,7 @@
     dori-file-relay [--replace] <from> <file> <to> [dest]    one file, by hand
     dori-file-relay --serve [--cycles N]                     the delivery service (unit dori-file-relay)
 
-Runs as the account that may sudo -n -u every other Dori account on the host (godori/GoDori on ori0a83 since
+Runs as the account that may sudo -n -u every other Dori account on the host (soodori/SooDori on ori0a83 since
 2026-11-03, before that oriclaw/ZzangDori; its own account needs no sudo) and uses only those rights; no new root, sudo or firewall rule. Accounts: DORI_FILE_RELAY_DORIS (below) or oriclaw okdori moodori
 yoodori gongdori.
 
