@@ -1308,6 +1308,8 @@ class Gate:
             # The owner's ✅ on the batch card is the proof for its listed writes, for a day after it.
             batch = self.open_batch(uid, headers["x-dori-batch"])
             proof = batch["owner_message"]
+            if batch.get("owner_todo"):
+                self.todo_facts[proof] = batch["owner_todo"]
         link = proof if proof is not None else await self.proof(headers)
         reasons = []
         api, op, snapshot = await self.policy(method, path, query, headers, body, reasons)
@@ -2069,6 +2071,12 @@ class Gate:
             if (method == "POST" and route == f"/channels/{entry['channel']}/messages/bulk-delete"
                     and entry["message"] in [str(m) for m in json_object(body).get("messages", [])]):
                 raise Refused("card-protected")
+        # No client removes another account's reaction, on any message: the owner's ⛔ on a dashboard todo card is
+        # a refusal the gate reads at each write (X-Dori-Owner-Todo), before first use and after a restart alike.
+        # Removing its own reaction (@me) stays allowed.
+        reaction = re.fullmatch(r"/channels/\d+/messages/\d+/reactions(/[^/]+)?(/[^/]+)?", route)
+        if method == "DELETE" and reaction and reaction[2] != "/@me":
+            raise Refused("reaction-removal-not-allowed")
         if method not in READS:
             allowed = self.config.get("discord_url_allow", DISCORD_URL_ALLOW)
             for text in message_texts(headers, body):

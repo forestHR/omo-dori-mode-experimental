@@ -194,7 +194,9 @@ returning `202` with a card link. The gate posts short Korean cards (kind, recip
 (`내용: <file> 공유(보기)`; an unreadable name says so with the file id), so the card alone tells who gets what. Only the owner's non-bot reaction counts. Cancel wins over approve.
 Cards expire after 24 hours. Missing/tampered cards never execute. A SHA-256
 content check precedes reactions. Clients cannot edit/delete pending cards or
-add/remove their reactions through the Discord port.
+add/remove their reactions through the Discord port. On any message, a client may remove only its own reaction
+(`@me`); removing another account's reaction, all reactions of an emoji or all reactions is
+`403 reaction-removal-not-allowed`, so the owner's ⛔ on a dashboard todo card stays for the todo proof.
 
 Each card lives in a thread, and its result is written on the card there. A request
 written inside a thread under the approval channel keeps its card in that thread; one

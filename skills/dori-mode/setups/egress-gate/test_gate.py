@@ -1624,6 +1624,35 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         row = self.changes()[0]
         self.assertEqual((row["owner_todo"]["id"], row["approved_by"]), (TODO, entry["card"]))
 
+    async def test_no_client_removes_the_owners_reaction_on_a_todo_card(self):
+        # The owner's ⛔ on a dashboard todo card must stay for the gate to read; the card is not one of the gate's.
+        self.reactions[("3001", quote("⛔"))] = [{"id": "1", "bot": False}]
+        card = "/api/v10/channels/30/messages/3001/reactions"
+        for suffix in ("/%E2%9B%94/1", "/%E2%9B%94", "", "/%E2%9B%94/%401"):
+            with self.subTest(suffix):
+                status, body = await self.request("DELETE", card + suffix, port="discord",
+                                                  headers={"authorization": "Bot MTIz.fake.fake"})
+                self.assertEqual((status, json.loads(body)["error"]), (403, "reaction-removal-not-allowed"))
+        self.assertFalse([r for r in self.seen if r[0] == "DELETE"])
+        for suffix in ("/%E2%9B%94/@me", "/%E2%9B%94/%40me"):
+            status, _ = await self.request("DELETE", card + suffix, port="discord",
+                                           headers={"authorization": "Bot MTIz.fake.fake"})
+            self.assertEqual(status, 200)
+        self.assertEqual(json.loads((await self.todo_request())[1])["error"], "owner-todo-required")
+
+    async def test_a_todo_backed_batch_keeps_the_todo_in_its_journal_after_a_restart(self):
+        self.approval()
+        status, body = await self.request("POST", "/_gate/batch", proof=False, headers={"x-dori-owner-todo": TODO},
+                                          data={"title": "도리집 정리", "items": self.batch_items()})
+        answer = json.loads(body)
+        self.assertEqual((status, self.service.batch(answer["batch"])["owner_todo"]["id"]), (202, TODO))
+        self.react(self.service.batch(answer["batch"])["message"])
+        await self.service.poll_approvals()
+        self.service.todo_facts.clear()  # as after a restart: the batch record carries the todo
+        self.assertEqual((await self.batch_folder(answer["batch"]))[0], 200)
+        row = self.changes()[-1]
+        self.assertEqual((row["owner_todo"]["id"], row["batch"]), (TODO, answer["batch"]))
+
     async def test_owner_message_wins_over_a_dashboard_order(self):
         status, _ = await self.request(headers={"x-dori-owner-order": "17"})
         self.assertEqual(status, 200)
