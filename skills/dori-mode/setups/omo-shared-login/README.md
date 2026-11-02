@@ -1,7 +1,7 @@
 # omo shared login
 
 One omo login, kept by the source account (zzangdori, `oriclaw`), lent to the
-other Dori accounts on the same host (`okdori`, `moodori`, `yoodori`, `gongdori`). The
+other Dori accounts on the same host (`okdori`, `moodori`, `yoodori`, `gongdori`, `godori`). The
 accounts stay separate; only the login is shared. A lapsed login or a new
 account needs one login, on zzangdori, instead of one per Dori.
 
