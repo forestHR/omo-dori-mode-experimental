@@ -618,3 +618,45 @@ test("an item whose key another lane already holds is held, never started or tie
   expect(readItem(state, "todo-q1")?.status).toBe("open");
   expect(after.some((l) => l.startsWith("BACKLOG_DONE"))).toBe(false);
 });
+
+test("approval brings the todo as it is now: its changed content replaces the draft's scope in the brief the lane reads", async () => {
+  // Given: a draft about file A; the owner changes the todo to file B and approves it
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  await sweep([{ todo_id: "pb-343434343434-1", title: "파일 A 고치기", status: "진행" }]);
+  // When
+  await sweep([{ todo_id: "pb-343434343434-1", title: "파일 B 고치기", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
+  await backlogTick(deps(), { force: true });
+  const sent = readFileSync(join(state, "backlog", "launched", "todo-pb-343434343434-1.md"), "utf8");
+  // Then
+  const approval = sent.slice(sent.indexOf("## 형 승인"));
+  expect(approval).toContain("이 아래가 위의 목표·범위·끝난 상태를 대신한다");
+  expect(approval).toContain("파일 B 고치기");
+  expect(approval).toContain("[쓰기 범위]");
+  expect(launched).toEqual(["todo-pb-343434343434-1"]);
+});
+
+test("a draft the lead replaced with a plain brief still launches with the draft-only rule", async () => {
+  // Given
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  await feedIntake({ stateDir: state, settings, feed: async () => ({ todos: [{ todo_id: "pb-565656565656-1", title: "d", status: "진행" }] }), now: () => now });
+  addItem(state, { id: "todo-pb-565656565656-1", title: "d (고침)", brief, done: "file /tmp/x" }, { registered: false, at: "2026-11-02T16:00:00Z" });
+  // When
+  await backlogTick(deps(), { force: true });
+  // Then
+  expect(readFileSync(join(state, "backlog", "launched", "todo-pb-565656565656-1.md"), "utf8")).toContain("[넘으면 안 되는 선 - 초안만]");
+});
+
+test("a lane dori launch opened under the same key during a pass is never taken as the backlog's start", async () => {
+  // Given: while the pass admits the item, an ordinary launch registers the same key, and the backlog launch is refused
+  add("race1");
+  const d = deps({ launch: async (item) => {
+    lanes.push({ ...lane(item.id), openedAt: new Date(now + 1000).toISOString(), brief: "/elsewhere/brief.md" });
+    throw new StartRefused(`lane ${item.id} is already registered`);
+  } });
+  // When
+  const pass = await backlogTick(d);
+  // Then
+  expect(pass).toEqual(["BACKLOG_HELD race1: dori launch refused it: lane race1 is already registered"]);
+  expect(readItem(state, "race1")?.status).toBe("open");
+});

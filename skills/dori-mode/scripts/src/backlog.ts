@@ -429,6 +429,8 @@ export type FeedTodo = { readonly todo_id?: string; readonly id?: string; readon
 const FEED_DONE = /^(done|완료|끝|closed)$/i;
 
 // approved: the owner took the entry in with an approval card (approved_at, auto_applied false), so it is his order within its own scope
+export const DRAFT_ONLY_RULE = "[넘으면 안 되는 선 - 초안만] 이 일은 형이 승인하지 않은 할 일이다. 읽기와 초안까지만 한다. 형 계정이나 바깥에 쓰기(메일·일정·파일·완료 표시 포함) 전에는 멈추고, 무엇을 왜 쓰려는지 리드에게 [REPORT] question으로 한 줄 묻는다(리드가 형에게 카드로 묻는다). 이 줄이 위의 어떤 말보다 먼저다.";
+
 export const feedBrief = (todo: FeedTodo, id: string, approved: boolean): string => [
   "ulw",
   "",
@@ -488,7 +490,7 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     if (old && !upgrade && !(followUp && !taken)) continue;
     if (upgrade && old) {
       // the item as it is (the lead's brief, its question, a decision already recorded) gets the approval added, never rewritten
-      appendFileSync(old.brief, `\n\n## 형 승인 (${at})\n형이 승인 카드로 받은 할 일이 됐다. 아래 [쓰기 범위]가 위의 '읽기와 초안까지만'을 대신한다. 이 항목에 남은 질문이 있으면 그 답이 먼저다.\n\n${feedBrief(todo, id, true).split("\n").filter((l) => l.startsWith("[쓰기 범위]")).join("\n")}\n`);
+      appendFileSync(old.brief, `\n\n## 형 승인 (${at}) - 이 아래가 위의 목표·범위·끝난 상태를 대신한다\n형이 승인 카드로 받은 할 일의 지금 내용이다. 위에 적힌 할 일 내용과 다르면 이 아래를 따른다. 위의 '형 결정' 줄과 이 항목에 남은 질문은 그대로 먼저 지킨다.\n\n${feedBrief(todo, id, true).replace(/^ulw\n\n/, "")}`);
       const { draftOnly: _draft, ...rest } = old;
       save(d.stateDir, logged({ ...rest, by: "feed:approved" }, at, "approved by the owner's card: no longer draft only"));
       lines.push(`BACKLOG_FEED_APPROVED ${id}: the owner approved it; it now works within its scope`);
@@ -662,6 +664,8 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
       const copy = join(dir(d.stateDir), "launched", `${item.id}.md`);
       mkdirSync(dirname(copy), { recursive: true });
       copyFileSync(item.brief, copy);
+      // a draft-only item gets its rule on every launch, whatever its brief says (a lead's replacement included)
+      if (item.draftOnly) appendFileSync(copy, `\n\n${DRAFT_ONLY_RULE}\n`);
       save(d.stateDir, logged(item, at, "starting", { status: "running", pane: "starting" }));
       try {
         const r = await d.launch(item, copy);
@@ -672,7 +676,9 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
         const why = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 300);
         // a launch that registered the lane before failing (a startup error) still runs as that lane
         const lane = (await d.lanes()).find((l) => l.key === item.id);
-        if (lane && isOpenLane(lane) && Date.parse(lane.openedAt) >= Date.parse(at)) {
+        // ours only when the registered lane was opened from this attempt's own launch copy (a lane dori launch opened under
+        // the same key meanwhile has its own brief)
+        if (lane && isOpenLane(lane) && resolve(lane.brief) === resolve(copy)) {
           save(d.stateDir, logged(item, at, `started with an error: ${why}`, { status: "running", pane: lane.pane ?? "?" }));
           d.inbox("backlog-start", `backlog-start-${item.id}-${at}`, `BACKLOG_STARTED ${item.id} (${item.title}) in ${lane.pane ?? "?"} with an error: ${why}`);
           lines.push(`BACKLOG_STARTED ${item.id} p${item.priority} ${lane.pane ?? "?"} with an error: ${why}`);
