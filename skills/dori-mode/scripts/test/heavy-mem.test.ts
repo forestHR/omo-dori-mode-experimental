@@ -96,9 +96,10 @@ test("before a GPU job page cache is pushed out only when free memory is short, 
 
 test("the room maker touches memory up to its budget and lets it go, and touches none when that would cross the floor", async () => {
   const m = parseRoomInfo(readFileSync("/proc/meminfo", "utf8"))!;
-  // real memory, a little: 300M more free than now is wanted, at most 512M may be touched
+  // real memory, a little: 300M more free than now is wanted, at most 512M may be touched; on a shared host another
+  // process may free 300M first, and then the helper rightly touches none (review of #241)
   const r = await makeGpuRoom({ make: true, wantKb: m.freeKb + 300 * 1024, budgetKb: 512 * 1024, floorKb: 0, why: "" }, "test");
-  expect(r).toMatchObject({ ok: true, line: expect.stringMatching(/^pushed (256|512)M of cache out in [\d.]+s \(stop: (enough|budget)\): free \d+M -> \d+M, in 2M\+ blocks \d+M -> \d+M$/) });
+  expect(r).toMatchObject({ ok: true, line: expect.stringMatching(/^pushed (0|256|512)M of cache out in [\d.]+s \(stop: (enough|budget)\): free \d+M -> \d+M, in 2M\+ blocks \d+M -> \d+M$/) });
   const floor = await makeGpuRoom({ make: true, wantKb: m.freeKb + 1024 ** 2, budgetKb: 1024 ** 2, floorKb: m.availKb + 1024 ** 2, why: "" }, "test");
   expect(floor).toMatchObject({ ok: true, line: expect.stringMatching(/^pushed 0M of cache out in [\d.]+s \(stop: floor\)/) });
   // a --mem of 70.1G makes fractional kB; the helper still runs (it stops at the floor here, touching nothing)
