@@ -229,7 +229,7 @@ test("only omo's input box counts as unsent text: a transcript line above it doe
   expect(await sendVerified(at(T0).run, at(T0).clock, at(T0).config, PANE, "[LEAD] stuck text still here")).toBe(true);
   expect(enters()).toBe(1);
   world.screen = "❯ ";
-  world.stuckReads = SUBMIT_TIMING.clearPolls + 1; // the first read is the wait for the ❯ prompt
+  world.stuckReads = SUBMIT_TIMING.clearPolls + 2; // the first two reads are the box before typing and the wait for the ❯ prompt
   expect(await sendVerified(at(T0).run, at(T0).clock, at(T0).config, PANE, "[LEAD] stuck text still here")).toBe(true);
   expect(enters()).toBe(3);
 });

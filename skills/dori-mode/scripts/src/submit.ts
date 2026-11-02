@@ -16,6 +16,9 @@ export type PaneKeys = {
   // the main turn waits on its children sits in omo's input queue, undelivered, until that turn's prompt returns
   // (pingpong-analytics, 2026-10-31: three lead texts never reached its transcript)
   readonly delivered?: () => Promise<boolean>;
+  // deletes the input box's text before the cursor, one line per call (omo's ctrl+u; at a line start it joins the line
+  // above), so a text that was not submitted is not left behind for the next one to be typed after
+  readonly clear?: () => Promise<void>;
 };
 
 export type SubmitTiming = { readonly settleMs: number; readonly pollMs: number; readonly clearPolls: number; readonly busyPolls: number };
@@ -81,8 +84,24 @@ export const turnRunning = (screen: string): boolean => {
   return lines.slice(Math.max(0, inputBox(screen).top - 3)).some((line) => line.toLowerCase().includes(BUSY_MARK));
 };
 
+// A text the Enters did not submit stays in the box, and the next text typed there lands after it (dori-superagent issue
+// #13, https://github.com/sisyphuslabs/dori-superagent/issues/13, MIT: a stranded prompt held up every later one). Only
+// a box that was empty before this text is cleared: then all of it is ours, a paste-collapsed "[paste #1 ...]" too.
+const clearOwn = async (keys: PaneKeys, clock: Clock, timing: SubmitTiming, text: string, emptyBefore: boolean): Promise<string> => {
+  if (!keys.clear) return "left in the box";
+  if (!emptyBefore) return "left in the box: it held other text before this one";
+  // a line takes one press to empty and one more to join the line above: 2 per line, and 2 spare
+  for (let i = 0; i < 2 * text.split("\n").length + 2; i++) {
+    await keys.clear();
+    await clock.sleep(timing.pollMs);
+    if (!editorText(await keys.read())) return "cleared from the box";
+  }
+  return "could not be cleared from the box";
+};
+
 export const submitText = async (keys: PaneKeys, clock: Clock, text: string, timing: SubmitTiming = SUBMIT_TIMING): Promise<Submitted> => {
   const failed = (reason: string): Submitted => ({ status: "NOT_SUBMITTED", reason });
+  const emptyBefore = keys.clear ? !editorText(await keys.read()) : false;
   const typed = await keys.type(text);
   if (typed) return failed(typed);
   await clock.sleep(timing.settleMs); // let the agent take the whole text (a long one arrives as a paste) before Enter
@@ -98,7 +117,7 @@ export const submitText = async (keys: PaneKeys, clock: Clock, text: string, tim
     }
     if (!left) break;
   }
-  if (left) return failed(`text still in the input box after 2 Enters: ${left.slice(0, 60)}`);
+  if (left) return failed(`text still in the input box after 2 Enters: ${left.slice(0, 60)}; ${await clearOwn(keys, clock, timing, text, emptyBefore)}`);
   for (let poll = 0; poll < timing.busyPolls; poll++) {
     if (turnRunning(screen)) return { status: "SUBMITTED", reason: "input box empty and the turn runs" };
     if (steeringQueued(screen, text)) return { status: "SUBMITTED", reason: "input box empty and the text waits in the Steering queue" };
