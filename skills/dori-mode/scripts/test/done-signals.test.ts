@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { claimDone, watchTick } from "../src/done-flow.ts";
@@ -88,7 +88,8 @@ test("a QA-only lane's claim is re-checked at close time: the lane says done, bu
   const world = newWorld();
   const clock = fakeClock(Date.parse("2026-01-01T00:00:00Z"));
   const flag = join(state.dir, "qa-passed");
-  const deps = { ...depsFor(world, clock, state.dir), run, signalIo: { cwd: state.dir } };
+  // real git runs here, so it gets the real file system too: the fake one says every path, a .git too, exists
+  const deps = { ...depsFor(world, clock, state.dir), run, exists: existsSync, signalIo: { cwd: state.dir } };
   const lane = await adoptLane(deps, { key: "local-setup", title: "setup", brief: "/b.md", done: `command ["test","-f","${flag}"]`, pane: "w:p3", cwd: state.dir });
   await claimDone(deps, lane, "I ran the setup and it works");
   clock.at += 6 * 60_000;

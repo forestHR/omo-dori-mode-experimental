@@ -45,6 +45,6 @@ You get `[LEAD] not done: <reasons>; keep working, claim again when fixed` in yo
 
 - the Dori objects;
 - a `Done =` signal does not read back live;
-- there is unpushed work (the reason names the path).
+- there is unpushed work (the reason names the path): uncommitted tracked changes or commits no remote has, in the lane's own worktrees, or, for a lane that made none and works straight in its cwd, in that cwd checkout. A lane with its own worktree is not held by the human's checkout in its cwd, and a cwd that is no git checkout raises nothing.
 
 Fix every reason, then claim again. A new claim starts a fresh 5-minute window.

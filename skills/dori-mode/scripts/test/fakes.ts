@@ -12,6 +12,15 @@ export type World = {
   issueState: string;
   aheadCount: string;
   dirty: string;
+  // per checkout path (git -C <path>): its own status / ahead answer, over dirty and aheadCount
+  dirtyIn?: Record<string, string>;
+  aheadIn?: Record<string, string>;
+  // git worktree list --porcelain as the lane's repo prints it (default: /repo on main plus the lane's own worktree)
+  worktreeList?: string;
+  // false: the checked path is no git checkout, and every git -C there fails as git would
+  inGit?: boolean;
+  // set: git rev-parse fails with this stderr (a repository git cannot read, not a missing one)
+  revParseErr?: string;
   stuckReads: number;
   screen: string;
   screens: Record<string, string>;
@@ -86,9 +95,12 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   if (cmd === "tmux" && a1 === "ls") return ok(w.tmux.join("\n"));
   if (cmd === "tmux" && a1 === "display-message") return ok("10");
   if (cmd === "tmux") return ok();
-  if (cmd === "git" && argv.includes("worktree") && argv.includes("list")) return ok(`worktree /repo\nbranch refs/heads/main\n\nworktree ${WT}\nbranch refs/heads/demo-lane`);
-  if (cmd === "git" && argv.includes("status")) return ok(w.dirty);
-  if (cmd === "git" && argv.includes("rev-list")) return ok(w.aheadCount);
+  if (cmd === "git" && w.inGit === false) return { code: 128, out: "", err: "fatal: not a git repository (or any of the parent directories): .git" };
+  if (cmd === "git" && argv.includes("worktree") && argv.includes("list")) return ok(w.worktreeList ?? `worktree /repo\nbranch refs/heads/main\n\nworktree ${WT}\nbranch refs/heads/demo-lane`);
+  if (cmd === "git" && argv.includes("rev-parse") && w.revParseErr) return { code: 128, out: "", err: w.revParseErr };
+  if (cmd === "git" && argv.includes("rev-parse") && argv.includes("--is-inside-work-tree")) return ok("true\n");
+  if (cmd === "git" && argv.includes("status")) return ok(w.dirtyIn?.[argv[2] ?? ""] ?? w.dirty);
+  if (cmd === "git" && argv.includes("rev-list")) return ok(w.aheadIn?.[argv[2] ?? ""] ?? w.aheadCount);
   if (cmd === "git") return ok();
   if (cmd === "gh" && a1 === "pr") return ok(JSON.stringify({ state: w.prState, headRefOid: "f".repeat(40), mergedAt: w.prState === "MERGED" ? "2026-01-01T11:00:00Z" : null, mergeCommit: w.prState === "MERGED" ? { oid: "abc1234567890" } : null }));
   if (cmd === "gh" && a1 === "issue") return ok(JSON.stringify({ state: w.issueState }));
