@@ -141,9 +141,10 @@ test("entries with via stay in the ledger and in scope but go into a brief as th
   expect(dry.added).toContain("repo-rules");
   expect(dry.added).not.toContain("rule-a");
   expect(dry.message).not.toContain("규칙 A 원문");
-  // a retired pointer: the entries go in as their own texts again
-  const retired = { ...ledger, entries: ledger.entries.map((e) => (e.id === "repo-rules" ? { ...e, retired: "2026-10-21: test" } : e)) };
-  expect(briefGaps({ key: "p" }, fields, retired, "hr35-isaac", blocks).map((g) => g.id)).toEqual(expect.arrayContaining(["rule-a", "rule-b"]));
+  // a dropped directive is deleted, never kept as retired (it would apply again once the field is not read)
+  expect(ledgerProblems({ ...ledger, entries: ledger.entries.map((e) => (e.id === "repo-rules" ? { ...e, retired: "2026-10-21: test" } : e)) })).toEqual([
+    "directive repo-rules: retired is not kept; delete the entry and move its message ids to the source of the entry that replaced it, or to reviewed with a note",
+  ]);
   // via must name another inject entry with its own text
   const bad = (via: string) => ledgerProblems({ ...ledger, entries: ledger.entries.map((e) => (e.id === "rule-a" ? { ...e, via } : e)) });
   expect(bad("nope")).toEqual(["directive rule-a: via nope must name another inject entry with its own text and no via"]);

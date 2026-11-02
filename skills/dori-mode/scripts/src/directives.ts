@@ -61,8 +61,6 @@ export type Directive = {
   // require: regexes (multiline) the brief must all match
   readonly require?: readonly string[];
   readonly check?: LeadCheck;
-  // a retired directive stays on record and applies to nothing: "<date>: <why>"
-  readonly retired?: string;
   // an inject entry that stays on record and in scope, but goes into a brief as the pointer entry with this id (one text
   // that names where the rule is written, e.g. a repo's AGENTS.md); the pointer in a brief counts as this entry
   readonly via?: string;
@@ -297,6 +295,9 @@ export const ledgerProblems = (ledger: Ledger): string[] => {
     const at = `directive ${e.id || "(no id)"}`;
     if (!e.id || !/^[a-z0-9][a-z0-9-]*$/.test(e.id)) out.push(`${at}: id must be lowercase words with -`);
     if (!e.name) out.push(`${at}: no name`);
+    // a directive the owner dropped is deleted, not kept as retired: its message ids go to the source of the entry that
+    // replaced it, or to reviewed with a note, so dori directive-audit still counts his old message as handled
+    if ("retired" in e) out.push(`${at}: retired is not kept; delete the entry and move its message ids to the source of the entry that replaced it, or to reviewed with a note`);
     if (e.by !== "owner" && e.by !== "lead") out.push(`${at}: by must be owner or lead`);
     // the owner's words go into briefs as they are: a sentence cut short (… or ...) is a summary of them
     if (/…|\.\.\./.test(e.words ?? "")) out.push(`${at}: words cut with an ellipsis; put the whole sentences of his message, or none (by owner, no words: a decision on record)`);
@@ -408,7 +409,6 @@ export const scopeContext = (brief: string, ledger: Ledger, opts: { readonly ui?
 
 // Why a directive is in scope, or undefined when it is not.
 export const appliesWhy = (e: Directive, ctx: ScopeContext): string | undefined => {
-  if (e.retired) return undefined;
   const s = e.scope;
   if (s.all) return "all lanes";
   if (s.ui && ctx.ui) return ctx.uiFromText.length ? `UI work (${[...new Set(ctx.uiFromText)].slice(0, 3).join(", ")})` : "--ui";
@@ -436,18 +436,18 @@ export const hasDirective = (brief: string, e: Directive): boolean => {
   // [지침 <id>]: the tag of briefs launched before #72
   return b.includes(squash(directiveTag(e))) || b.includes(`[지침 ${e.id}]`) || (Boolean(own) && b.includes(squash(own)));
 };
-// The pointer that goes into a brief for an entry with via (undefined when it has none or the pointer is retired).
+// The pointer that goes into a brief for an entry with via (undefined when it has none).
 export const pointerOf = (e: Directive, ledger: Pick<Ledger, "entries">): Directive | undefined => {
   if (!e.via) return undefined;
   const p = ledger.entries.find((x) => x.id === e.via);
-  return p && !p.retired ? p : undefined;
+  return p;
 };
 // In the brief as its own text, or through its pointer; a pointer is also in a brief that already has every entry
 // naming it as their own texts (a lane launched before the pointer), so it is not sent on top of them.
 export const coveredBy = (brief: string, e: Directive, ledger: Pick<Ledger, "entries">): boolean => {
   const p = pointerOf(e, ledger);
   if (hasDirective(brief, e) || (p !== undefined && hasDirective(brief, p))) return true;
-  const named = ledger.entries.filter((x) => x.via === e.id && !x.retired);
+  const named = ledger.entries.filter((x) => x.via === e.id);
   return named.length > 0 && named.every((x) => hasDirective(brief, x));
 };
 export const requireMissing = (brief: string, e: Directive): string[] => (e.require ?? []).filter((re) => !new RegExp(re, "m").test(leadText(brief)));
@@ -469,7 +469,7 @@ export const textDirectives = (text: string, ledger: Ledger, opts: { readonly al
   const ctx = scopeContext(text, { ...ledger, minHits: 1 }, { repo: "" });
   const out: { e: Directive; why: string; rank: number }[] = [];
   for (const [i, e] of ledger.entries.entries()) {
-    if (e.mode === "require" || e.block || e.retired || (e.scope.all && !opts.all)) continue;
+    if (e.mode === "require" || e.block || (e.scope.all && !opts.all)) continue;
     const why = appliesWhy(e, ctx);
     if (!why) continue;
     const shown = e.mode === "inject" ? (pointerOf(e, ledger) ?? e) : e;
@@ -577,7 +577,7 @@ export const briefGaps = (lane: Pick<Lane, "key" | "directives" | "ui">, brief: 
 export const leadGaps = (lane: Pick<Lane, "key" | "thread" | "directives" | "noThread">, ledger: Ledger): Gap[] => {
   const waived = new Set((lane.directives?.waived ?? []).map((w) => w.id));
   return ledger.entries
-    .filter((e) => e.mode === "lead" && !e.retired && !waived.has(e.id) && e.check === "thread" && (!lane.thread || lane.thread === "none") && !lane.noThread)
+    .filter((e) => e.mode === "lead" && !waived.has(e.id) && e.check === "thread" && (!lane.thread || lane.thread === "none") && !lane.noThread)
     .map((e) => ({ lane: lane.key, id: e.id, line: `DIRECTIVE_LEAD ${lane.key} ${e.id}: ${e.name}: the lane was launched without a work thread (--thread)` }));
 };
 
@@ -586,7 +586,7 @@ type InboxRow = { ts?: string; id?: string; kind?: string; channel_id?: string; 
 // The owner's messages of the window that read like a standing directive and that no ledger entry cites as its source
 // (by message id) and the lead has not marked reviewed.
 export const unledgered = (inbox: string, ledger: Ledger, owner: string, since: string, guild = ""): Gap[] => {
-  if (!ledger.standing || !owner || !ledger.entries.some((e) => e.mode === "lead" && e.check === "ledger" && !e.retired)) return [];
+  if (!ledger.standing || !owner || !ledger.entries.some((e) => e.mode === "lead" && e.check === "ledger")) return [];
   const standing = new RegExp(ledger.standing, "i");
   const cited = ledger.entries.map((e) => e.source).join("\n");
   const out: Gap[] = [];
@@ -619,7 +619,6 @@ export const duplicated = (files: readonly { readonly path: string; readonly tex
   const places = new Set([...ledger.entries.map((e) => e.source).join("\n").matchAll(/channels\/(\d{15,})\/(\d{15,})\//g)].flatMap((m) => [m[1], m[2]]));
   const byMessage = new Map<string, Directive[]>();
   for (const e of ledger.entries) {
-    if (e.retired) continue;
     for (const id of new Set(e.source.match(/\d{15,}/g) ?? [])) if (!places.has(id)) byMessage.set(id, [...(byMessage.get(id) ?? []), e]);
   }
   const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -650,7 +649,7 @@ export const promptTable = (ledger: Ledger): string => {
   return [
     "| id | 형 원문 | 지침문 |",
     "|---|---|---|",
-    ...ledger.entries.filter((e) => e.by === "owner" && e.words && !e.retired).map((e) => `| ${e.id} | ${cell(e.words)} | ${cell(e.prompt ?? "(없음)")} |`),
+    ...ledger.entries.filter((e) => e.by === "owner" && e.words).map((e) => `| ${e.id} | ${cell(e.words)} | ${cell(e.prompt ?? "(없음)")} |`),
   ].join("\n");
 };
 
@@ -661,8 +660,8 @@ export const ledgerTable = (ledger: Ledger): string => {
   const how = (e: Directive) => (e.mode === "inject" ? (e.block ? `주입(${e.block})` : e.via ? `주입(포인터 ${e.via}로)` : "주입") : e.mode === "require" ? "브리프 확인(없으면 멈춤)" : e.check === "none" ? "리드 행동(기계 확인 없음, intent-check가 읽음)" : `리드 행동 확인(${e.check})`);
   const words = (e: Directive) => (e.words ? `"${e.words}"` : e.block ? `(블록 원문: ${e.block === "eight-steps" ? "references/sessions.md 1. 조사 … 8. 보고" : "references/ui-work.md [UI 지침] 1)…7)"})` : e.by === "lead" ? "-" : "(원문 없음)");
   return [
-    "| id | 이름 | 누가 | 판단 근거 | 형 원문(지침 문장) | 지침문(브리프에 들어감) | 계기가 된 형 말 | 규칙 | 날짜 | 출처 | 적용 범위 | 강제 방식 | 층 | 폐기 |",
-    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
-    ...ledger.entries.map((e) => `| ${e.id} | ${cell(e.name)} | ${e.by === "lead" ? "리드 규칙" : "형 지침"} | ${cell(e.basis ?? "")} | ${cell(words(e))} | ${cell(e.prompt ?? "")} | ${cell(e.trigger ? `"${e.trigger}"` : "")} | ${cell(e.rule ?? "")} | ${e.date} | ${cell(e.source)} | ${cell(scope(e.scope))} | ${how(e)} | ${e.layer === "common" ? "포크" : "로컬"} | ${cell(e.retired ?? "")} |`),
+    "| id | 이름 | 누가 | 판단 근거 | 형 원문(지침 문장) | 지침문(브리프에 들어감) | 계기가 된 형 말 | 규칙 | 날짜 | 출처 | 적용 범위 | 강제 방식 | 층 |",
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ...ledger.entries.map((e) => `| ${e.id} | ${cell(e.name)} | ${e.by === "lead" ? "리드 규칙" : "형 지침"} | ${cell(e.basis ?? "")} | ${cell(words(e))} | ${cell(e.prompt ?? "")} | ${cell(e.trigger ? `"${e.trigger}"` : "")} | ${cell(e.rule ?? "")} | ${e.date} | ${cell(e.source)} | ${cell(scope(e.scope))} | ${how(e)} | ${e.layer === "common" ? "포크" : "로컬"} |`),
   ].join("\n");
 };
