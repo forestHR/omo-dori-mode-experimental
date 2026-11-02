@@ -485,7 +485,8 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
       // the hold follows the source each sweep, apart from the content
       const item: BacklogItem = now.status !== "open" || Boolean(now.paused) === paused ? now : paused ? { ...now, paused: true } : (({ paused: _p, ...rest }) => rest)(now);
       if (item !== now) lines.push(`BACKLOG_FEED_${paused ? "PAUSED" : "RESUMED"} ${item.id}: ${paused ? "on hold on the source; not started until it is open again" : "open again on the source"}`);
-      let next: BacklogItem = item.feedHash === hash ? item : { ...item, feedSnapshot: snapshot, feedHash: hash };
+      // new content brings its title too, so the list, the start notice and the day report name what the lane works on
+      let next: BacklogItem = item.feedHash === hash ? item : { ...item, feedSnapshot: snapshot, feedHash: hash, title };
       if (item.status !== "open") {
         if (card && !next.approval) next = { ...next, approval: { at, hash, by: "card" } };
       } else if (item.feedHash !== undefined && item.feedHash !== hash && (item.approval || item.approvalAsk || item.ask)) {

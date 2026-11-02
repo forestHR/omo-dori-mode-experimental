@@ -907,3 +907,14 @@ test("an order's launch copy carries the four fields dori launch requires", asyn
   expect(gaps).not.toContain("four-fields");
   expect(sentBrief("dashboard-order-14")).toContain("[대시보드 지시 #14] 이거 한거 아니야?");
 });
+
+test("a todo renamed on the board is listed, started and reported under its new title", async () => {
+  // Given: todo 1 waits under its first title
+  await feedSweep([boardTodo("1", { title: "fix A" })]);
+  // When: the owner renames it, then a pass starts it
+  await feedSweep([boardTodo("1", { title: "fix B" })]);
+  await backlogTick(deps(), { force: true });
+  // Then
+  expect(readItem(state, "todo-pb-0123456789ab-1")?.title).toBe("fix B");
+  expect(rows.find((r) => r.kind === "backlog-start")?.content).toContain("(fix B, p6)");
+});
