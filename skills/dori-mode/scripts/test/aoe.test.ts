@@ -363,6 +363,34 @@ test("three idle watch reads in a row say LANE_NO_GOAL and tell the lead once; a
   expect(await watchWith("none", IDLE)).toEqual([]);
 });
 
+// PR #268 review r2: the status lines under omo's box hold a session title omo made from the prompt, the goal objective
+// and the cwd, so they can read "esc to interrupt"; omo's own mark is on the box's top border, right above the ❯ line
+const FOOTER = ["─".repeat(40), "❯ ", "─".repeat(40), " …/esc to interrupt • main • 40K/1M (4.0%)", "(OmO Native) Fix esc to interrupt indicator"];
+const FOOT_IDLE = ["working on it", ...FOOTER].join("\n");
+const FOOT_BUSY = ["reading the brief", `── • Working (3s • esc to interrupt) ${"─".repeat(20)}`, ...FOOTER.slice(1)].join("\n");
+
+test("pending goal footer scope: an idle first turn whose status lines read esc to interrupt is STARTUP_NO_GOAL", async () => {
+  world.screen = FOOT_IDLE;
+  const idle = await goalLaunch(["none"]);
+  expect(idle.startup).toStartWith(`STARTUP_NO_GOAL smoke ${pendingPane}: the agent runs but no goal in its session: its first turn ended 40 s after its prompt`);
+  expect(idle.read).toBe(3);
+});
+
+test("pending goal footer scope: the running-turn mark on the box's top border, with the same status lines, is STARTUP_PENDING_GOAL", async () => {
+  world.screen = FOOT_BUSY;
+  expect((await goalLaunch(["none"])).startup).toStartWith(`STARTUP_PENDING_GOAL smoke ${pendingPane}`);
+});
+
+test("pending goal footer scope: dori watch counts a pending lane idle while only its status lines read esc to interrupt: three reads say LANE_NO_GOAL", async () => {
+  await pendingLane();
+  expect(await watchWith("none", FOOT_IDLE)).toEqual([]);
+  expect(await watchWith("none", FOOT_BUSY)).toEqual([]);
+  expect((await at(T0).registry.read("smoke"))?.pendingGoal?.idle).toBe(0);
+  expect(await watchWith("none", FOOT_IDLE)).toEqual([]);
+  expect(await watchWith("none", FOOT_IDLE)).toEqual([]);
+  expect((await watchWith("none", FOOT_IDLE))[0]).toStartWith(`LANE_NO_GOAL smoke ${pendingPane}: its first turn ended with no goal in its session`);
+});
+
 test("a pending lane whose session is gone is left to the lane death check, never told as a missing goal", async () => {
   await pendingLane();
   world.screen = IDLE;

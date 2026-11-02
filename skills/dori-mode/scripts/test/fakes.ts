@@ -77,7 +77,10 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
     const screen = w.screens[pane] ?? w.screen;
     if (!w.started.includes(pane)) return ok(screen);
     w.started = w.started.filter((p) => p !== pane);
-    return ok(`${screen}\n${RUNNING}`);
+    // omo draws the running turn right above its input box, above the status lines under it
+    const lines = screen.split("\n");
+    const top = lines.flatMap((l, i) => (l.trimStart().startsWith("─") ? [i] : [])).at(-2);
+    return ok(top === undefined ? `${screen}\n${RUNNING}` : [...lines.slice(0, top), RUNNING, ...lines.slice(top)].join("\n"));
   }
   if (cmd === "tmux" && a1 === "send-keys" && argv.at(-1) === "Enter") w.started.push((argv[argv.indexOf("-t") + 1] ?? "").replace(/^=|:$/g, ""));
   if (cmd === "herdr" && a1 === "pane" && a2 === "send-keys" && argv.at(-1) === "enter") w.started.push(argv[3] ?? "");
