@@ -173,6 +173,28 @@ test("a fresh repository with no commit yet is checked for staged work, not call
   expect(await unpushedWork(realDeps, { ...lane, cwd: fresh })).toEqual([`unpushed work in ${fresh} (git state unreadable)`]);
 });
 
+test("a cwd checkout with no remote has nowhere to push: its commits pass, its uncommitted changes hold the lane; a branch with no upstream in a checkout with a remote still holds", async () => {
+  const realDeps = { ...at(T0), run, exists: existsSync, config: { ...at(T0).config, defaultCwd: state.dir } };
+  const g = async (...a: string[]) => expect((await run(["git", ...a])).code).toBe(0);
+  const docs = join(state.dir, "documents");
+  await g("init", "-q", "-b", "main", docs);
+  writeFileSync(join(docs, "AGENTS.md"), "one\n");
+  await g("-C", docs, "add", "AGENTS.md");
+  await g("-C", docs, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([]);
+  writeFileSync(join(docs, "AGENTS.md"), "two\n");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([`unpushed work in ${docs}`]);
+  // a remote exists, the branch was never pushed and has no upstream: its commit is still unpushed
+  const repo = join(state.dir, "cloned");
+  await g("init", "-q", "--bare", "-b", "main", join(state.dir, "origin.git"));
+  await g("clone", "-q", join(state.dir, "origin.git"), repo);
+  await g("-C", repo, "checkout", "-q", "-b", "topic");
+  writeFileSync(join(repo, "a.txt"), "one\n");
+  await g("-C", repo, "add", "a.txt");
+  await g("-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: repo })).toEqual([`unpushed work in ${repo}`]);
+});
+
 // git says "not a git repository" for a .git file pointing nowhere or a bad HEAD too: a .git entry makes it unreadable
 test.each(["fatal: bad config line 1 in file .git/config", "fatal: not a git repository: /repo/.git/worktrees/gone"])("a cwd with a .git git cannot read holds the lane as unreadable git state (%s)", async (err) => {
   world.worktreeList = cwdOnly;
