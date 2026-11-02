@@ -7,6 +7,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { configPath, envFilePath, loadConfig, loadEnvFile, resolveInstance } from "../../scripts/src/config.ts";
+import { newAttempt, noteUneyed, readUneyed } from "../../scripts/src/messenger/slack.ts";
 import type { LedgerThread } from "../../scripts/src/messenger/thread-ledger.ts";
 
 export type SlackWatchOptions = {
@@ -18,6 +19,8 @@ export type SlackWatchOptions = {
   readonly api: string;
   readonly inbox: string;
   readonly threads: string;
+  // the record of messages dori send slack answered and took the eyes off (noteUneyed in messenger/slack.ts)
+  readonly uneyed: string;
 };
 
 export const slackWatchOptions = (env: Record<string, string | undefined>, stateDir: string): SlackWatchOptions => ({
@@ -28,6 +31,7 @@ export const slackWatchOptions = (env: Record<string, string | undefined>, state
   api: env.DORI_SLACK_API?.trim() || "https://slack.com/api",
   inbox: env.DORI_DISCORD_INBOX?.trim() || join(stateDir, "discord", "inbox.jsonl"),
   threads: join(stateDir, "slack-threads.json"),
+  uneyed: join(stateDir, "slack-uneyed.log"),
 });
 
 // Why the watcher cannot run yet, or "" when both tokens are there. Only the prefix is checked, never printed whole.
@@ -67,6 +71,9 @@ export type WatchDeps = {
   readonly append: (row: Record<string, unknown>) => void;
   readonly log: (line: string) => void;
   readonly now: () => number;
+  // the record dori send slack shares (noteUneyed): whether a message was answered, and the watcher's own attempts
+  readonly answered?: (channel: string, ts: string) => boolean;
+  readonly note?: (fact: "answered" | "done", channel: string, ts: string, attempt: string) => void;
   // how long the eyes reaction may take before the message goes on without waiting for it
   readonly reactMs?: number;
 };
@@ -106,7 +113,10 @@ export class SlackWatch {
     try {
       // a stalled reactions.add must not hold this message's SLACK_MSG or the events queued behind it (review of #251)
       const call = this.deps.call("reactions.add", { channel, timestamp: ts, name: "eyes" });
-      call.catch(() => {}); // a late failure after the deadline has nobody to tell
+      // eyes that land after the answer already cleared them (a slow reactions.add past the deadline) come off again
+      // (the answer notes the message answered before it asks for the removal, so eyes landing after that removal always
+      // find the note)
+      call.then(() => (this.deps.answered?.(channel, ts) ? this.uneye(channel, ts, ms) : undefined), () => {}); // a late failure of reactions.add after the deadline has nobody to tell
       await Promise.race([call, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`slack reactions.add: no answer within ${ms / 1000}s`)), ms); })]);
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e);
@@ -120,6 +130,28 @@ export class SlackWatch {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // One removal attempt of its own in the shared record, opened before the request and closed only on Slack's answer:
+  // one that fails, stalls past ms or dies with this process stays open, so the next answer there asks again.
+  private async uneye(channel: string, ts: string, ms: number): Promise<void> {
+    const attempt = newAttempt();
+    this.deps.note?.("answered", channel, ts, attempt);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const call = this.deps.call("reactions.remove", { channel, timestamp: ts, name: "eyes" });
+      call.catch(() => {});
+      await Promise.race([call, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`slack reactions.remove: no answer within ${ms / 1000}s`)), ms); })]);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      if (!why.endsWith(": no_reaction")) {
+        this.deps.log(`SLACK_UNEYE_FAIL ${channel} ${ts} ${why}`);
+        return;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    this.deps.note?.("done", channel, ts, attempt);
   }
 
   async addressed(ev: SlackEvent): Promise<Addressed> {
@@ -159,8 +191,10 @@ export class SlackWatch {
       mentions_self: addressed === "mention" || addressed === "name",
       content,
     };
-    this.deps.append(row);
+    // the eyes go on before the row is written, so dori send slack, which reads the rows, never clears a message whose
+    // eyes are still on their way (only a reactions.add past the deadline can, and that one is taken off again above)
     if (addressed) await this.react(ev.channel, ev.ts);
+    this.deps.append(row);
     if (addressed) this.deps.log(`SLACK_MSG ${ev.channel} ${replyThread ?? "-"} ${addressed} ${author ?? ev.user}${row.author_kind === "owner" ? " (owner)" : ""}: ${content.slice(0, 160).replace(/\n/g, " ")}`);
     return row;
   }
@@ -278,7 +312,7 @@ export const startWatch = async (o: SlackWatchOptions, log: (line: string) => vo
   }
   const self = { userId: String(me.user_id ?? ""), botId: String(me.bot_id ?? "") };
   mkdirSync(dirname(o.inbox), { recursive: true, mode: 0o700 });
-  const watch = new SlackWatch(o, self, { call: bot, threads: readThreads(o.threads), append: (row) => appendFileSync(o.inbox, `${JSON.stringify(row)}\n`), log, now: Date.now, reactMs });
+  const watch = new SlackWatch(o, self, { call: bot, threads: readThreads(o.threads), append: (row) => appendFileSync(o.inbox, `${JSON.stringify(row)}\n`), log, now: Date.now, reactMs, answered: (channel, ts) => readUneyed(o.uneyed).answered.has(`${channel}:${ts}`), note: (fact, channel, ts, attempt) => noteUneyed(o.uneyed, fact, `${channel}:${ts}`, attempt) });
   log(`SLACK_WATCH_START team ${String(me.team ?? "?")} bot ${String(me.user ?? self.userId)}`);
   await runSocket(
     {
