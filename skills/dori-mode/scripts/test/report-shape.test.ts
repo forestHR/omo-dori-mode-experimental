@@ -40,3 +40,22 @@ test("a template line with ${...} or {name} in place of the plain line is not re
   expect(lastReportLine(shell, "demo-lane")).toBeNull();
   expect(lastReportLine(python, "demo-lane")).toBeNull();
 });
+
+// dori-superagent issue #29: the other template shapes - a report quoted after other words, and a bare $name or %s line
+test("a report quoted mid-line or a bare $name / %s template is not the lane's report; one first on its line or as an argv element is", () => {
+  const k = "demo-lane";
+  for (const fake of [
+    'echo "[REPORT] demo-lane | milestone | $message"',
+    'printf "[REPORT] demo-lane | milestone | %s\\n" "$x"',
+    "[REPORT] demo-lane | milestone | $message",
+    '[REPORT] demo-lane | milestone | "%s"',
+    "the footer says to send [REPORT] demo-lane | milestone | checks passed",
+  ]) expect(lastReportLine(fake, k)).toBeNull();
+  const real: [string, string][] = [
+    [" [REPORT] demo-lane | milestone | set $HOME in docs", "[REPORT] demo-lane | milestone | set $HOME in docs"],
+    ["[REPORT] demo-lane | done | 100% of checks green", "[REPORT] demo-lane | done | 100% of checks green"],
+    ['│ await run(["dori","type","aoe_lead_1","--text","[REPORT] demo-lane | milestone | PR open"])', "[REPORT] demo-lane | milestone | PR open"],
+    ['$ dori type aoe_lead_1 --text "[REPORT] demo-lane | blocker | CI red"', "[REPORT] demo-lane | blocker | CI red"],
+  ];
+  for (const [line, report] of real) expect(lastReportLine(line, k)).toBe(report);
+});
