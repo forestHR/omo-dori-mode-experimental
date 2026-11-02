@@ -195,6 +195,48 @@ test("a cwd checkout with no remote has nowhere to push: its commits pass, its u
   expect(await unpushedWork(realDeps, { ...lane, cwd: repo })).toEqual([`unpushed work in ${repo}`]);
 });
 
+test("a cwd checkout whose only remote is this Dori's stateGit backup has nowhere to push; a real remote besides is the one counted", async () => {
+  const base = at(T0).config;
+  const withRepo = (repo: string) => ({ ...at(T0), run, exists: existsSync, config: { ...base, defaultCwd: state.dir, stateGit: { ...base.stateGit, backup: { ...base.stateGit.backup, repo } } } });
+  const realDeps = withRepo("Acme/Dori-Local-Demo");
+  const g = async (...a: string[]) => expect((await run(["git", ...a])).code).toBe(0);
+  const docs = join(state.dir, "documents");
+  const commit = async (text: string) => {
+    writeFileSync(join(docs, "AGENTS.md"), text);
+    await g("-C", docs, "add", "AGENTS.md");
+    await g("-C", docs, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", text);
+  };
+  await g("init", "-q", "-b", "main", docs);
+  await commit("one\n");
+  // what state-backup leaves: a snapshot of HEAD's tree on its own history, under the backup remote's refs
+  const tree = (await run(["git", "-C", docs, "rev-parse", "HEAD^{tree}"])).out.trim();
+  const snap = (await run(["git", "-C", docs, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-m", "backup"])).out.trim();
+  await g("-C", docs, "update-ref", "refs/remotes/backup/documents-demo", snap);
+  await g("-C", docs, "remote", "add", "backup", "git@github.com:acme/dori-local-demo.git");
+  await commit("two\n");
+  await commit("three\n");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([]);
+  writeFileSync(join(docs, "AGENTS.md"), "dirty\n");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([`unpushed work in ${docs}`]);
+  await g("-C", docs, "checkout", "-q", "--", "AGENTS.md");
+  // a remote named backup at another repository, or a Dori with no backup repo, is a real remote: the commits hold
+  await g("-C", docs, "remote", "set-url", "backup", "https://github.com/acme/other.git");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([`unpushed work in ${docs}`]);
+  await g("-C", docs, "remote", "set-url", "backup", "https://github.com/acme/dori-local-demo.git");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([]);
+  expect(await unpushedWork(withRepo(""), { ...lane, cwd: docs })).toEqual([`unpushed work in ${docs}`]);
+  // with a real remote too, a commit only it lacks holds, even when a backup ref holds that commit
+  await g("init", "-q", "--bare", "-b", "main", join(state.dir, "origin.git"));
+  await g("-C", docs, "remote", "add", "origin", join(state.dir, "origin.git"));
+  await g("-C", docs, "push", "-q", "origin", "main");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([]);
+  await commit("four\n");
+  await g("-C", docs, "update-ref", "refs/remotes/backup/documents-demo", "HEAD");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([`unpushed work in ${docs}`]);
+  await g("-C", docs, "push", "-q", "origin", "main");
+  expect(await unpushedWork(realDeps, { ...lane, cwd: docs })).toEqual([]);
+});
+
 // git says "not a git repository" for a .git file pointing nowhere or a bad HEAD too: a .git entry makes it unreadable
 test.each(["fatal: bad config line 1 in file .git/config", "fatal: not a git repository: /repo/.git/worktrees/gone"])("a cwd with a .git git cannot read holds the lane as unreadable git state (%s)", async (err) => {
   world.worktreeList = cwdOnly;

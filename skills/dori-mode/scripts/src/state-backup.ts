@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
+import { BACKUP_REMOTE } from "./config.ts";
 import { git, initRepo, must, PRE_PUSH, SECRET_NAME, type StateGitDeps, TOKEN_SHAPES, tokenShape, writeHook } from "./state-git.ts";
 
 // The private GitHub backup of a Dori's local repos (owner 10-18 00:19 KST: "로컬 도리들은 비공개 레포로 올려두기 그리고
@@ -53,7 +54,7 @@ export type BackupDeps = StateGitDeps & {
 export type Hit = { readonly path: string; readonly kind: string };
 
 const ZERO = /^0+$/;
-const REMOTE = "backup";
+const REMOTE = BACKUP_REMOTE;
 
 // ~/.dori -> dot-dori, ~/Documents/zzangdori -> documents-zzangdori
 export const branchFor = (dir: string, home: string): string => {

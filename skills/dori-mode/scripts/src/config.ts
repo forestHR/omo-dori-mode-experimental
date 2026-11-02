@@ -19,6 +19,8 @@ export const BACKUP_DEFAULTS: BackupSettings = {
   ownerMinChars: 30,
   ownerQuoteOk: ["directives.json", "AGENTS.md", "HANDOFF*.md"],
 };
+// the remote stateGit.backup pushes its snapshots to (src/state-backup.ts); done-flow reads it too
+export const BACKUP_REMOTE = "backup";
 
 export type UpdateService = {
   readonly unit: string;
