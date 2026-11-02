@@ -1,7 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export type ThreadMap = Record<string, { readonly session: string | null; readonly title: string }>;
+// directives and openedAt: a thread dori thread open opened after reading the ledger (the ids it printed, maybe none, and
+// when); dori directive-audit reads a lead thread without them as opened with no directives
+export type ThreadEntry = { readonly session: string | null; readonly title: string; readonly directives?: readonly string[]; readonly openedAt?: string };
+export type ThreadMap = Record<string, ThreadEntry>;
 
 export const threads = (dir: string): ThreadMap => {
   const file = join(dir, "threads.json");
@@ -16,9 +19,9 @@ const save = (dir: string, all: ThreadMap): void => {
   renameSync(tmp, file);
 };
 
-export const mapThread = (dir: string, id: string, session: string | null, title?: string): void => {
+export const mapThread = (dir: string, id: string, session: string | null, title?: string, opened?: { readonly directives: readonly string[]; readonly openedAt: string }): void => {
   const all = threads(dir);
-  all[id] = { session, title: title ?? all[id]?.title ?? "" };
+  all[id] = { ...all[id], session, title: title ?? all[id]?.title ?? "", ...opened };
   save(dir, all);
 };
 

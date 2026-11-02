@@ -37,7 +37,7 @@ import { heavySpread, isKind, spreadPlan, type SpreadJob } from "./heavy-spread.
 import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
 import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
-import { DirectiveError, ledgerProblems, ledgerTable, loadLedger, promptTable } from "./directives.ts";
+import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, ledgerProblems, ledgerTable, loadLedger, promptTable, textDirectives } from "./directives.ts";
 import { applyDirectives, auditOrReport, checkMeaning, linkRows, pushLinks, sinceIso } from "./directive-audit.ts";
 import { addNode, formatIntent, formatTree, gateFix, intentView, laneArea, loadTree, NODE_KINDS, type NodeKind, recordBranch, recordOverride, recordRefusal, requiredMessage, researchCheck, researchFacts, researchHint, sendResearch, setStatus, stuckTop, stuckView, type TreeArea, TreeError, updateTree } from "./explore.ts";
 import { challengeMissing, ChallengeError, checkReviewers, familyOf, reviewers, runChallenge } from "./challenge.ts";
@@ -106,7 +106,9 @@ const USAGE = `dori <command> [options]
                                        stops the launch (LAUNCH_DIRECTIVE_MISSING, exit 4, nothing opened) unless
                                        --waive <id> "<reason>" (repeatable) leaves it out: LAUNCH_DIRECTIVE_WAIVED in the
                                        watch log and the registry, and discord.waiveText to the owner
-  directives [table|prompts|check [--static]|apply <key> [--dry-run]|links [--push]]
+  directives [table|prompts|check [--static]|apply <key> [--dry-run]|hint <text>|links [--push]]
+                                       hint prints the directives (at most five) an owner message with that text carries
+                                       in its inbox row (DIRECTIVE_HINT / DIRECTIVE_HINT_NONE);
                                        the directive ledger: table (default) prints it as one table for the owner; prompts
                                        prints his words next to the prompt each brief gets (형 원문 | 지침문); check
                                        validates both layers and has a reviewer of another family compare every new or
@@ -119,7 +121,8 @@ const USAGE = `dori <command> [options]
   directive-audit [--since 24h|Nd|ISO] [--dry-run]
                                        the lanes opened since then against the ledger (directives in scope missing from
                                        the brief, a lane without a thread) and the owner's messages that read like a
-                                       standing directive no ledger entry cites: DIRECTIVE_GAP / DIRECTIVE_LEAD /
+                                       standing directive no ledger entry cites, and a lead thread opened without the ledger read
+                                       (DIRECTIVE_LEAD thread:<id>): DIRECTIVE_GAP / DIRECTIVE_LEAD /
                                        DIRECTIVE_UNLEDGERED lines into the watch log and one [DIRECTIVE_AUDIT] summary to
                                        the lead; none: DIRECTIVE_AUDIT_OK on stdout only. --dry-run prints and sends nothing
   adopt  <key> --pane ID --title T --brief FILE --done "..." [--thread REF] [--tag T ...] [--goal G] [--challenge-before STEP ...] [--use-gpu]
@@ -373,7 +376,9 @@ const USAGE = `dori <command> [options]
                                        with the old session; FILE is the lane's conversation summary (its headings: handover
                                        ready --template) and goes into the note (valid handover.readyMin minutes)
   thread open <title> [--from MSG_ID] [--first TEXT] [--session S]
-                                       open and map a work thread; standalone threads require --first
+                                       open and map a work thread; standalone threads require --first. The directive
+                                       ledger is read first against the title, first message and owner's message:
+                                       THREAD_DIRECTIVES and one line per directive; unreadable: THREAD_REFUSED, nothing opened
   thread map discord:<id> <session|none>
                                        set the mapped session, preserving the title
   thread list                          print mapped thread ids, sessions and titles
@@ -690,6 +695,27 @@ const ownerSpeech = async (text: string, what: string, toOwner: () => Promise<bo
 };
 // question cards and their answers; DORI_DISCORD_STATE_DIR keeps them where an existing install already has them
 const cardDir = (): string => process.env.DORI_DISCORD_STATE_DIR?.trim() || join(config.stateDir, "discord");
+// The ledger an owner message and a lead's thread are read against: both layers, a bad local line left out (as the audit
+// reads it). No ledger configured is not "no directives": it throws, like a ledger that cannot be read.
+const hintLedger = (): Ledger => {
+  if (!config.directives.common && !config.directives.local) throw new DirectiveError("no directive ledger is configured (config directives.common and directives.local are empty)");
+  return checkedLedger(config, { tolerant: true });
+};
+// the owner's message a thread starts from, as the inbox has it (text or voice transcript); empty when it is not there
+const inboxText = (id: string): string => {
+  const file = process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl");
+  if (!existsSync(file)) return "";
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (!line.includes(id)) continue;
+    try {
+      const row = JSON.parse(line) as { id?: string; content?: string; transcript?: string | null };
+      if (row.id === id) return row.transcript || row.content || "";
+    } catch {
+      // a torn line is not the message
+    }
+  }
+  return "";
+};
 // the inbox dori directive-audit reads the owner's messages from and leaves its notices for the lead in
 const auditInbox = (): string => config.handover.inbox || process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl");
 // every thread status change goes through this queue: coalesced, retried after a 429, decided by the open cards and
@@ -1133,7 +1159,7 @@ try {
           },
           auditSummary: (week: string) => sendAuditSummary(deps, laneDeps.inbox ?? join(config.stateDir, "discord", "inbox.jsonl"), week),
           // the daily directive audit on every Dori, and the owner's links pushed to the other Dori (directives.linkPeers)
-          directiveAudit: async (since: string) => (await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "" })).lines,
+          directiveAudit: async (since: string) => (await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()) })).lines,
           directiveLinks: async () => (await pushLinks(deps)).lines,
         };
         for (const a of await freshnessTick(deps, process.env.HOME ?? "", hooks)) console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);
@@ -1491,6 +1517,8 @@ try {
           log: (line) => console.log(line),
           fatal: (code) => process.exit(code === 4014 ? 4 : 3),
           ...(config.hooks.transcribe?.length ? { transcribe: transcribeUrl } : {}),
+          // read per message, so a ledger edited while the listener runs is what the next message gets
+          hints: (text) => textDirectives(text, hintLedger()).slice(0, HINT_LIMIT).map(({ e }) => directiveLine(e)),
         });
         listener.start();
         await new Promise(() => {});
@@ -1581,10 +1609,20 @@ try {
         const first = opt("first")?.trim();
         if (first) postable(first, "thread open --first");
         if (!title || (!from && !first)) die("usage: dori thread open <title> [--from MSG_ID] [--first TEXT] [--session S]; standalone threads need --first");
+        // a thread the lead opens is work without a lane brief: the ledger is read against its title, first message and the
+        // owner's message it starts from before anything is opened; a ledger that cannot be read opens nothing
+        let found: ReturnType<typeof textDirectives> = [];
+        try {
+          found = textDirectives([title, first ?? "", from ? inboxText(from) : ""].join("\n"), hintLedger(), { all: true });
+        } catch (e) {
+          die(`THREAD_REFUSED ${title}: the directive ledger could not be read (${e instanceof Error ? e.message : String(e)}); no thread is opened without its directives. Fix the ledger (dori directives check), or open the work as a lane (dori launch --thread new)`);
+        }
         const dc = discordClient();
         const id = await dc.startThread(env("DORI_DISCORD_CHANNEL"), from, threadName("working", title, config.discord));
         if (!from && first) await dc.send(id, first);
-        mapThread(cardDir(), id, opt("session") ?? null, title);
+        mapThread(cardDir(), id, opt("session") ?? null, title, { directives: found.map(({ e }) => e.id), openedAt: new Date().toISOString() });
+        console.log(`THREAD_DIRECTIVES discord:${id} ${found.length}: ${found.map(({ e, why }) => `${e.id} (${why})`).join(", ") || "none in scope"}; follow them in this thread's work`);
+        for (const { e } of found) console.log(directiveLine(e));
         console.log(`THREAD_OPENED discord:${id}`);
         break;
       }
@@ -1796,13 +1834,21 @@ try {
         console.log(promptTable(ledger));
         break;
       }
-      if (key !== undefined && key !== "table") die("usage: dori directives [table|prompts|check [--static]|apply <key> [--dry-run]|links [--push]]");
+      // what an owner message carries in the inbox row (the listener's hints), for a text the lead gives
+      if (key === "hint") {
+        const text = flags.positionals.slice(1).join(" ").trim() || die("usage: dori directives hint <text>");
+        const found = textDirectives(text, hintLedger()).slice(0, HINT_LIMIT);
+        for (const { e, why } of found) console.log(`DIRECTIVE_HINT ${e.id} (${why}): ${directiveLine(e)}`);
+        if (!found.length) console.log("DIRECTIVE_HINT_NONE: no directive's keyword, kind of work or UI words in the text");
+        break;
+      }
+      if (key !== undefined && key !== "table") die("usage: dori directives [table|prompts|check [--static]|apply <key> [--dry-run]|hint <text>|links [--push]]");
       console.log(ledgerTable(ledger));
       break;
     }
     case "directive-audit": {
       const since = sinceIso(opt("since") ?? "24h", Date.now());
-      const r = await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", dryRun: Boolean(flags.values["dry-run"]) });
+      const r = await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), dryRun: Boolean(flags.values["dry-run"]) });
       for (const line of r.lines) console.log(line);
       if (r.failed) process.exit(1);
       break;

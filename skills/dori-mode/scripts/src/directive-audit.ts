@@ -11,6 +11,7 @@ import type { FlowDeps } from "./done-flow.ts";
 import { eightSteps, laneRepo, launchLedger, uiSteps } from "./launch.ts";
 import { leadSessionFiles } from "./lead-sessions.ts";
 import { sendVerified } from "./panes.ts";
+import type { ThreadMap } from "./messenger/thread-map.ts";
 import type { Lane } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { watchLog } from "./watch-log.ts";
@@ -323,7 +324,26 @@ const writeStamp = (deps: Pick<FlowDeps, "config" | "clock">, since: string, ok:
 // line on stdout and nothing else (quiet). Gaps or local lines left out: each line in the watch log and one
 // [DIRECTIVE_AUDIT] summary in the lead's inbox and typed to the lead. dryRun: the lines only. A run that is not a dry run
 // leaves its time in the state dir (auditStampPath), so the daily run in freshness knows it was done.
-export const runDirectiveAudit = async (deps: FlowDeps, opts: { readonly since: string; readonly inbox: string; readonly owner: string; readonly dryRun?: boolean }): Promise<AuditResult> => {
+// When a Discord id was made, from the snowflake (a thread opened from a message has that message's id).
+const snowflakeMs = (id: string): number => (/^\d{15,}$/.test(id) ? Number((BigInt(id) >> 22n) + 1420070400000n) : Number.NaN);
+
+// The threads the lead opened since `since` with no directives read: a thread in the map that no lane in the registry
+// works in (dori launch --thread new maps its thread with no session, so a lane is told by the registry) and that dori
+// thread open did not mark with the directives it printed (opened before that check, or mapped by hand). Its work had
+// no lane brief and no directives.
+export const leadThreadGaps = (map: ThreadMap, lanes: readonly Pick<Lane, "thread">[], since: string): Gap[] => {
+  const laneThreads = new Set(lanes.map((l) => l.thread ?? ""));
+  const out: Gap[] = [];
+  for (const [id, t] of Object.entries(map)) {
+    if (t.directives || laneThreads.has(`discord:${id}`)) continue;
+    const at = t.openedAt ? Date.parse(t.openedAt) : snowflakeMs(id);
+    if (Number.isNaN(at) || new Date(at).toISOString() < since) continue;
+    out.push({ lane: `thread:${id}`, id: "-", line: `DIRECTIVE_LEAD thread:${id} -: the lead's thread "${t.title}" (${new Date(at).toISOString()}) was opened without reading the directive ledger and no lane works in it; dori thread open reads it now, or open such work as a lane` });
+  }
+  return out;
+};
+
+export const runDirectiveAudit = async (deps: FlowDeps, opts: { readonly since: string; readonly inbox: string; readonly owner: string; readonly dryRun?: boolean; readonly threads?: ThreadMap }): Promise<AuditResult> => {
   const ledger = auditLedger(deps);
   const skipped = ledger.skipped ?? [];
   const lanes = (await deps.registry.list()).filter((l) => l.openedAt >= opts.since).sort((a, b) => a.openedAt.localeCompare(b.openedAt));
@@ -339,6 +359,7 @@ export const runDirectiveAudit = async (deps: FlowDeps, opts: { readonly since: 
   const notCounted = excused.length ? ` (${excused.length} not counted: entered the ledger after the lane opened, or the lead relayed it in a [LEAD] line; listed with --dry-run)` : "";
   const excusedLines = opts.dryRun ? excused.map((x) => x.line) : [];
   gaps.push(...unledgered(await readBrief(opts.inbox), ledger, opts.owner, opts.since, process.env.DORI_DISCORD_GUILD?.trim() ?? ""));
+  if (opts.threads) gaps.push(...leadThreadGaps(opts.threads, await deps.registry.list(), opts.since));
   if (!opts.dryRun) writeStamp(deps, opts.since, true);
   if (!gaps.length && !skipped.length) return { gaps, lanes: lanes.length, lines: [...excusedLines, `DIRECTIVE_AUDIT_OK since ${opts.since}: ${lanes.length} lanes and the owner's messages read against ${ledger.entries.length} directives, no gap${notCounted}`] };
   const lines = [...skipped, ...gaps.map((g) => g.line), `DIRECTIVE_AUDIT_DONE since ${opts.since}: ${lanes.length} lanes and the owner's messages read against ${ledger.entries.length} directives, ${gaps.length} gaps${notCounted}, ${skipped.length} local ledger lines left out`];

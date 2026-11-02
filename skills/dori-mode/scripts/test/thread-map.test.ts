@@ -31,9 +31,15 @@ test("a new mapping accepts a null session and a later drop removes it", () => {
 });
 
 let discordWords: Record<string, unknown> = {};
+// the ledger dori thread open reads: one rule for every lane, one a word calls
+const rule = (id: string, scope: Record<string, unknown>, text: string) => ({ id, name: id, by: "lead", rule: text, basis: "test", date: "2026-11-02", source: "test", mode: "inject", scope });
+const LEDGER = JSON.stringify({ entries: [rule("every-lane", { all: true }, "Every lane rule."), rule("login-rule", { keywords: ["login"] }, "Login work keeps SSO."), rule("card-rule", { keywords: ["카드"] }, "Card papers are ours.")] });
+let ledgerText = LEDGER;
+beforeEach(() => { ledgerText = LEDGER; });
 const dori = async (...args: string[]) => {
   const config = join(state.dir, "config.json");
-  writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, discord: { statusStyle: "emoji", ...discordWords } }));
+  writeFileSync(join(state.dir, "ledger.json"), ledgerText);
+  writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, discord: { statusStyle: "emoji", ...discordWords }, directives: { common: join(state.dir, "ledger.json"), local: "" } }));
   const p = Bun.spawn(["bun", "--preload", join(import.meta.dir, "discord-cli-fake.ts"), join(import.meta.dir, "../src/cli.ts"), ...args], {
     env: { ...process.env, DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "missing.env"), DORI_STATE_DIR: state.dir, DORI_DISCORD_STATE_DIR: join(state.dir, "cards"), DORI_DISCORD_TOKEN: "fake", DORI_DISCORD_CHANNEL: "200000000000000002", DORI_TEST_HTTP: join(state.dir, "http.json") },
     stdout: "pipe", stderr: "pipe",
@@ -45,24 +51,42 @@ const cli = (...args: string[]) => dori("thread", ...args);
 const http = (): { name: string; archived: boolean; calls: { method: string; path: string; body: Record<string, unknown> }[] } => JSON.parse(readFileSync(join(state.dir, "http.json"), "utf8"));
 const map = () => threads(join(state.dir, "cards"));
 
+const OPENED = `THREAD_DIRECTIVES ${REF} 2: login-rule (keyword login), every-lane (all lanes); follow them in this thread's work\n[리드 규칙 login-rule] Login work keeps SSO.\n[리드 규칙 every-lane] Every lane rule.\nTHREAD_OPENED ${REF}`;
+
 test("thread open creates a standalone marked thread, first message and session mapping", async () => {
   const result = await cli("open", "✅ 🔄 fix login", "--first", "Start here", "--session", "session-1");
   expect({ result, http: http(), map: map() }).toEqual({
-    result: { code: 0, out: `THREAD_OPENED ${REF}`, err: "" },
+    result: { code: 0, out: OPENED, err: "" },
     http: { name: "🔄 fix login", archived: false, calls: [
       { method: "POST", path: "/channels/200000000000000002/threads", body: { name: "🔄 fix login", type: 11, auto_archive_duration: 10080 } },
       { method: "POST", path: `/channels/${ID}/messages`, body: { content: "Start here", allowed_mentions: { parse: [] } } },
-    ] }, map: { [ID]: { session: "session-1", title: "fix login" } },
+    ] }, map: { [ID]: { session: "session-1", title: "fix login", directives: ["login-rule", "every-lane"], openedAt: expect.any(String) } },
   });
 });
 
 test("thread open from a message does not post a standalone first message", async () => {
   const result = await cli("open", "fix login", "--from", "10001", "--first", "unused");
   expect({ result, calls: http().calls, map: map() }).toEqual({
-    result: { code: 0, out: `THREAD_OPENED ${REF}`, err: "" },
+    result: { code: 0, out: OPENED, err: "" },
     calls: [{ method: "POST", path: "/channels/200000000000000002/messages/10001/threads", body: { name: "🔄 fix login" } }],
-    map: { [ID]: { session: null, title: "fix login" } },
+    map: { [ID]: { session: null, title: "fix login", directives: ["login-rule", "every-lane"], openedAt: expect.any(String) } },
   });
+});
+
+// 2026-11-02: MooDori opened "Claude 10/29 카드 처리" from the owner's message with no lane brief and no directive read
+test("thread open reads the owner's message it starts from in the inbox: the directives his words call are printed and kept", async () => {
+  mkdirSync(join(state.dir, "discord"), { recursive: true });
+  writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${JSON.stringify({ id: "10001", channel_id: "200000000000000002", scope: "channel", content: "그리고 카드처리해 서류 준비하고 있어" })}\n`);
+  const result = await cli("open", "Claude 10/29 처리", "--from", "10001");
+  expect({ out: result.out.split("\n")[0], directives: map()[ID]?.directives }).toEqual({
+    out: `THREAD_DIRECTIVES ${REF} 2: card-rule (keyword 카드), every-lane (all lanes); follow them in this thread's work`, directives: ["card-rule", "every-lane"],
+  });
+});
+
+test("thread open with a ledger it cannot read opens nothing: THREAD_REFUSED before Discord is called", async () => {
+  ledgerText = "{ not json";
+  const result = await cli("open", "fix login", "--first", "Start here");
+  expect({ code: result.code, refused: result.err.startsWith("THREAD_REFUSED fix login: the directive ledger could not be read"), called: existsSync(join(state.dir, "http.json")), map: map() }).toEqual({ code: 1, refused: true, called: false, map: {} });
 });
 
 test("thread open refuses an empty standalone thread before calling Discord", async () => {
