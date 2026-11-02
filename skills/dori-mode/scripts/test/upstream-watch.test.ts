@@ -17,7 +17,8 @@ const sh = (cmd: string[], cwd: string) => {
 };
 const json = (name: string, value: unknown) => writeFileSync(join(gh, name), JSON.stringify(value));
 
-// Our checkout: its history starts at one commit and its code cites upstream #7's commit and issue #22.
+// Our checkout: its history starts at one commit and its code cites upstream #7's commit and issue #22, and our fork's own
+// PR #30, which shares an old repository name with upstream.
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "dori-upstream-watch-"));
   src = join(root, "src");
@@ -25,7 +26,7 @@ beforeEach(() => {
   mkdirSync(src);
   mkdirSync(gh);
   sh(["git", "init", "-q"], src);
-  writeFileSync(join(src, "cite.ts"), `// ${UP}/commit/40034ad1a557b92a34aa1450565adcafd3352c96\n// ${UP}/issues/22\n`);
+  writeFileSync(join(src, "cite.ts"), `// ${UP}/commit/40034ad1a557b92a34aa1450565adcafd3352c96\n// ${UP}/issues/22\n// https://github.com/orientpine/omo-dori-mode-experimental/pull/30\n`);
   sh(["git", "add", "."], src);
   sh(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "root"], src);
   ourRoot = sh(["git", "rev-parse", "HEAD"], src);
@@ -47,12 +48,12 @@ beforeEach(() => {
   const issue = (number: number, title: string, state = "OPEN") => ({ number, title, state, url: `${UP}/issues/${number}`, createdAt: "2026-11-02T00:00:00Z" });
   json("issues.json", [issue(22, "freshness: lastReportLine selects templates", "CLOSED"), issue(27, "Telemetry", "CLOSED"), issue(29, "freshness: other report-template shapes"), issue(31, "dori send fails for agents launched with pane run")]);
   const commit = (sha: string, message: string) => ({ sha, commit: { message }, html_url: `${UP}/commit/${sha}` });
-  json("commits.json", [
+  writeFileSync(join(gh, "commits.jsonl"), [
     commit("b".repeat(40), "direct: fix the lane sweep"),
     commit("c".repeat(39) + "1", "fix(dori-mode): skip report templates (#25)"),
     commit(ourRoot, "root"),
     commit("a".repeat(40), "a commit older than our history"),
-  ]);
+  ].map((c) => JSON.stringify(c)).join("\n"));
   json(`commit-${"b".repeat(40)}.json`, { files: [{ filename: "skills/dori-mode/scripts/src/sweeps.ts", patch: "+x" }] });
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -79,9 +80,10 @@ const inbox = (): Record<string, string>[] => {
 const seen = () => JSON.parse(readFileSync(join(root, "state/seen.json"), "utf8")).items as Record<string, { class: string }>;
 
 test("only owner decisions and port candidates reach the inbox; what we already have or do not use goes to one weekly line", async () => {
-  const r = await run();
+  const r = await run([], { UPSTREAM_WATCH_THREAD: "discord:42" });
   expect(r.code).toBe(0);
   const rows = inbox();
+  expect(rows.filter((x) => x.kind === "upstream-change").every((x) => x.thread === "discord:42" && x.content!.includes("dori launch --thread discord:42"))).toBe(true);
   expect(rows.filter((x) => x.kind === "upstream-change").map((x) => [x.item, x.class])).toEqual([
     ["pr:21", "3"],
     ["pr:23", "3"],
@@ -133,4 +135,67 @@ test("a failing gh records nothing and exits 3; the third failure in a row tells
   expect(seen()).toEqual({});
   expect(inbox().map((x) => x.kind)).toEqual(["upstream-watch-fail"]);
   expect((await run()).code).toBe(0);
+});
+
+test("an item the owner already decided is marked by hand and never reaches the inbox", async () => {
+  expect((await run(["--mark", "pr:23", "--why", "owner chose; lane backlog-loop"])).out).toContain("UPSTREAM_MARKED pr:23");
+  expect((await run(["--mark", "23"])).code).not.toBe(0);
+  await run();
+  const items = inbox().filter((x) => x.kind === "upstream-change").map((x) => x.item);
+  expect(items).toContain("pr:21");
+  expect(items).not.toContain("pr:23");
+  expect(seen()["pr:23"]!.class).toBe("decided");
+});
+
+test("without an inbox setting the line goes to the listener's inbox under DORI_STATE_DIR", async () => {
+  const state = join(root, "dori-state");
+  mkdirSync(join(state, "discord"), { recursive: true });
+  const env = { UPSTREAM_WATCH_INBOX: "", UPSTREAM_WATCH_STATE_DIR: "", DORI_STATE_DIR: state };
+  expect((await run([], env)).code).toBe(0);
+  expect(readFileSync(join(state, "discord/inbox.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l).item)).toContain("pr:21");
+  expect(existsSync(join(state, "upstream-watch/seen.json"))).toBe(true);
+  expect(existsSync(join(root, "inbox.jsonl"))).toBe(false);
+});
+
+test("lists longer than one page are read in full, and a commit of a PR the watch has not seen is still classified", async () => {
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  const prs = Array.from({ length: 150 }, (_, i) => ({
+    number: i + 1, title: `fix(dori-mode): case ${i + 1}`, url: `${UP}/pull/${i + 1}`, mergedAt: "2026-11-02T00:00:00Z",
+    files: [{ path: "skills/dori-mode/scripts/src/cli.ts" }], mergeCommit: { oid: `${i + 1}`.padStart(40, "d") }, body: "",
+  }));
+  const commits = [
+    ...Array.from({ length: 120 }, (_, i) => ({ sha: `${i + 1}`.padStart(40, "e"), commit: { message: `fix: case (#${i + 1})` } })),
+    { sha: "f".repeat(40), commit: { message: "fix: a PR this watch never listed (#999)" } },
+  ];
+  writeFileSync(join(root, "prs.json"), JSON.stringify(prs));
+  writeFileSync(join(root, "commits.jsonl"), commits.map((c) => JSON.stringify(c)).join("\n"));
+  // gh stand-in: lists stop at --limit like gh does, and the commits feed needs --paginate.
+  writeFileSync(join(bin, "gh"), `#!/usr/bin/python3
+import json, sys
+a = sys.argv[1:]
+if a[:2] == ["pr", "list"]:
+    print(json.dumps(json.load(open("${join(root, "prs.json")}"))[: int(a[a.index("--limit") + 1])]))
+elif a[:2] == ["issue", "list"]:
+    print("[]")
+elif a[:2] == ["pr", "diff"]:
+    print("")
+elif a[0] == "api" and a[1] == "--paginate":
+    print(open("${join(root, "commits.jsonl")}").read())
+elif a[0] == "api" and a[1].endswith("/pulls"):
+    print("[]")
+elif a[0] == "api" and "/commits/" in a[1]:
+    print(json.dumps({"files": [{"filename": "skills/dori-mode/scripts/src/sweeps.ts", "patch": "+x"}]}))
+else:
+    sys.exit(f"unexpected gh {a}")
+`);
+  chmodSync(join(bin, "gh"), 0o755);
+  const r = await run([], { UPSTREAM_WATCH_GH_DIR: "", PATH: `${bin}:/usr/bin:/bin` });
+  expect(r.code).toBe(0);
+  const items = inbox().filter((x) => x.kind === "upstream-change").map((x) => x.item);
+  // pr:22 is class 1: our checkout cites upstream issue #22, and GitHub numbers PRs and issues together.
+  expect(items.filter((i) => i.startsWith("pr:"))).toHaveLength(149);
+  expect(items).not.toContain("pr:22");
+  expect(items).toContain(`commit:${"f".repeat(40)}`);
+  expect(items.filter((i) => i.startsWith("commit:"))).toHaveLength(1);
 });

@@ -327,8 +327,10 @@ It sorts each new item by rules:
 | 3 owner decision | sends data outside (`fetch(` or a non-GitHub URL in added code), changes autonomy (loop, backlog, schedule), adds a dependency under `skills/`, or changes something the owner feels (pause, interrupt, kill, defaults) under `skills/` | one `upstream-change` line |
 | 4 port candidate | changes `skills/`, or an open issue (reproduce on our side first) | one `upstream-change` line |
 
+It reads every page of each list, so a long downtime loses nothing. Only links to the upstream owner's repository (its current or an old name) count as citations: a link to our fork's PR of the same number does not.
 An item is marked seen only after its inbox line is written. A failed `gh` call records nothing and exits 3, and the third failure in a row writes one `upstream-watch-fail` line.
-The state lives in `<DORI_STATE_DIR>/upstream-watch/seen.json`; `--seed` marks everything current as seen without inbox lines.
+Lines go to `DORI_DISCORD_INBOX`, else `<DORI_STATE_DIR>/discord/inbox.jsonl` like the listener. The state lives in `<DORI_STATE_DIR>/upstream-watch/seen.json`; `--seed` marks everything current as seen without inbox lines, and `--mark pr:23 --why "<reason>"` marks one item the owner already decided (also `issue:N`, `commit:<sha>`).
+Set `UPSTREAM_WATCH_THREAD=discord:<id>` in a drop-in (`systemctl --user edit dori-upstream-watch.service`) to keep all upstream work in one thread: every line then carries `thread` and names `dori ask --thread` and `dori launch --thread` for it. Both reopen that thread when it was archived meanwhile.
 When a port lands, cite the upstream pull, issue or commit link in the code: that citation is what makes the next run file it as class 1.
 
 What the lead does with a line: for class 4, if it is small, launch a port lane (`dori launch`). The lane reads upstream with `git show` only, reproduces on our side first, rewrites the change in our code with the upstream link and MIT credit in a comment, and merges through `dori review` and `dori merge`. If it is big, or the class is 3, ask the owner with `dori ask` (take it / take it our way / leave it) and launch the lane only after the answer.
