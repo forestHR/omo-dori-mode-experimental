@@ -1,6 +1,8 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Clock } from "../run.ts";
 import { guardText, type Http, MessengerError, withBackoff } from "./http.ts";
-import type { ThreadLedger } from "./thread-ledger.ts";
+import { type ThreadLedger, tsAfter } from "./thread-ledger.ts";
 
 export type SlackAuth = { readonly token: string; readonly cookie?: string };
 export type Posted = { readonly channel: string; readonly ts: string };
@@ -54,3 +56,54 @@ export class Slack {
     await this.call("users.setPresence", { presence });
   }
 }
+
+const UNEYED_MAX = 2000;
+
+// The eyes read receipt slack-watch.ts puts on an addressed message comes off once the Dori answers it, as on Discord.
+// The watcher's inbox rows say which messages got eyes (addressed) and where their answer goes (reply_thread); a post
+// there, or in a thread under the message itself, answers every earlier one of them. reactions.remove with the bot
+// token only ever takes off the bot's own reaction, never a person's or another app's. Messages already done are kept in
+// the done file so a later answer in the same place asks Slack nothing again. Returns the lines to print: one
+// SLACK_UNEYE_SKIPPED when the app has no reactions:write, one SLACK_UNEYE_FAIL per other failure (retried next time).
+export const clearEyes = async (slack: Slack, files: { readonly inbox: string; readonly done: string }, posted: Posted, thread?: string): Promise<string[]> => {
+  if (!existsSync(files.inbox)) return [];
+  const done: string[] = existsSync(files.done) ? (JSON.parse(readFileSync(files.done, "utf8")) as string[]) : [];
+  const targets: string[] = [];
+  for (const line of readFileSync(files.inbox, "utf8").split("\n")) {
+    if (!line.includes('"scope":"slack"')) continue;
+    let row: { scope?: string; id?: string; channel_id?: string; reply_thread?: string | null; addressed?: string | null };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row.scope !== "slack" || !row.addressed || !row.id || row.channel_id !== posted.channel || !tsAfter(posted.ts, row.id)) continue;
+    if ((row.reply_thread ?? null) !== (thread ?? null) && row.id !== thread) continue;
+    if (!done.includes(`${posted.channel}:${row.id}`) && !targets.includes(row.id)) targets.push(row.id);
+  }
+  const lines: string[] = [];
+  for (const ts of targets) {
+    try {
+      await slack.call("reactions.remove", { channel: posted.channel, timestamp: ts, name: "eyes" });
+    } catch (e) {
+      const code = e instanceof MessengerError ? e.code : undefined;
+      if (code === "missing_scope" || code === "not_allowed_token_type" || code === "no_permission") {
+        lines.push(`SLACK_UNEYE_SKIPPED slack reactions.remove: ${code}: the app has no reactions:write, so the eyes stay until it is added and the app reinstalled`);
+        break;
+      }
+      // no_reaction: the eyes never went on or someone took them off; a message or channel that is gone has none left
+      if (code !== "no_reaction" && code !== "message_not_found" && code !== "channel_not_found") {
+        lines.push(`SLACK_UNEYE_FAIL ${posted.channel} ${ts} ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+    }
+    done.push(`${posted.channel}:${ts}`);
+  }
+  if (targets.length) {
+    mkdirSync(dirname(files.done), { recursive: true });
+    const tmp = `${files.done}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(done.slice(-UNEYED_MAX)), { mode: 0o600 });
+    renameSync(tmp, files.done);
+  }
+  return lines;
+};

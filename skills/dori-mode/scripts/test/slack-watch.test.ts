@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { missingTokens, runSocket, slackWatchOptions, startWatch, writeEnvValues } from "../../setups/discord-aoe/slack-watch.ts";
 import { run } from "../src/run.ts";
@@ -34,7 +34,8 @@ const fakeSlack = () => {
   let opens = 0;
   let port = 0;
   let pings = 0;
-  const failing = { auth: 0, reactScope: false, reactStall: false };
+  // unreact: the error code reactions.remove answers with ("" = ok)
+  const failing = { auth: 0, reactScope: false, reactStall: false, unreact: "" };
   const server = Bun.serve({
     port: 0,
     fetch: async (req, srv) => {
@@ -58,6 +59,7 @@ const fakeSlack = () => {
       if (method === "chat.postMessage") return reply({ channel: body.channel, ts: "1700000100.000100" });
       if (method === "reactions.add" && failing.reactStall) return new Promise<Response>(() => {});
       if (method === "reactions.add") return failing.reactScope ? Response.json({ ok: false, error: "missing_scope" }) : reply({});
+      if (method === "reactions.remove") return failing.unreact ? Response.json({ ok: false, error: failing.unreact }) : reply({});
       return Response.json({ ok: false, error: "unknown_method" });
     },
     websocket: {
@@ -232,6 +234,67 @@ test("an app without reactions:write logs SLACK_REACT_SKIPPED once and stops ask
   expect(w.lines.filter((l) => l.startsWith("SLACK_REACT_SKIPPED"))).toEqual(["SLACK_REACT_SKIPPED slack reactions.add: missing_scope: the app has no reactions:write, so messages arrive without eyes until it is added and the app reinstalled"]);
   expect(slack.calls.filter((c) => c.method === "reactions.add").length).toBe(1);
   expect(w.lines.some((l) => l.startsWith("SLACK_REACT_FAIL"))).toBe(false);
+});
+
+// dori send slack in the watcher's own state dir, as the lead answers
+const send = (w: { o: { threads: string } }, slack: ReturnType<typeof fakeSlack>, args: string[], token = BOT) => {
+  const state = dirname(w.o.threads);
+  return run(["env", `DORI_CONFIG=${join(state, "missing.json")}`, `DORI_STATE_DIR=${state}`, `DORI_ENV_FILE=${join(state, "missing.env")}`, `DORI_SLACK_TOKEN=${token}`, `DORI_SLACK_API=${slack.api}`, "bun", CLI, "send", "slack", ...args]);
+};
+const unreacted = (slack: ReturnType<typeof fakeSlack>) => slack.calls.filter((c) => c.method === "reactions.remove").map((c) => `${String(c.body.channel)} ${String(c.body.timestamp)} ${String(c.body.name)} ${c.auth === `Bearer ${BOT}` ? "bot" : c.auth}`);
+
+test("answering with dori send slack takes the watcher's eyes off the messages it answers, once, and off nothing else", async () => {
+  // Given an unaddressed reply under the first mention (taken in first: rows wake no waiter, SLACK_MSG lines do), two
+  // DMs and two channel mentions in different threads
+  const slack = fakeSlack();
+  const w = await watcher(slack);
+  slack.event({ type: "message", channel: "C1", user: "UOTHER", text: "me too", ts: "1700000000.000210", thread_ts: "1700000000.000200" });
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "one", ts: "1700000000.000100" });
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "two", ts: "1700000000.000110" });
+  slack.event({ type: "app_mention", channel: "C1", user: "UGUEST", text: "<@UBOT> a", ts: "1700000000.000200" });
+  slack.event({ type: "app_mention", channel: "C1", user: "UGUEST", text: "<@UBOT> b", ts: "1700000000.000300" });
+  await slack.until("four SLACK_MSG lines", () => w.msgs().length === 4);
+  expect(w.rows().length).toBe(5);
+  // When the lead answers the DM and the first mention's thread
+  const dm = await send(w, slack, ["--to", "D1", "--text", "네"]);
+  const th = await send(w, slack, ["--to", "C1", "--thread", "1700000000.000200", "--text", "자료 여기"]);
+  // Then the bot's own eyes come off those three messages only, with the bot token, and nothing extra is printed
+  expect([dm.code, dm.out.trim().startsWith("SENT "), th.code, th.out.trim().split("\n").length]).toEqual([0, true, 0, 1]);
+  expect(unreacted(slack)).toEqual(["D1 1700000000.000100 eyes bot", "D1 1700000000.000110 eyes bot", "C1 1700000000.000200 eyes bot"]);
+  // When the lead writes in that thread again
+  const again = await send(w, slack, ["--to", "C1", "--thread", "1700000000.000200", "--text", "하나 더"]);
+  // Then Slack is not asked again; the other mention keeps its eyes until its own thread is answered
+  expect(again.code).toBe(0);
+  expect(unreacted(slack).length).toBe(3);
+  await send(w, slack, ["--to", "C1", "--thread", "1700000000.000300", "--text", "b 답"]);
+  expect(unreacted(slack).at(-1)).toBe("C1 1700000000.000300 eyes bot");
+});
+
+test("taking the eyes off: no reactions:write is one SLACK_UNEYE_SKIPPED line and the answer still goes out; eyes already gone are quiet; a member's token never unreacts", async () => {
+  // Given an addressed DM
+  const slack = fakeSlack();
+  const w = await watcher(slack);
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "one", ts: "1700000000.000100" });
+  await slack.until("the DM", () => w.msgs().length === 1);
+  // When the lead answers with a member's token
+  const member = await send(w, slack, ["--to", "D1", "--text", "a"], ["xoxp", "1"].join("-"));
+  // Then the answer goes out and no reaction is touched
+  expect(member.code).toBe(0);
+  expect(unreacted(slack)).toEqual([]);
+  // When the app has no reactions:write
+  slack.failing.unreact = "missing_scope";
+  const skipped = await send(w, slack, ["--to", "D1", "--text", "b"]);
+  // Then one line says so and the answer went out
+  expect(skipped.code).toBe(0);
+  expect(skipped.out.trim().split("\n").slice(1)).toEqual(["SLACK_UNEYE_SKIPPED slack reactions.remove: missing_scope: the app has no reactions:write, so the eyes stay until it is added and the app reinstalled"]);
+  expect(skipped.out).not.toContain(BOT);
+  // When the scope is there but the eyes are already gone
+  slack.failing.unreact = "no_reaction";
+  const gone = await send(w, slack, ["--to", "D1", "--text", "c"]);
+  const after = await send(w, slack, ["--to", "D1", "--text", "d"]);
+  // Then nothing is printed beyond SENT, and Slack is not asked again
+  expect([gone.code, gone.out.trim().split("\n").length, after.code]).toEqual([0, 1, 0]);
+  expect(unreacted(slack)).toEqual(["D1 1700000000.000100 eyes bot", "D1 1700000000.000100 eyes bot"]);
 });
 
 test("a disconnect from Slack opens a fresh connection and messages keep arriving", async () => {

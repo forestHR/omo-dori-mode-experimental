@@ -54,7 +54,7 @@ import { canLaunch } from "./routing.ts";
 import { normFix, recordFix } from "./same-fix.ts";
 import { computeScorecard, dayWindow, formatScorecard, saveScorecard, ScorecardError } from "./scorecard.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
-import { Slack } from "./messenger/slack.ts";
+import { clearEyes, Slack } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -1498,7 +1498,15 @@ try {
       if (platform === "slack") {
         const slack = new Slack(fetchHttp, realClock, { token: token("DORI_SLACK_TOKEN"), cookie: process.env.DORI_SLACK_COOKIE }, process.env.DORI_SLACK_API?.trim() || undefined, new ThreadLedger(`${config.stateDir}/slack-threads.json`));
         if (edit) await slack.edit(to, edit, text);
-        else await once(async () => (await slack.post(to, text, thread)).ts);
+        else {
+          let posted: { channel: string; ts: string } | undefined;
+          await once(async () => (posted = await slack.post(to, text, thread)).ts);
+          // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off
+          if (posted && process.env.DORI_SLACK_TOKEN?.startsWith("xoxb-")) {
+            const files = { inbox: process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"), done: join(config.stateDir, "slack-uneyed.json") };
+            for (const line of await clearEyes(slack, files, posted, thread)) console.log(line);
+          }
+        }
       } else if (platform === "telegram") {
         const tg = new Telegram(fetchHttp, realClock, token("DORI_TELEGRAM_TOKEN"));
         const target = { chatId: to, ...(thread ? { threadId: Number(thread) } : {}) };

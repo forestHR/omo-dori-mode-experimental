@@ -354,6 +354,13 @@ tokens are in `dori.env`, so the monitor can be armed before the owner has insta
   `SLACK_REACT_FAIL <channel> <ts> <error>`, or `SLACK_REACT_SKIPPED` once when the app has no `reactions:write`.
 - **Answering.** `dori send slack --to <channel> --text ...`, plus `--thread <reply thread>` unless the line says `-`
   (a plain DM is answered in the DM). The post is the bot's, with `DORI_SLACK_TOKEN`.
+- **Eyes off.** Once the answer is out, `dori send slack` takes the watcher's eyes off every earlier addressed message
+  it answers: the inbox rows (`scope: "slack"`) in that channel whose `reply_thread` is the answer's `--thread` (none for
+  a plain DM), or whose own ts is that `--thread`. It calls `reactions.remove` with the bot token, which only ever
+  removes the bot's own reaction, never a person's or another app's; with a member's `xoxp-` token it touches nothing.
+  A message done once is kept in `<stateDir>/slack-uneyed.json` and not asked again. An app without `reactions:write`
+  prints one `SLACK_UNEYE_SKIPPED` line, any other failure `SLACK_UNEYE_FAIL <channel> <ts> <error>` (tried again on the
+  next answer there); the answer itself has already gone out either way.
 
 ### Usage screenshot
 
