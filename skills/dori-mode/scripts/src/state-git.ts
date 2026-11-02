@@ -48,6 +48,8 @@ export const EXCLUDES = [
   "*inbox*.jsonl", "answers*.jsonl", "*events*.jsonl", "briefs/",
   "# logs, locks, caches, QA evidence, trash",
   "*.log", "*.lock", "*.pid", "*.tmp", "*.swp", "*cache*", "qa/", "qa-*", "trash-*/", "gpu/",
+  "# dori review's PR diffs: gh pr diff rebuilds them, and a PR's test fixtures look like tokens (the review .md and receipt .json stay)",
+  "**/receipts/reviews/*.diff",
   "# checkouts, worktrees, models, binaries, archives, media",
   "src/", "wt/", "node_modules/", "models/", "whisper.cpp/", "research/",
   "*.zip", "*.tar", "*.tar.*", "*.tgz", "*.gz", "*.7z", "*.bin", "*.gguf", "*.onnx", "*.so", "*.o",
@@ -241,6 +243,10 @@ const withLock = async <T>(deps: StateGitDeps, dir: string, waitMs: number, body
 
 export type CommitResult = { readonly lines: string[]; readonly sha?: string };
 
+// the files of an index (env GIT_INDEX_FILE: another one) that the fork's excludes cover
+const covered = async (deps: StateGitDeps, dir: string, env: Readonly<Record<string, string>> = {}): Promise<string[]> =>
+  (await must(deps, dir, ["ls-files", "-z", "-c", "-i", `--exclude-from=${join(gitDir(dir), "info", "exclude")}`], env)).split("\0").filter(Boolean);
+
 const commitLocked = async (deps: StateGitDeps, dir: string, message?: string): Promise<CommitResult> => {
   const started = deps.now();
   const lines = unlockStale(deps, dir);
@@ -256,6 +262,13 @@ const commitLocked = async (deps: StateGitDeps, dir: string, message?: string): 
   if (big.length) {
     writeExclude(dir, big.map((p) => `/${p}`));
     lines.push(`STATE_GIT_BIG ${dir} left out ${big.length} file(s) over ${deps.settings.maxFileKb} KB: ${big.slice(0, 3).join(", ")}${big.length > 3 ? " ..." : ""}`);
+  }
+  // git keeps tracking a file an exclude covers: one committed before a new default (dori review's diffs before
+  // 2026-11-02) is taken out of the index here, and stays on disk
+  const out = await covered(deps, dir);
+  if (out.length) {
+    await must(deps, dir, ["rm", "-q", "--cached", "--", ...out]);
+    lines.push(`STATE_GIT_UNTRACK ${dir} ${out.length} file(s) the excludes now cover, kept on disk: ${out.slice(0, 3).join(", ")}${out.length > 3 ? " ..." : ""}`);
   }
   await must(deps, dir, ["add", "-A"]);
   let list = await staged(deps, dir);
@@ -316,10 +329,18 @@ export const restoreDir = async (deps: StateGitDeps, dir: string, target: string
   const sha = await resolveTarget(deps, dir, target);
   if (!sha) return [`STATE_GIT_NO_TARGET ${dir} has no commit at or before ${target}`];
   const r = await withLock(deps, dir, 30_000, async () => {
+    // the fork's excludes as of this version, also when no commit ran since an update: the snapshot and the files
+    // kept below follow them
+    writeExclude(dir);
     const lines = (await commitLocked(deps, dir, `before restore to ${sha.slice(0, 7)}`)).lines.filter((l) => !l.startsWith("STATE_GIT_NOCHANGE"));
     const before = await must(deps, dir, ["rev-parse", "--short", "HEAD"]);
     const when = await must(deps, dir, ["log", "-1", "--date=format-local:%Y-%m-%d %H:%M", "--format=%cd", sha]);
-    await must(deps, dir, ["restore", `--source=${sha}`, "--staged", "--worktree", "--", ...(paths.length ? paths : ["."])]);
+    // a file the excludes now cover stays as it is on disk: the commit just made no longer holds it, so a restore
+    // that overwrote it could not be undone
+    const idx = join(gitDir(dir), "dori-restore-index");
+    await must(deps, dir, ["read-tree", sha], { GIT_INDEX_FILE: idx });
+    const keep = await covered(deps, dir, { GIT_INDEX_FILE: idx }).finally(() => rmSync(idx, { force: true }));
+    await must(deps, dir, ["restore", `--source=${sha}`, "--staged", "--worktree", "--", ...(paths.length ? paths : ["."]), ...keep.map((p) => `:(exclude,literal)${p}`)]);
     const done = await commitLocked(deps, dir, `restore ${paths.length ? paths.join(" ") : "all"} to ${sha.slice(0, 7)} (${when})`);
     lines.push(...done.lines.filter((l) => !l.startsWith("STATE_GIT_NOCHANGE")));
     lines.push(`STATE_GIT_RESTORED ${dir} to ${sha.slice(0, 7)} (${when} ${deps.timeZone}); undo: dori state-git restore ${before} --dir ${dir}`);
