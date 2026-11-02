@@ -1089,8 +1089,10 @@ test("model: random orders, feed sweeps, passes, lane closes, replacements and d
     const steps: string[] = [];
     const list: InboxRow[] = [];
     const handed = new Set<string>();
-    // #dori-pair repair posts: some reach the inbox after a later one (a lower id), some reply to an earlier post
+    // #dori-pair repair posts: some reach the inbox after a later one (a lower id), some reply to an earlier post, some reply
+    // to a parent that reaches the inbox only later (a reply's id is always above its parent's, as in Discord)
     const pairList: InboxRow[] = [{ id: "9000", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+    const owed: string[] = [];
     let n = 0;
     let p = 0;
     const fail = (why: string): never => {
@@ -1102,6 +1104,15 @@ test("model: random orders, feed sweeps, passes, lane closes, replacements and d
       await backlogTick(deps({ busy: async () => (busy ? ["busy"] : []), intake: async () => [...orderPass(list), ...(await pairPass(pairList))] }, { maxStarts }), { force: true });
       // I8: every #dori-pair post past the start has an item after a pass (its own, or a dropped one when it went into a waiting request)
       for (const r of pairList.filter((x) => Number(x.id) > 9000)) if (!readItem(state, `pair-${r.id}`)) fail(`pair post ${r.id} has no item after a pass`);
+      // I10: at most one running lane per #dori-pair request (the first post of a reply chain), whatever order the posts came in
+      const up = new Map(pairList.map((x) => [x.id, x.reply_to] as const));
+      const root = (id: string): string => {
+        let x = id;
+        for (let i = 0; i < 100 && up.get(x); i++) x = up.get(x) as string;
+        return x;
+      };
+      const roots = listItems(state).filter((i) => i.status === "running" && isPairItem(i) && i.row !== undefined).map((i) => root(i.row as string));
+      if (roots.length !== new Set(roots).size) fail(`two running lanes of one #dori-pair request: ${roots.join(",")}`);
       // I9: a #dori-pair request is the backlog's alone: never handed to the lead
       for (const r of rows.slice(before)) if (r.kind === "backlog-held" && /pair-\d/.test(r.content)) fail(`a pair item went to the lead: ${r.content}`);
       for (const r of rows.slice(before).filter((x) => x.content.startsWith("BACKLOG_ORDER_TO_LEAD"))) {
@@ -1137,11 +1148,15 @@ test("model: random orders, feed sweeps, passes, lane closes, replacements and d
       const op = pick(["order", "order", "pair", "pair", "feed", "pass", "pass", "pass", "close", "replace", "drop"] as const);
       if (op === "pair") {
         p++;
-        const id = String(9000 + 2 * p + pick([0, 0, -3]));
-        const earlier = pairList.filter((x) => x.id !== "9000");
-        const reply = earlier.length && rnd() < 0.4 ? pick(earlier).id : undefined;
+        const late = owed.length && rnd() < 0.5 ? owed.shift() : undefined;
+        // ids: 9000 + 4p (or 6 lower: delivered after a later one); a parent owed is 9000 + 4p - 1, never another post's id
+        const id = late ?? String(9000 + 4 * p + pick([0, 0, -6]));
+        const earlier = pairList.filter((x) => x.id !== "9000" && Number(x.id) < Number(id));
+        const ahead = !late && rnd() < 0.15 ? String(9000 + 4 * p - 1) : undefined;
+        if (ahead) owed.push(ahead);
+        const reply = late ? undefined : (ahead ?? (earlier.length && rnd() < 0.4 ? pick(earlier).id : undefined));
         pairList.push({ id, scope: "pair-bot", author_id: "B1", channel_id: "P", content: `수돌, 수리 요청: m${p}`, ...(reply ? { reply_to: reply } : {}) });
-        steps.push(`pair ${id}${reply ? `>${reply}` : ""}`);
+        steps.push(`pair ${id}${reply ? `>${reply}` : ""}${late ? " (parent, late)" : ""}`);
       } else if (op === "order") {
         n++;
         const ts = new Date(T0 + pick([n, n, n - 1, 0]) * 60_000 + 1).toISOString();
@@ -1459,6 +1474,37 @@ test("a reply to a reply that went into a waiting request is of that same reques
   expect(readItem(state, "pair-5203")).toMatchObject({ status: "open", todo: "pair:5201" });
   expect(pass).toContain("BACKLOG_WAIT pair-5203: todo pair:5201 is worked on by lane bl-pair-5201 now");
   expect(launched).toEqual(["pair-5201"]);
+});
+
+test("a reply that reaches the inbox before its parent is of the parent's request: in one batch, across passes, and with a middle post coming last, only one lane of the request runs", async () => {
+  // Given: the start is set
+  const list: InboxRow[] = [{ id: "5300", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  await pairPass(list);
+  const post = (id: string, reply?: string): InboxRow => ({ id, scope: "pair-bot", author_id: "B1", channel_id: "P", ...(reply ? { reply_to: reply } : {}), content: `수돌, 수리 요청: ${id}` });
+  // When: 5302 (a reply to 5301) comes in before 5301 in one batch; then 5311 starts before its parent 5310 comes; then
+  // 5322 -> 5321 -> 5320 comes as 5322 and 5320 first, and 5321 after a pass
+  list.push(post("5302", "5301"), post("5301"));
+  await pairPass(list);
+  const one = await backlogTick(deps({}, { maxStarts: 3 }), { force: true });
+  list.push(post("5311", "5310"));
+  await pairPass(list);
+  await backlogTick(deps({}, { maxStarts: 3 }), { force: true });
+  list.push(post("5310"));
+  await pairPass(list);
+  list.push(post("5322", "5321"), post("5320"));
+  await pairPass(list);
+  list.push(post("5321", "5320"));
+  const middle = await pairPass(list);
+  const last = await backlogTick(deps({}, { maxStarts: 5 }), { force: true });
+  // Then
+  expect([readItem(state, "pair-5301")?.todo, readItem(state, "pair-5302")?.todo]).toEqual(["pair:5301", "pair:5301"]);
+  expect(one.filter((l) => l.startsWith("BACKLOG_STARTED")).length).toBe(1);
+  expect(readItem(state, "pair-5310")).toMatchObject({ status: "open", todo: "pair:5310" });
+  expect(last).toContain("BACKLOG_WAIT pair-5310: todo pair:5310 is worked on by lane bl-pair-5311 now");
+  expect(middle).toContain("BACKLOG_INTAKE_REQUEST pair-5322: of request pair:5320 (its reply chain)");
+  expect(readItem(state, "pair-5322")?.todo).toBe("pair:5320");
+  const running = listItems(state).filter((i) => i.status === "running").map((i) => i.todo);
+  expect(running.length).toBe(new Set(running).size);
 });
 
 const save5002Running = (): void => {

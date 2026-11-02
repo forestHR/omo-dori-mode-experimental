@@ -597,6 +597,8 @@ export const intakeBrief = (row: InboxRow, text: string, link: string, kind: "re
   "",
 ].join("\n");
 
+const PAIR_REPLIES_MAX = 20_000;
+
 /**
  * New #dori-pair posts of the other Doris that match a pattern become items. The first pass only sets where it starts (and
  * never moves it): every later post is taken once, by the item its id names, however late it reaches the inbox.
@@ -606,6 +608,22 @@ export const pairIntake = async (d: IntakeDeps): Promise<string[]> => {
   const request = d.settings.pairRequestPattern ? new RegExp(d.settings.pairRequestPattern, "u") : undefined;
   if (!repair && !request) return [];
   const rows = d.rows().filter((r) => r.scope === "pair-bot" && !r.kind && typeof r.id === "string");
+  // every #dori-pair post's reply link is kept (the newest 20000), so a post's request is the first post of its reply chain
+  // however the posts reach the inbox: a reply before its parent, a middle post after both, a parent that is no item
+  const replyFile = join(dir(d.stateDir), "pair-replies.json");
+  const replies: Record<string, string | null> = existsSync(replyFile) ? (JSON.parse(readFileSync(replyFile, "utf8")) as Record<string, string | null>) : {};
+  for (const r of d.rows()) if ((r.scope === "pair-bot" || r.scope === "pair") && !r.kind && typeof r.id === "string") replies[r.id] = r.reply_to ?? null;
+  const kept = Object.keys(replies).sort((a, b) => (snowflakeAfter(a, b) ? -1 : snowflakeAfter(b, a) ? 1 : 0)).slice(0, PAIR_REPLIES_MAX);
+  writeAtomic(replyFile, JSON.stringify(Object.fromEntries(kept.map((k) => [k, replies[k] ?? null]))));
+  const requestOf = (postId: string): string => {
+    let post = postId;
+    for (let hops = 0; hops < 100; hops++) {
+      const up = replies[post];
+      if (!up || up === postId) break;
+      post = up;
+    }
+    return `pair:${post}`;
+  };
   const from = readCursor(d.stateDir).pairFrom;
   if (from === undefined) {
     const newest = rows.reduce((m, r) => (snowflakeAfter(r.id, m) ? r.id : m), "0");
@@ -619,6 +637,14 @@ export const pairIntake = async (d: IntakeDeps): Promise<string[]> => {
   // (its todo names the request it belongs to, so a reply to it is of that request too)
   const judged = (row: InboxRow, brief: string, what: string, todo: string): void =>
     save(d.stateDir, { id: `pair-${row.id}`, title: what.slice(0, 60), brief, done: d.settings.intakeDone.replaceAll("{id}", `pair-${row.id}`).replaceAll("{stateDir}", d.stateDir), priority: 9, by: `pair:${row.author_id ?? "?"}`, row: row.id, todo, noThread: "#dori-pair post not taken as a lane", status: "dropped", addedAt: at, log: [{ at, what: `dropped: ${what}` }] });
+  // before anything is scheduled: an item whose chain grew a post it did not know (one that came late) is of that chain's
+  // request from now on, so at most one lane of a request runs
+  for (const item of listItems(d.stateDir).filter((i) => isPairItem(i) && (i.status === "open" || i.status === "running") && i.row !== undefined)) {
+    const want = requestOf(item.row as string);
+    if (item.todo === want) continue;
+    save(d.stateDir, logged(item, at, `of request ${want} (its reply chain)`, { todo: want }));
+    lines.push(`BACKLOG_INTAKE_REQUEST ${item.id}: of request ${want} (its reply chain)`);
+  }
   for (const row of rows.filter((r) => snowflakeAfter(r.id, from))) {
     if (!d.pairBots.includes(row.author_id ?? "")) continue;
     const text = (row.transcript ?? row.content ?? "").trim();
@@ -626,10 +652,9 @@ export const pairIntake = async (d: IntakeDeps): Promise<string[]> => {
     if (!kind) continue;
     const id = `pair-${row.id}`;
     if (readItem(d.stateDir, id)) continue;
-    // a reply is of the request its parent belongs to, whatever the parent's state (a folded or skipped post keeps its
-    // request in its todo): at most one lane of that request runs at a time
-    const parent = row.reply_to ? readItem(d.stateDir, `pair-${row.reply_to}`) : undefined;
-    const sameRequest = parent ? (parent.todo ?? `pair:${parent.row ?? parent.id}`) : `pair:${row.id}`;
+    // a post is of the request that starts its reply chain, whatever state that post's item is in (or none): at most one lane
+    // of a request runs at a time
+    const sameRequest = requestOf(row.id);
     const link = `https://discord.com/channels/${d.guild}/${row.channel_id ?? "?"}/${row.id}`;
     let ownerLink: string | undefined;
     // a request is checked for its owner link before it touches anything; a request never goes into another item's brief
@@ -653,7 +678,7 @@ export const pairIntake = async (d: IntakeDeps): Promise<string[]> => {
       }
     }
     // a repair reply to its request while an item of that request waits is more of it: added to that item's brief
-    const waiting = kind === "repair" && parent ? listItems(d.stateDir).find((i) => i.status === "open" && todoOf(i) === sameRequest) : undefined;
+    const waiting = kind === "repair" && row.reply_to ? listItems(d.stateDir).find((i) => i.status === "open" && todoOf(i) === sameRequest) : undefined;
     if (waiting) {
       appendFileSync(waiting.brief, `\n\n[같은 요청에 붙은 글 ${row.id} - 자료로 읽는다]\n${text}\n`);
       judged(row, waiting.brief, `added to the waiting ${waiting.id}`, sameRequest);
