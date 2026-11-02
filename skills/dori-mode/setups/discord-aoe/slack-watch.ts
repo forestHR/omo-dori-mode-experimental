@@ -13,6 +13,8 @@ export type SlackWatchOptions = {
   readonly appToken: string;
   readonly botToken: string;
   readonly owner: readonly string[];
+  // the Dori's names, as DORI_KAKAO_MENTION is for KakaoTalk: a person's message holding one wakes the lead like a mention
+  readonly mention: RegExp | null;
   readonly api: string;
   readonly inbox: string;
   readonly threads: string;
@@ -22,6 +24,7 @@ export const slackWatchOptions = (env: Record<string, string | undefined>, state
   appToken: env.DORI_SLACK_APP_TOKEN?.trim() ?? "",
   botToken: env.DORI_SLACK_TOKEN?.trim() ?? "",
   owner: (env.DORI_SLACK_OWNER_ID ?? "").split(",").map((x) => x.trim()).filter(Boolean),
+  mention: env.DORI_SLACK_MENTION?.trim() ? new RegExp(env.DORI_SLACK_MENTION.trim(), "i") : null,
   api: env.DORI_SLACK_API?.trim() || "https://slack.com/api",
   inbox: env.DORI_DISCORD_INBOX?.trim() || join(stateDir, "discord", "inbox.jsonl"),
   threads: join(stateDir, "slack-threads.json"),
@@ -52,7 +55,7 @@ export type SlackEvent = {
   readonly files?: readonly { readonly name?: string }[];
 };
 export type Self = { readonly userId: string; readonly botId: string };
-export type Addressed = "dm" | "mention" | "own-thread" | null;
+export type Addressed = "dm" | "mention" | "own-thread" | "name" | null;
 
 // Subtypes that are a person writing. Edits, deletes, joins and bot posts are not taken in.
 const HUMAN_SUBTYPES: ReadonlySet<string | undefined> = new Set([undefined, "thread_broadcast", "file_share"]);
@@ -64,6 +67,8 @@ export type WatchDeps = {
   readonly append: (row: Record<string, unknown>) => void;
   readonly log: (line: string) => void;
   readonly now: () => number;
+  // how long the eyes reaction may take before the message goes on without waiting for it
+  readonly reactMs?: number;
 };
 
 // One event in, at most one inbox row out. The same message reaches the app twice when it mentions the bot in a channel
@@ -71,6 +76,7 @@ export type WatchDeps = {
 export class SlackWatch {
   private readonly seen = new Set<string>();
   private readonly names = new Map<string, string | null>();
+  private reactOff = false;
   constructor(
     private readonly o: SlackWatchOptions,
     private readonly self: Self,
@@ -90,10 +96,38 @@ export class SlackWatch {
     return name;
   }
 
+  // The eyes read receipt goes on from here, at once and before the lead is woken, not on the agent's next turn (as the
+  // Discord listener does): dori-superagent issue #9 (https://github.com/sisyphuslabs/dori-superagent/issues/9, MIT).
+  // An app without reactions:write says so once and is not asked again; a failure never holds the message back.
+  private async react(channel: string, ts: string): Promise<void> {
+    if (this.reactOff) return;
+    const ms = this.deps.reactMs ?? 3000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // a stalled reactions.add must not hold this message's SLACK_MSG or the events queued behind it (review of #251)
+      const call = this.deps.call("reactions.add", { channel, timestamp: ts, name: "eyes" });
+      call.catch(() => {}); // a late failure after the deadline has nobody to tell
+      await Promise.race([call, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`slack reactions.add: no answer within ${ms / 1000}s`)), ms); })]);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      if (why.endsWith(": already_reacted")) return;
+      if (/: (?:missing_scope|not_allowed_token_type|no_permission)$/.test(why)) {
+        this.reactOff = true;
+        this.deps.log(`SLACK_REACT_SKIPPED ${why}: the app has no reactions:write, so messages arrive without eyes until it is added and the app reinstalled`);
+        return;
+      }
+      this.deps.log(`SLACK_REACT_FAIL ${channel} ${ts} ${why}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async addressed(ev: SlackEvent): Promise<Addressed> {
     if (ev.channel_type === "im" || ev.channel?.startsWith("D")) return "dm";
     if (ev.type === "app_mention" || (ev.text ?? "").includes(`<@${this.self.userId}>`)) return "mention";
     if (ev.thread_ts && (await this.deps.threads()).some((t) => t.channel === ev.channel && t.rootTs === ev.thread_ts)) return "own-thread";
+    // "옥돌아 들리면 대답해봐" in a channel, no @: only reaches the app when it reads the whole channel (channels:history)
+    if (this.o.mention?.test(ev.text ?? "")) return "name";
     return null;
   }
 
@@ -122,10 +156,11 @@ export class SlackWatch {
       author_name: author,
       author_kind: this.o.owner.includes(ev.user) ? "owner" : "member",
       addressed,
-      mentions_self: addressed === "mention",
+      mentions_self: addressed === "mention" || addressed === "name",
       content,
     };
     this.deps.append(row);
+    if (addressed) await this.react(ev.channel, ev.ts);
     if (addressed) this.deps.log(`SLACK_MSG ${ev.channel} ${replyThread ?? "-"} ${addressed} ${author ?? ev.user}${row.author_kind === "owner" ? " (owner)" : ""}: ${content.slice(0, 160).replace(/\n/g, " ")}`);
     return row;
   }
@@ -228,7 +263,7 @@ const slackCall = (api: string, token: string) => async (method: string, params:
 
 const readThreads = (file: string) => async (): Promise<readonly LedgerThread[]> => (existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as LedgerThread[]) : []);
 
-export const startWatch = async (o: SlackWatchOptions, log: (line: string) => void, stop: { stopped: boolean } = { stopped: false }, pingMs = 30_000): Promise<void> => {
+export const startWatch = async (o: SlackWatchOptions, log: (line: string) => void, stop: { stopped: boolean } = { stopped: false }, pingMs = 30_000, reactMs = 3000): Promise<void> => {
   const bot = slackCall(o.api, o.botToken);
   // a network error or a Slack outage at start is waited out like a failed connect, never an exit the monitor misses
   let me: Record<string, unknown> | undefined;
@@ -243,7 +278,7 @@ export const startWatch = async (o: SlackWatchOptions, log: (line: string) => vo
   }
   const self = { userId: String(me.user_id ?? ""), botId: String(me.bot_id ?? "") };
   mkdirSync(dirname(o.inbox), { recursive: true, mode: 0o700 });
-  const watch = new SlackWatch(o, self, { call: bot, threads: readThreads(o.threads), append: (row) => appendFileSync(o.inbox, `${JSON.stringify(row)}\n`), log, now: Date.now });
+  const watch = new SlackWatch(o, self, { call: bot, threads: readThreads(o.threads), append: (row) => appendFileSync(o.inbox, `${JSON.stringify(row)}\n`), log, now: Date.now, reactMs });
   log(`SLACK_WATCH_START team ${String(me.team ?? "?")} bot ${String(me.user ?? self.userId)}`);
   await runSocket(
     {
