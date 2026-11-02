@@ -53,6 +53,8 @@ export type BacklogItem = {
   readonly row?: string;
   // the board todo an owner's order is about (its todo_id): at most one lane per todo runs at a time, feed or order
   readonly todo?: string;
+  // the running lane of the same todo a late order was relayed to (it is that lane's now, not the lead's)
+  readonly relayedTo?: string;
   // the owner's approval of the entry: his card (approved_at, auto_applied false) or his answer to a changed-content
   // question, bound to the content hash it was given for; another hash means no approval
   readonly approval?: { readonly at: string; readonly hash: string; readonly by: "card" | "decide" };
@@ -565,11 +567,14 @@ export const rowItemId = (rowId: string): string => rowId.toLowerCase().replace(
  * already has an item for the row, that item's lane owns it; else a marker item (dropped, by lead) is written, so no pass
  * ever opens a lane for it, and the lead does it.
  */
-export const takeRow = (stateDir: string, rowId: string, at: string): { readonly lane?: BacklogItem; readonly lead?: BacklogItem } => {
+export const takeRow = (stateDir: string, rowId: string, at: string): { readonly lane?: BacklogItem; readonly lead?: BacklogItem; readonly done?: BacklogItem; readonly relayed?: BacklogItem } => {
   const id = rowItemId(rowId);
   if (!LANE_KEY.test(id)) throw new BacklogError(`${rowId} is not a row id the backlog takes`);
   const found = readItem(stateDir, id);
   if (found && (found.status === "open" || found.status === "running")) return { lane: found };
+  // finished by its lane, or handed to the lane of its todo: nothing is the lead's to do
+  if (found?.status === "done") return { done: found };
+  if (found?.relayedTo) return { relayed: found };
   if (found) return { lead: found };
   mkdirSync(join(dir(stateDir), "items"), { recursive: true });
   const marker: BacklogItem = { id, title: `taken by the lead: ${rowId}`, brief: "", done: "", priority: 9, by: "lead", row: rowId, status: "dropped", addedAt: at, log: [{ at, what: "taken by the lead (dori backlog take): no lane is opened for it" }] };
@@ -770,13 +775,10 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
     const waiting = listItems(d.stateDir).filter((i) => i.status === "open" && !i.ask && !i.approvalAsk && !i.held && !i.paused).sort(byTurn);
     const room = Math.max(0, Math.min(d.settings.maxLanes - runningIds.size, d.settings.maxStarts));
     let tried = 0;
-    for (const queued of waiting.slice(0, room)) {
-      // checked again before each start: the start before it may have used the last pane, memory or account
-      const hold = [...(await d.busy()), ...[d.limited()].filter((x): x is string => Boolean(x))];
-      if (hold.length) {
-        quiet.push(`BACKLOG_HOLD ${hold.join(" | ")}; ${waiting.length - tried} item(s) wait`);
-        break;
-      }
+    // every waiting item is looked at until room starts were tried: one that may not start now (its todo's lane runs) does
+    // not use the room of the items behind it
+    for (const queued of waiting) {
+      if (tried >= room) break;
       const item = readItem(d.stateDir, queued.id);
       if (!item || item.status !== "open" || item.ask || item.approvalAsk || item.held || item.paused) continue;
       // one lane per board todo at a time, whatever brought it (the feed, a follow-up, an owner's order): checked here, after
@@ -786,6 +788,12 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
       if (sibling) {
         quiet.push(`BACKLOG_WAIT ${item.id}: todo ${todo} is worked on by lane ${sibling.lane ?? laneKeyOf(sibling.id)} now`);
         continue;
+      }
+      // checked again before each start: the start before it may have used the last pane, memory or account
+      const hold = [...(await d.busy()), ...[d.limited()].filter((x): x is string => Boolean(x))];
+      if (hold.length) {
+        quiet.push(`BACKLOG_HOLD ${hold.join(" | ")}; ${waiting.length - tried} item(s) wait`);
+        break;
       }
       const full = await hostReserve(d.host, item.id, d.now());
       if (full) {
@@ -831,6 +839,16 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
     }
     // an owner's order that could not start within backlog.orderWaitMin goes back to the lead: it never waits unseen
     for (const late of listItems(d.stateDir).filter((i) => i.status === "open" && i.row !== undefined && !i.ask && !i.approvalAsk && d.now() - Date.parse(i.addedAt) >= d.settings.orderWaitMin * 60_000)) {
+      // its todo's lane still runs: the order goes to that lane (through the lead), never beside it
+      const todo = todoOf(late);
+      const sibling = todo === undefined ? undefined : listItems(d.stateDir).find((o) => o.id !== late.id && o.status === "running" && todoOf(o) === todo);
+      if (sibling) {
+        const to = sibling.lane ?? laneKeyOf(sibling.id);
+        save(d.stateDir, logged(late, at, `dropped: relayed to lane ${to}, which works on todo ${todo}`, { status: "dropped", relayedTo: to }));
+        d.inbox("backlog-order", `backlog-order-${late.id}-${at}`, `BACKLOG_ORDER_TO_LANE ${late.row} (${late.title}): todo ${todo} is still worked on by lane ${to} (${sibling.pane ?? "?"}) -> type the owner's order into that lane with dori type; do not do it beside it`);
+        lines.push(`BACKLOG_ORDER_TO_LANE ${late.id}: todo ${todo} still runs in lane ${to}; relayed to it through the lead`);
+        continue;
+      }
       const why = late.held || quiet.join(" | ") || "no room";
       save(d.stateDir, logged(late, at, `dropped: handed back to the lead (${why.slice(0, 200)})`, { status: "dropped" }));
       d.inbox("backlog-held", `backlog-held-${late.id}-${at}`, `BACKLOG_ORDER_TO_LEAD ${late.row} (${late.title}): its backlog lane did not start within ${d.settings.orderWaitMin} min (${why.slice(0, 200)}) -> do the owner's order yourself; it is off the list`);

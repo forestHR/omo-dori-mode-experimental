@@ -964,3 +964,46 @@ test("a todo renamed on the board is listed, started and reported under its new 
   expect(readItem(state, "todo-pb-0123456789ab-1")?.title).toBe("fix B");
   expect(rows.find((r) => r.kind === "backlog-start")?.content).toContain("(fix B, p6)");
 });
+
+test("dori backlog take on an order its lane already finished says so, never hands the work to the lead again", async () => {
+  // Given: order 30 ran and its lane closed
+  orderPass([]);
+  orderPass([orderRow(30, "2026-11-02T15:30:00.000Z", "pb-0123456789ab-5")]);
+  await backlogTick(deps(), { force: true });
+  lanes = lanes.map((l) => (l.key === "bl-dashboard-order-30" ? lane(l.key, true) : l));
+  await backlogTick(deps(), { force: true });
+  // When
+  const r = takeRow(state, "dashboard-order-30", new Date(now).toISOString());
+  // Then
+  expect([r.done?.id, r.lead, readItem(state, "dashboard-order-30")?.status]).toEqual(["dashboard-order-30", undefined, "done"]);
+});
+
+test("an order waiting on its todo's lane does not use the start of an unrelated item behind it", async () => {
+  // Given: todo 1 runs; an order about it and an unrelated order wait; one start a pass
+  await feedSweep([boardTodo("1")]);
+  await backlogTick(deps(), { force: true });
+  orderPass([]);
+  orderPass([orderRow(31, "2026-11-02T15:31:00.000Z", "pb-0123456789ab-1"), orderRow(32, "2026-11-02T15:32:00.000Z", "pb-0123456789ab-4")]);
+  // When
+  await backlogTick(deps(), { force: true });
+  // Then
+  expect(launched).toEqual(["todo-pb-0123456789ab-1", "dashboard-order-32"]);
+  expect(readItem(state, "dashboard-order-31")?.status).toBe("open");
+});
+
+test("an order still waiting on its todo's running lane at the hand-back time is relayed to that lane, and take says so", async () => {
+  // Given: todo 1 runs; an order about it waits past backlog.orderWaitMin
+  await feedSweep([boardTodo("1")]);
+  await backlogTick(deps(), { force: true });
+  orderPass([]);
+  orderPass([orderRow(33, "2026-11-02T15:33:00.000Z", "pb-0123456789ab-1")]);
+  now = T0 + 10 * 60_000;
+  // When
+  const lines = await backlogTick(deps(), { force: true });
+  const r = takeRow(state, "dashboard-order-33", new Date(now).toISOString());
+  // Then
+  expect(lines).toContain("BACKLOG_ORDER_TO_LANE dashboard-order-33: todo pb-0123456789ab-1 still runs in lane bl-todo-pb-0123456789ab-1; relayed to it through the lead");
+  expect(lines.some((l) => l.startsWith("BACKLOG_ORDER_TO_LEAD"))).toBe(false);
+  expect(rows.filter((x) => x.kind === "backlog-order").map((x) => x.content.split(" ")[0])).toEqual(["BACKLOG_ORDER_TO_LANE"]);
+  expect([r.relayed?.relayedTo, r.lead]).toEqual(["bl-todo-pb-0123456789ab-1", undefined]);
+});

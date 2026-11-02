@@ -1609,6 +1609,8 @@ try {
           const rowId = id ?? die("usage: dori backlog take <inbox row id>");
           const r = await withBacklogLock(config.stateDir, 120, () => takeRow(config.stateDir, rowId, at));
           if (r.lane) die(`BACKLOG_IS_LANES ${r.lane.id}: the backlog has it (${r.lane.status}${r.lane.pane ? ` in ${r.lane.pane}` : ""}); leave it to that lane`, 3);
+          if (r.done) die(`BACKLOG_ALREADY_DONE ${r.done.id}: its lane ${r.done.lane ?? "?"} finished it (${r.done.log.at(-1)?.what ?? "done"}); nothing to do`, 3);
+          if (r.relayed) die(`BACKLOG_RELAYED ${r.relayed.id}: handed to lane ${r.relayed.relayedTo}, which works on its todo; type it there if it was not, never do it beside it`, 3);
           console.log(`BACKLOG_TAKEN_BY_LEAD ${r.lead?.id}: no lane is opened for ${rowId}; you do it`);
         } else die(`backlog: unknown step ${sub} (list, add, drop, decide, tick, show, take)`);
       } catch (e) {
