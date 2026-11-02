@@ -4,8 +4,8 @@
     dori-file-relay [--replace] <from> <file> <to> [dest]    one file, by hand
     dori-file-relay --serve [--cycles N]                     the delivery service (unit dori-file-relay)
 
-Runs as the account that may sudo -n -u every Dori account on the host (oriclaw/ZzangDori on ori0a83) and uses only
-those rights; no new root, sudo or firewall rule. Accounts: DORI_FILE_RELAY_DORIS (below) or oriclaw okdori moodori
+Runs as the account that may sudo -n -u every other Dori account on the host (godori/GoDori on ori0a83 since
+2026-11-03, before that oriclaw/ZzangDori; its own account needs no sudo) and uses only those rights; no new root, sudo or firewall rule. Accounts: DORI_FILE_RELAY_DORIS (below) or oriclaw okdori moodori
 yoodori gongdori.
 
 By hand: <file> is read as <from> and only from /home/<from>/outbox (relative to it, or an absolute path under it). The
@@ -34,6 +34,7 @@ import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -395,6 +396,9 @@ def helper(account: str, role: str, code: str, args: list) -> tuple:
     data = code.encode()
     if TEST_HOMES:
         prefix, home = [], os.path.join(TEST_HOMES, account)
+    elif account == pwd.getpwuid(os.getuid()).pw_name:
+        # the relay's own account needs no sudo (a host need not let an account sudo to itself)
+        prefix, home = [], ""
     else:
         prefix, home = ["sudo", "-n", "-u", account, "-H", "--"], ""
     cmd = [*prefix, "/usr/bin/python3", "-I", "-c", BOOT, str(len(data)), role, home, *args]
