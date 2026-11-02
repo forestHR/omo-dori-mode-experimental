@@ -106,7 +106,7 @@ One `KEY=VALUE` per line, `#` comments, absolute paths (neither systemd nor the 
 | `DORI_USAGE_DIR`, `DORI_USAGE_SNAP_DIR` | no | no | Usage screenshot ([below](#usage-screenshot)) |
 | `DORI_SLACK_TOKEN`, `DORI_SLACK_COOKIE`, `DORI_TELEGRAM_TOKEN` | no | yes | Other messengers: `dori send slack\|telegram`, `dori presence`, `dori inbound slack` |
 | `DORI_SLACK_APP_TOKEN` | no | yes | Turns the Slack watcher on (`slack-watch.ts`; an `xapp-` app-level token with `connections:write`); it also needs `DORI_SLACK_TOKEN` to be the app's `xoxb-` bot token ([section](#slack-as-a-bot)) |
-| `DORI_SLACK_OWNER_ID`, `DORI_SLACK_API`, `DORI_SLACK_WAIT_MS` | no | no | The owner's Slack member ids (rows get `author_kind: "owner"`), the Web API base (a test server; default `https://slack.com/api`, also used by `dori send slack`), the token re-read interval of `--wait` (default 30000) |
+| `DORI_SLACK_OWNER_ID`, `DORI_SLACK_MENTION`, `DORI_SLACK_API`, `DORI_SLACK_WAIT_MS` | no | no | The owner's Slack member ids (rows get `author_kind: "owner"`), the Dori's names as a case-insensitive regex (a message holding one wakes the lead as `name`), the Web API base (a test server; default `https://slack.com/api`, also used by `dori send slack`), the token re-read interval of `--wait` (default 30000) |
 | `PATH` | no | no | The units' PATH (zele, node for agent-messenger); overrides the unit default |
 
 Not in `dori.env`; the wrapper, a unit or dori itself sets these for one run:
@@ -313,8 +313,10 @@ Socket Mode, so nothing listens on a public port.
 
 1. **App.** In the workspace, open https://api.slack.com/apps, **Create New App** -> **From a manifest**, pick the
    workspace and paste `slack-app-manifest.yaml` (rename `Dori` to the Dori's name). It asks for the least the watcher
-   needs: DMs to the app and mentions of it (`im:history`, `app_mentions:read`), posting (`chat:write`) and display
-   names (`users:read`). To also take in every message of the channels the app is invited to (and so untagged replies
+   needs: DMs to the app and mentions of it (`im:history`, `app_mentions:read`), posting (`chat:write`), the eyes read
+   receipt (`reactions:write`) and display names (`users:read`). An app installed before `reactions:write` was in the
+   manifest keeps working without eyes (`SLACK_REACT_SKIPPED`, once) until the scope is added under **OAuth &
+   Permissions** and the app reinstalled. To also take in every message of the channels the app is invited to (and so untagged replies
    in a thread the Dori posted in), uncomment `channels:history` / `groups:history` and `message.channels` /
    `message.groups`: that is the owner's choice of what the Dori may read.
 2. **Install** it to the workspace (**Install App**), then **Basic Information** -> **App-Level Tokens** -> **Generate
@@ -341,9 +343,15 @@ tokens are in `dori.env`, so the monitor can be armed before the owner has insta
   the app's own, edits and deletes are not taken in. A mention in a channel arrives twice (`app_mention` and
   `message.channels`) and Slack retries an envelope it thinks was lost: each message is taken in once.
 - **Waking the Dori.** Only an addressed message prints
-  `SLACK_MSG <channel> <reply thread or -> <dm|mention|own-thread> <name>[ (owner)]: <text>`: a DM, a mention of the bot,
-  or a reply in a thread `dori send slack` posted in (`<stateDir>/slack-threads.json`). Other channel messages are in
-  the inbox only.
+  `SLACK_MSG <channel> <reply thread or -> <dm|mention|own-thread|name> <name>[ (owner)]: <text>`: a DM, a mention of the
+  bot, a reply in a thread `dori send slack` posted in (`<stateDir>/slack-threads.json`), or a message holding one of
+  the Dori's names (`DORI_SLACK_MENTION`, a case-insensitive regex like `DORI_KAKAO_MENTION`: `옥돌아 들리면 대답해봐`
+  with no @; such a message only reaches the app when it reads whole channels, `channels:history` /
+  `message.channels`). Other channel messages are in the inbox only.
+- **Read receipt.** The watcher puts the eyes reaction on every addressed message itself, before it prints
+  `SLACK_MSG`, as the Discord listener does, so it shows while the lead is still in another turn (dori-superagent
+  [#9](https://github.com/sisyphuslabs/dori-superagent/issues/9)). A failed reaction never holds the message back:
+  `SLACK_REACT_FAIL <channel> <ts> <error>`, or `SLACK_REACT_SKIPPED` once when the app has no `reactions:write`.
 - **Answering.** `dori send slack --to <channel> --text ...`, plus `--thread <reply thread>` unless the line says `-`
   (a plain DM is answered in the DM). The post is the bot's, with `DORI_SLACK_TOKEN`.
 
@@ -527,7 +535,7 @@ A KakaoTalk message (`kakao-watch.ts`):
 {"ts":"...","id":"<log id>","channel_id":"<chat id>","scope":"kakao","room":"<room name>","author_id":"<kakao user id>","author_name":"<nickname>","author_kind":"owner","content":"...","sent_at":1791900000,"mentions_self":false}
 ```
 
-A Slack message (`slack-watch.ts`); `addressed` is `dm`, `mention`, `own-thread` or `null`, and `reply_thread` is the `--thread` of an answer (`null`: answer in the DM itself):
+A Slack message (`slack-watch.ts`); `addressed` is `dm`, `mention`, `own-thread`, `name` or `null` (`mentions_self` is true for `mention` and `name`), and `reply_thread` is the `--thread` of an answer (`null`: answer in the DM itself):
 
 ```json
 {"ts":"...","id":"<message ts>","channel_id":"<channel id>","thread_ts":null,"reply_thread":"<ts>","scope":"slack","author_id":"<member id>","author_name":"<display name>","author_kind":"member","addressed":"mention","mentions_self":true,"content":"..."}

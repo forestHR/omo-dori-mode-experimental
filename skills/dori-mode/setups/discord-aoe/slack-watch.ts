@@ -13,6 +13,8 @@ export type SlackWatchOptions = {
   readonly appToken: string;
   readonly botToken: string;
   readonly owner: readonly string[];
+  // the Dori's names, as DORI_KAKAO_MENTION is for KakaoTalk: a person's message holding one wakes the lead like a mention
+  readonly mention: RegExp | null;
   readonly api: string;
   readonly inbox: string;
   readonly threads: string;
@@ -22,6 +24,7 @@ export const slackWatchOptions = (env: Record<string, string | undefined>, state
   appToken: env.DORI_SLACK_APP_TOKEN?.trim() ?? "",
   botToken: env.DORI_SLACK_TOKEN?.trim() ?? "",
   owner: (env.DORI_SLACK_OWNER_ID ?? "").split(",").map((x) => x.trim()).filter(Boolean),
+  mention: env.DORI_SLACK_MENTION?.trim() ? new RegExp(env.DORI_SLACK_MENTION.trim(), "i") : null,
   api: env.DORI_SLACK_API?.trim() || "https://slack.com/api",
   inbox: env.DORI_DISCORD_INBOX?.trim() || join(stateDir, "discord", "inbox.jsonl"),
   threads: join(stateDir, "slack-threads.json"),
@@ -52,7 +55,7 @@ export type SlackEvent = {
   readonly files?: readonly { readonly name?: string }[];
 };
 export type Self = { readonly userId: string; readonly botId: string };
-export type Addressed = "dm" | "mention" | "own-thread" | null;
+export type Addressed = "dm" | "mention" | "own-thread" | "name" | null;
 
 // Subtypes that are a person writing. Edits, deletes, joins and bot posts are not taken in.
 const HUMAN_SUBTYPES: ReadonlySet<string | undefined> = new Set([undefined, "thread_broadcast", "file_share"]);
@@ -71,6 +74,7 @@ export type WatchDeps = {
 export class SlackWatch {
   private readonly seen = new Set<string>();
   private readonly names = new Map<string, string | null>();
+  private reactOff = false;
   constructor(
     private readonly o: SlackWatchOptions,
     private readonly self: Self,
@@ -90,10 +94,31 @@ export class SlackWatch {
     return name;
   }
 
+  // The eyes read receipt goes on from here, at once and before the lead is woken, not on the agent's next turn (as the
+  // Discord listener does): dori-superagent issue #9 (https://github.com/sisyphuslabs/dori-superagent/issues/9, MIT).
+  // An app without reactions:write says so once and is not asked again; a failure never holds the message back.
+  private async react(channel: string, ts: string): Promise<void> {
+    if (this.reactOff) return;
+    try {
+      await this.deps.call("reactions.add", { channel, timestamp: ts, name: "eyes" });
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      if (why.endsWith(": already_reacted")) return;
+      if (/: (?:missing_scope|not_allowed_token_type|no_permission)$/.test(why)) {
+        this.reactOff = true;
+        this.deps.log(`SLACK_REACT_SKIPPED ${why}: the app has no reactions:write, so messages arrive without eyes until it is added and the app reinstalled`);
+        return;
+      }
+      this.deps.log(`SLACK_REACT_FAIL ${channel} ${ts} ${why}`);
+    }
+  }
+
   async addressed(ev: SlackEvent): Promise<Addressed> {
     if (ev.channel_type === "im" || ev.channel?.startsWith("D")) return "dm";
     if (ev.type === "app_mention" || (ev.text ?? "").includes(`<@${this.self.userId}>`)) return "mention";
     if (ev.thread_ts && (await this.deps.threads()).some((t) => t.channel === ev.channel && t.rootTs === ev.thread_ts)) return "own-thread";
+    // "옥돌아 들리면 대답해봐" in a channel, no @: only reaches the app when it reads the whole channel (channels:history)
+    if (this.o.mention?.test(ev.text ?? "")) return "name";
     return null;
   }
 
@@ -122,10 +147,11 @@ export class SlackWatch {
       author_name: author,
       author_kind: this.o.owner.includes(ev.user) ? "owner" : "member",
       addressed,
-      mentions_self: addressed === "mention",
+      mentions_self: addressed === "mention" || addressed === "name",
       content,
     };
     this.deps.append(row);
+    if (addressed) await this.react(ev.channel, ev.ts);
     if (addressed) this.deps.log(`SLACK_MSG ${ev.channel} ${replyThread ?? "-"} ${addressed} ${author ?? ev.user}${row.author_kind === "owner" ? " (owner)" : ""}: ${content.slice(0, 160).replace(/\n/g, " ")}`);
     return row;
   }

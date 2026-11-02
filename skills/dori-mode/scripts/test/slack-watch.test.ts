@@ -34,7 +34,7 @@ const fakeSlack = () => {
   let opens = 0;
   let port = 0;
   let pings = 0;
-  const failing = { auth: 0 };
+  const failing = { auth: 0, reactScope: false };
   const server = Bun.serve({
     port: 0,
     fetch: async (req, srv) => {
@@ -56,6 +56,7 @@ const fakeSlack = () => {
       }
       if (method === "users.info") return reply({ user: { profile: { display_name: `name-${String(body.user)}` } } });
       if (method === "chat.postMessage") return reply({ channel: body.channel, ts: "1700000100.000100" });
+      if (method === "reactions.add") return failing.reactScope ? Response.json({ ok: false, error: "missing_scope" }) : reply({});
       return Response.json({ ok: false, error: "unknown_method" });
     },
     websocket: {
@@ -99,14 +100,17 @@ const fakeSlack = () => {
   return { calls, acks, sockets, opens: () => opens, pings: () => pings, failing, until, changed, event, api: `http://localhost:${port}/api`, server };
 };
 
-const watcher = async (slack: ReturnType<typeof fakeSlack>, threads: object[] = [], pingMs = 30_000) => {
+const watcher = async (slack: ReturnType<typeof fakeSlack>, threads: object[] = [], pingMs = 30_000, env: Record<string, string> = {}) => {
   const dir = scratch();
   writeFileSync(join(dir, "slack-threads.json"), JSON.stringify(threads));
-  const o = slackWatchOptions({ DORI_SLACK_APP_TOKEN: APP, DORI_SLACK_TOKEN: BOT, DORI_SLACK_OWNER_ID: "UOWNER", DORI_SLACK_API: slack.api }, dir);
+  const o = slackWatchOptions({ DORI_SLACK_APP_TOKEN: APP, DORI_SLACK_TOKEN: BOT, DORI_SLACK_OWNER_ID: "UOWNER", DORI_SLACK_API: slack.api, ...env }, dir);
   const lines: string[] = [];
+  // the eyes reactions Slack had taken when each line was logged
+  const eyesAt: number[] = [];
   const stop = { stopped: false };
   const done = startWatch(o, (l) => {
     lines.push(l);
+    eyesAt.push(slack.calls.filter((c) => c.method === "reactions.add").length);
     slack.changed();
   }, stop, pingMs);
   cleanups.push(async () => {
@@ -116,7 +120,7 @@ const watcher = async (slack: ReturnType<typeof fakeSlack>, threads: object[] = 
   });
   await slack.until("SLACK_WATCH_READY", () => lines.includes("SLACK_WATCH_READY"));
   const rows = () => (existsSync(o.inbox) ? readFileSync(o.inbox, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>) : []);
-  return { o, lines, rows, msgs: () => lines.filter((l) => l.startsWith("SLACK_MSG")) };
+  return { o, lines, rows, eyesAt, msgs: () => lines.filter((l) => l.startsWith("SLACK_MSG")) };
 };
 
 test("a DM to the bot is acked, becomes one inbox row and one SLACK_MSG line, and the reply goes out with the bot token in that DM", async () => {
@@ -132,6 +136,9 @@ test("a DM to the bot is acked, becomes one inbox row and one SLACK_MSG line, an
     { ts: expect.any(String), id: "1700000000.000100", channel_id: "D1", thread_ts: null, reply_thread: null, scope: "slack", author_id: "UOWNER", author_name: "name-UOWNER", author_kind: "owner", addressed: "dm", mentions_self: false, content: "옥돌 오늘 일정?" },
   ]);
   expect(w.msgs()).toEqual(["SLACK_MSG D1 - dm name-UOWNER (owner): 옥돌 오늘 일정?"]);
+  // the eyes went on with the bot token before the SLACK_MSG line woke the lead (dori-superagent #9)
+  expect(slack.calls.filter((c) => c.method === "reactions.add")).toEqual([{ method: "reactions.add", auth: `Bearer ${BOT}`, body: { channel: "D1", timestamp: "1700000000.000100", name: "eyes" } }]);
+  expect(w.eyesAt[w.lines.findIndex((l) => l.startsWith("SLACK_MSG"))]).toBe(1);
   expect(slack.calls.filter((c) => c.method === "apps.connections.open").map((c) => c.auth)).toEqual([`Bearer ${APP}`]);
   expect(slack.calls.filter((c) => c.method !== "apps.connections.open").every((c) => c.auth === `Bearer ${BOT}`)).toBe(true);
 
@@ -168,6 +175,44 @@ test("a mention seen twice and retried is one row; bot, own, edited and unaddres
     ["1700000000.000600", "own-thread", "1700000000.000500"],
   ]);
   expect(w.msgs()).toEqual(["SLACK_MSG C1 1700000000.000300 mention name-UGUEST: <@UBOT> 자료 있어?", "SLACK_MSG C1 1700000000.000500 own-thread name-UGUEST: 태그 없이 스레드 답"]);
+  // eyes on the two addressed messages, once each, and on nothing else
+  expect(slack.calls.filter((c) => c.method === "reactions.add").map((c) => c.body.timestamp)).toEqual(["1700000000.000300", "1700000000.000600"]);
+});
+
+test("a channel message that calls the Dori by name (DORI_SLACK_MENTION) wakes the lead as name and gets eyes; other people's talk and bots' posts with the name do not", async () => {
+  // Given okdori's names, as the owner wrote at 00:19 KST without an @
+  const slack = fakeSlack();
+  const w = await watcher(slack, [], 30_000, { DORI_SLACK_MENTION: "옥돌|옥도리|okdori" });
+  // When
+  slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UOWNER", text: "옥돌아 들리면 대답해봐", ts: "1700000000.000800" });
+  slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UGUEST", text: "점심 뭐 먹지", ts: "1700000000.000810" });
+  slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "okdori status ping", ts: "1700000000.000820" });
+  slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UGUEST", text: "OkDori, 자료 있어?", ts: "1700000000.000830" });
+  await slack.until("two name SLACK_MSG lines", () => w.msgs().length === 2);
+  // Then
+  expect(w.rows().map((r) => [r.id, r.addressed, r.mentions_self])).toEqual([
+    ["1700000000.000800", "name", true],
+    ["1700000000.000810", null, false],
+    ["1700000000.000830", "name", true],
+  ]);
+  expect(w.msgs()).toEqual(["SLACK_MSG C1 1700000000.000800 name name-UOWNER (owner): 옥돌아 들리면 대답해봐", "SLACK_MSG C1 1700000000.000830 name name-UGUEST: OkDori, 자료 있어?"]);
+  expect(slack.calls.filter((c) => c.method === "reactions.add").map((c) => c.body.timestamp)).toEqual(["1700000000.000800", "1700000000.000830"]);
+});
+
+test("an app without reactions:write logs SLACK_REACT_SKIPPED once and stops asking; every message still arrives", async () => {
+  // Given an app installed before reactions:write was in the manifest
+  const slack = fakeSlack();
+  slack.failing.reactScope = true;
+  const w = await watcher(slack);
+  // When two DMs arrive
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "one", ts: "1700000000.000700" });
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "two", ts: "1700000000.000710" });
+  await slack.until("both SLACK_MSG lines", () => w.msgs().length === 2);
+  // Then
+  expect(w.rows().map((r) => r.content)).toEqual(["one", "two"]);
+  expect(w.lines.filter((l) => l.startsWith("SLACK_REACT_SKIPPED"))).toEqual(["SLACK_REACT_SKIPPED slack reactions.add: missing_scope: the app has no reactions:write, so messages arrive without eyes until it is added and the app reinstalled"]);
+  expect(slack.calls.filter((c) => c.method === "reactions.add").length).toBe(1);
+  expect(w.lines.some((l) => l.startsWith("SLACK_REACT_FAIL"))).toBe(false);
 });
 
 test("a disconnect from Slack opens a fresh connection and messages keep arriving", async () => {
