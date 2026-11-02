@@ -296,7 +296,17 @@ export const unpushedWork = async (deps: FlowDeps, lane: Lane): Promise<string[]
   for (const wt of checked) {
     if (!exists(wt)) continue;
     const dirty = await git(["git", "-C", wt, "status", "--porcelain", "--untracked-files=no"]);
-    let ahead = await git(["git", "-C", wt, "rev-list", "--count", "HEAD", "--not", "--remotes"]);
+    // a cwd checkout with no remote at all (a Dori's own Documents repository) has nowhere to push its commits, so they
+    // are not unpushed work; its uncommitted changes still are. Its history is still walked, so one git cannot read
+    // stays unreadable. A lane's own worktree is checked as before.
+    const remotes = own.length ? undefined : await git(["git", "-C", wt, "remote"]);
+    if (remotes && remotes.code !== 0) {
+      reasons.push(`unpushed work in ${wt} (git state unreadable)`);
+      continue;
+    }
+    const noRemote = remotes !== undefined && !remotes.out.trim();
+    let ahead = await git(["git", "-C", wt, "rev-list", "--count", "HEAD", ...(noRemote ? [] : ["--not", "--remotes"])]);
+    if (noRemote && ahead.code === 0) ahead = { code: 0, out: "0", err: "" };
     // a fresh repository's branch has no commit yet (an unborn HEAD): rev-list fails, but there is nothing to push;
     // it is unborn only when HEAD names a branch that resolves to no commit. A HEAD that resolves but cannot be read
     // (a missing object) stays unreadable. Its staged files still show in status.
