@@ -306,21 +306,23 @@ test("the day report comes once a day after backlog.dayReportAt in its time zone
   expect(twice).toBeUndefined();
 });
 
-test("a feed entry the owner approved by card runs within its own scope; one without approved_at only drafts", async () => {
+test("a feed entry the owner approved by card runs within its own scope; one the board applied itself, or one that does not say, only drafts", async () => {
   // Given
   const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
   const todos = [
-    { todo_id: "pb-aaaaaaaaaaaa-1", title: "시뮬레이터 문제 3건 회신", status: "진행", approved_at: "2026-10-30T01:00:00Z" },
-    { todo_id: "pb-bbbbbbbbbbbb-1", title: "회의록에서 뽑힌 일", status: "진행" },
+    { todo_id: "pb-aaaaaaaaaaaa-1", title: "시뮬레이터 문제 3건 회신", status: "진행", approved_at: "2026-10-30T01:00:00Z", auto_applied: false },
+    { todo_id: "pb-bbbbbbbbbbbb-1", title: "보드가 스스로 넣은 일", status: "진행", approved_at: "2026-10-30T01:00:00Z", auto_applied: true },
+    { todo_id: "pb-cccccccccccc-1", title: "칸이 없는 일", status: "진행", approved_at: "2026-10-30T01:00:00Z" },
   ];
   // When
   const lines = await feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
-  const approved = readItem(state, "todo-pb-aaaaaaaaaaaa-1");
-  const draft = readItem(state, "todo-pb-bbbbbbbbbbbb-1");
+  const [card, auto, unknown] = ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"].map((h) => readItem(state, `todo-pb-${h}-1`));
   // Then
-  expect(lines).toEqual(["BACKLOG_INTAKE todo-pb-aaaaaaaaaaaa-1 (feed, owner-approved): 시뮬레이터 문제 3건 회신", "BACKLOG_INTAKE todo-pb-bbbbbbbbbbbb-1 (feed, draft only): 회의록에서 뽑힌 일"]);
-  expect([approved?.draftOnly, approved?.by, approved?.ask]).toEqual([undefined, "feed:approved", undefined]);
-  expect(readFileSync(approved?.brief ?? "", "utf8")).toContain("[쓰기 범위]");
-  expect([draft?.draftOnly, draft?.by]).toEqual([true, "feed"]);
-  expect(readFileSync(draft?.brief ?? "", "utf8")).toContain("[넘으면 안 되는 선] 읽기와 초안까지만");
+  expect(lines.map((l) => l.split(":")[0])).toEqual(["BACKLOG_INTAKE todo-pb-aaaaaaaaaaaa-1 (feed, owner-approved)", "BACKLOG_INTAKE todo-pb-bbbbbbbbbbbb-1 (feed, draft only)", "BACKLOG_INTAKE todo-pb-cccccccccccc-1 (feed, draft only)"]);
+  expect([card?.draftOnly, card?.by]).toEqual([undefined, "feed:approved"]);
+  expect(readFileSync(card?.brief ?? "", "utf8")).toContain("[쓰기 범위]");
+  for (const item of [auto, unknown]) {
+    expect([item?.draftOnly, item?.by]).toEqual([true, "feed"]);
+    expect(readFileSync(item?.brief ?? "", "utf8")).toContain("[넘으면 안 되는 선] 읽기와 초안까지만");
+  }
 });

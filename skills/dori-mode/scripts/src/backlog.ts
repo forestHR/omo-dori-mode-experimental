@@ -380,7 +380,7 @@ export const orderIntake = (d: { readonly stateDir: string; readonly settings: B
 export type FeedTodo = { readonly todo_id?: string; readonly id?: string; readonly title?: string; readonly status?: string; readonly [k: string]: unknown };
 const FEED_DONE = /^(done|완료|끝|closed)$/i;
 
-// approved: the owner took the entry in with an approval card (approved_at), so it is his order within its own scope
+// approved: the owner took the entry in with an approval card (approved_at, auto_applied false), so it is his order within its own scope
 export const feedBrief = (todo: FeedTodo, id: string, approved: boolean): string => [
   "ulw",
   "",
@@ -399,7 +399,7 @@ export const feedBrief = (todo: FeedTodo, id: string, approved: boolean): string
   "",
 ].join("\n");
 
-/** backlog.feedCommand's open entries become items: one the owner approved (approved_at) works within its scope, any other only drafts; an entry listed as done drops its open item. */
+/** backlog.feedCommand's open entries become items: one the owner approved by card (approved_at, auto_applied false) works within its scope, any other only drafts; an entry listed as done drops its open item. */
 export const feedIntake = async (d: { readonly stateDir: string; readonly settings: BacklogSettings; readonly feed: () => Promise<{ readonly todos: readonly FeedTodo[] } | { readonly why: string }>; readonly now: () => number }): Promise<string[]> => {
   if (!d.settings.feedCommand.length) return [];
   const got = await d.feed();
@@ -420,7 +420,9 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     }
     if (old) continue;
     const brief = join(dir(d.stateDir), "intake", `${id}.md`);
-    const approved = Boolean(todo.approved_at);
+    // only an entry the owner approved by card: auto_applied must say false (a board that applies proposals itself sets it
+    // true); a missing or unreadable field only drafts
+    const approved = Boolean(todo.approved_at) && todo.auto_applied === false;
     writeAtomic(brief, feedBrief(todo, id, approved));
     const title = String(todo.title ?? ref).slice(0, 60);
     addItem(d.stateDir, { id, title, brief, done: d.settings.intakeDone.replaceAll("{id}", id).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
