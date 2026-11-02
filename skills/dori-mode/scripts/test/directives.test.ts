@@ -612,6 +612,17 @@ test("what the text calls comes before every-lane entries of either layer, and a
   expect(lines[1]).toStartWith("[장부 경고] 이 도리 로컬 장부에서 1줄을 못 읽어 뺐다: DIRECTIVES_LOCAL_SKIP");
 });
 
+// 2026-11-02 review of #239: a host line still marking a fork directive retired must not bring the fork entry back in the
+// tolerant read (directive-audit, a message's row), and his old message stays handled
+test("a local line that still marks a directive retired leaves it out of a tolerant read and keeps its message ids as reviewed", async () => {
+  const line = { id: "request-thread", retired: "2026-10-21: test", source: "https://discord.com/channels/100000000000000001/200000000000000002/300000000000000003" };
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: await write("retired.json", JSON.stringify({ entries: [line] })) } }, { tolerant: true });
+  expect(ledger.entries.some((e) => e.id === "request-thread")).toBe(false);
+  expect(textDirectives("Claude 10/29 카드 처리", ledger, { all: true }).map(({ e }) => e.id)).not.toContain("request-thread");
+  expect(ledger.reviewed).toContain("300000000000000003");
+  expect(ledger.skipped).toContain("DIRECTIVES_LOCAL_SKIP request-thread: retired is not kept; the directive is left out and its message ids count as reviewed; delete the line");
+});
+
 test("scope replay 2026-11-02: a lane that runs node (Node.js) or edits a gate's write policy is no GPU or learning work, one that runs JEV-9B is GPU work, and a node that trains stays GPU work", async () => {
   const ledger = loadLedger((await ledgerDeps()).config);
   // launch-node-path, cytoplasm-fw-fail: node is Node.js or a mail host, and heavy-headroom / gpu-free were put on them

@@ -188,6 +188,15 @@ export const loadLedger = (cfg: Pick<DoriConfig, "directives">, opts: { readonly
     for (const [id, prior] of touched) {
       const own = problems.filter((p) => p.startsWith(`directive ${id || "(no id)"}: `)).map((p) => p.slice(`directive ${id || "(no id)"}: `.length));
       if (!own.length) continue;
+      // a line still marking a directive retired (dropped by the owner) leaves it out, the fork entry too, instead of
+      // making it apply again; its message ids count as reviewed, so the audit still sees his old message as handled
+      const now = byId.get(id);
+      if (now && "retired" in now) {
+        byId.delete(id);
+        reviewed.push(...(now.source?.match(/\d{15,}/g) ?? []));
+        skipped.push(`DIRECTIVES_LOCAL_SKIP ${id || "(no id)"}: retired is not kept; the directive is left out and its message ids count as reviewed; delete the line`);
+        continue;
+      }
       if (prior) byId.set(id, prior);
       else byId.delete(id);
       const what = prior ? "its local line is left out and the fork entry stands" : "not in the fork ledger and not a whole entry; left out";
