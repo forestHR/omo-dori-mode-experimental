@@ -609,6 +609,41 @@ export const unledgered = (inbox: string, ledger: Ledger, owner: string, since: 
   return out;
 };
 
+// The owner's standing directive in two places: a line of the lead's memory (system/ and reference/, where his directives
+// were kept before the ledger) that holds an owner message a ledger entry cites. The ledger is the one place for them, so
+// such a line is only a pointer: it names the entry ("장부:<id>") and does not quote his words again.
+export const POINTER = "장부:";
+export const duplicated = (files: readonly { readonly path: string; readonly text: string }[], ledger: Ledger): Gap[] => {
+  // the message ids a source cites; the guild and channel ids of its links are not messages (a line naming a channel is
+  // not his directive)
+  const places = new Set([...ledger.entries.map((e) => e.source).join("\n").matchAll(/channels\/(\d{15,})\/(\d{15,})\//g)].flatMap((m) => [m[1], m[2]]));
+  const byMessage = new Map<string, Directive[]>();
+  for (const e of ledger.entries) {
+    if (e.retired) continue;
+    for (const id of new Set(e.source.match(/\d{15,}/g) ?? [])) if (!places.has(id)) byMessage.set(id, [...(byMessage.get(id) ?? []), e]);
+  }
+  const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+  const quotes = (line: string, e: Directive): boolean => {
+    // a host line read tolerantly can come without words
+    const w = squash(e.words ?? "");
+    return w.length >= 10 && squash(line).includes(w.slice(0, 30));
+  };
+  const out: Gap[] = [];
+  for (const f of files) {
+    f.text.split("\n").forEach((line, i) => {
+      const entries = [...new Set((line.match(/\d{15,}/g) ?? []).flatMap((id) => byMessage.get(id) ?? []))];
+      if (!entries.length) return;
+      const named = entries.filter((e) => line.includes(`${POINTER}${e.id}`));
+      const bad = named.length ? named.filter((e) => quotes(line, e)) : entries;
+      for (const e of bad) {
+        const why = named.length ? `points at ${POINTER}${e.id} and still quotes his words` : `holds his message that ledger entry ${e.id} cites`;
+        out.push({ lane: "-", id: e.id, line: `DIRECTIVE_DUPLICATE ${f.path}:${i + 1} ${e.id}: the memory line ${why}; the ledger is the one place for it: make the line a pointer "${POINTER}${e.id}" without his words` });
+      }
+    });
+  }
+  return out;
+};
+
 // His words next to the prompt a brief gets for them, one row per owner entry with words: for the owner to read.
 export const promptTable = (ledger: Ledger): string => {
   const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");

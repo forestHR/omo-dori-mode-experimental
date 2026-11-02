@@ -126,9 +126,11 @@ const USAGE = `dori <command> [options]
   directive-audit [--since 24h|Nd|ISO] [--dry-run]
                                        the lanes opened since then against the ledger (directives in scope missing from
                                        the brief, a lane without a thread) and the owner's messages that read like a
-                                       standing directive no ledger entry cites, and a lead thread opened without the ledger read
-                                       (DIRECTIVE_LEAD thread:<id>): DIRECTIVE_GAP / DIRECTIVE_LEAD /
-                                       DIRECTIVE_UNLEDGERED lines into the watch log and one [DIRECTIVE_AUDIT] summary to
+                                       standing directive no ledger entry cites, a lead thread opened without the ledger read
+                                       (DIRECTIVE_LEAD thread:<id>), and a line of the lead's memory (system/, reference/)
+                                       that keeps a ledger directive a second time instead of a pointer "장부:<id>"
+                                       (DIRECTIVE_DUPLICATE): DIRECTIVE_GAP / DIRECTIVE_LEAD / DIRECTIVE_UNLEDGERED /
+                                       DIRECTIVE_DUPLICATE lines into the watch log and one [DIRECTIVE_AUDIT] summary to
                                        the lead; none: DIRECTIVE_AUDIT_OK on stdout only. --dry-run prints and sends nothing
   adopt  <key> --pane ID --title T --brief FILE --done "..." [--thread REF] [--tag T ...] [--goal G] [--challenge-before STEP ...] [--use-gpu]
                                        REF is <adapter>:<id> (discord:<thread id>); an empty or malformed REF is refused
@@ -1192,7 +1194,7 @@ try {
           },
           auditSummary: (week: string) => sendAuditSummary(deps, laneDeps.inbox ?? join(config.stateDir, "discord", "inbox.jsonl"), week),
           // the daily directive audit on every Dori, and the owner's links pushed to the other Dori (directives.linkPeers)
-          directiveAudit: async (since: string) => (await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()) })).lines,
+          directiveAudit: async (since: string) => (await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), memory: leadMemoryRepo() })).lines,
           directiveLinks: async () => (await pushLinks(deps)).lines,
         };
         for (const a of await freshnessTick(deps, process.env.HOME ?? "", hooks)) console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);
@@ -1897,7 +1899,7 @@ try {
     }
     case "directive-audit": {
       const since = sinceIso(opt("since") ?? "24h", Date.now());
-      const r = await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), dryRun: Boolean(flags.values["dry-run"]) });
+      const r = await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), memory: leadMemoryRepo(), dryRun: Boolean(flags.values["dry-run"]) });
       for (const line of r.lines) console.log(line);
       if (r.failed) process.exit(1);
       break;
