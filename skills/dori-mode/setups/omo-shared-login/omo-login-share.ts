@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { chooseLoginMethod } from "./login-method.js";
 
 const HOME = homedir();
-const BORROWERS = ["okdori", "moodori", "yoodori", "gongdori"] as const;
+const BORROWERS = ["okdori", "moodori", "yoodori", "gongdori", "godori"] as const;
 const SOURCE_AUTH = process.env.OLS_SOURCE_AUTH ?? join(HOME, ".omo/agent/auth.json");
 const GLOBAL = join(HOME, ".bun/install/global/node_modules");
 const SENPI = join(GLOBAL, "@code-yeongyu/senpi/dist");
