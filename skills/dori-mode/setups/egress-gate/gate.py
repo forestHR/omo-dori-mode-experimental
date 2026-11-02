@@ -573,6 +573,7 @@ BATCH_FORBIDDEN = {"delete": "batch-delete", "trash": "batch-delete", "untrash":
                    "email": "batch-mail", "send": "batch-mail"}
 BATCH_ID = re.compile(r"[0-9a-f]{64}")
 DRIVE_ID = re.compile(r"[A-Za-z0-9_-]{1,200}")
+MENTION = re.compile(r"(?:^|\s)[+@]\S|[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 BATCH_MAX_ITEMS = 5000
 BATCH_HOURS = 24
 # Google may take minutes on a Drive write: on 2026-11-01 folder moves took 14-28 s and many passed 30 s,
@@ -1041,6 +1042,10 @@ class Gate:
         reasons.extend(found)
 
     async def drive_owned(self, file_id: str, reasons: list | None = None) -> dict:
+        # Owner 2026-11-02 21:41 KST "파일 바꾸는 것도 승인 없이 구글 드라이브 다 승인 없이 ... 공유하는 것 정도만 내 승인":
+        # by design an owner-owned file already shared with named people, groups or a domain is edited without
+        # a card (the owner made that share); a card is for a new share (permissions/ACL above), an `anyone`
+        # (public) target, a shared drive or a file that is not the owner's. Do not widen this to named shares.
         base = "/www.googleapis.com/drive/v3/files/" + quote(file_id, safe="")
         fields = "ownedByMe,driveId,mimeType,trashed,name,parents,webViewLink,description,id"
         data = await self.google_json(base + "?" + urlencode({"fields": fields, "supportsAllDrives": "true"}))
@@ -1159,9 +1164,12 @@ class Gate:
                         reasons.append("drive-sharing")
                     op = "permissions."
                 else:
-                    reasons.append("drive-comments")
+                    # Lead ruling on Q447 (2026-11-02): a comment on the owner's own file needs no card; a mention
+                    # (+name, @name or a mail address) mails that person, so it does, as does any non-owned file.
+                    if method != "DELETE" and MENTION.search(str(data.get("content", ""))):
+                        reasons.append("comment-mention")
                     op = "comments."
-                if method != "DELETE":
+                if method != "DELETE" or comment:
                     await self.drive_owned(found[1], reasons)
                 return "drive", op + {"POST": "create", "PATCH": "update", "PUT": "update", "DELETE": "delete"}[method], snapshot
             match = re.fullmatch(r"/(?:upload/)?drive/v3/files(?:/([^/]+))?(/copy)?", route)

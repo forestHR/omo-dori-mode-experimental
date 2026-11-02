@@ -826,9 +826,19 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.shared_drive = True
         self.assertEqual((await self.request("PATCH", "/www.googleapis.com/drive/v3/files/f"))[0], 202)
 
-    async def test_drive_comments_need_card(self):
+    async def test_a_comment_needs_card_only_with_a_mention_or_on_a_file_that_is_not_the_owners(self):
+        # Lead ruling on Q447: a plain comment on the owner's own file goes straight; a mention mails someone.
         self.approval()
-        self.assertEqual((await self.request(path="/www.googleapis.com/drive/v3/files/f/comments", data={"content": "text"}))[0], 202)
+        comments = "/www.googleapis.com/drive/v3/files/f/comments"
+        self.assertEqual((await self.request(path=comments, data={"content": "시간 확인 a+b"}))[0], 200)
+        for content in ("+kim@example.net 봐 줘", "확인 +홍길동", "@lee 확인", "kim@example.net"):
+            with self.subTest(content=content):
+                self.assertEqual((await self.request(path=comments, data={"content": content}))[0], 202)
+        self.assertEqual((await self.request(path=comments + "/c/replies", data={"content": "+kim@example.net"}))[0], 202)
+        self.file_owned = False
+        self.assertEqual((await self.request(path=comments, data={"content": "text"}))[0], 202)
+        self.assertEqual((await self.request("DELETE", comments + "/c"))[0], 202)
+        self.assertEqual(len(self.writes()), 1)
 
     async def test_in_account_writes_go_straight_without_a_card(self):
         # Owner 2026-11-02 21:35 KST Q447 "바깥 사람에게 가는 것만: 메일·바깥 초대·바깥 공유": spreadsheets, conversions,

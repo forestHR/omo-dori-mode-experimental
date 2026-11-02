@@ -74,13 +74,15 @@ A card is only for a write that reaches someone other than the owner (owner 2026
 "바깥 사람에게 가는 것만: 메일·바깥 초대·바깥 공유", and 21:41 KST "파일 바꾸는 것도 승인 없이 구글 드라이브 다 승인 없이").
 Writes inside the owner's account (spreadsheets, conversions, images by URL, any number of writes or deletes)
 go straight and keep the journal, snapshots, daily summary and restores. The two count limits below are off
-unless the config sets `limits`.
+unless the config sets `limits`. An owner-owned file already shared with named people, groups or a domain is
+edited without a card (the owner made that share, 21:41 KST); a new share, a public (`anyone`) target, a shared
+drive and a file that is not the owner's still need one.
 
 | API | Direct writes | Approval card | Always refused |
 | --- | --- | --- | --- |
 | Calendar | Own/private events, calendars.create, owner ACL, ACL removal | External attendees, foreign organizer, public/non-owned calendar, external ACL | watch, quickAdd, import, move, calendar deletion/update, calendarList writes |
 | Tasks | Tasklist create/update; task create/update/delete/move | Configured limits only | clear, tasklist deletion |
-| Drive | Own/private files create/update/copy/trash, spreadsheets and conversions, owner permission, permission removal | Public/shared/non-owned targets/parents, external permission, comments/replies | Permanent file deletion, emptyTrash, watch, shared-drive management |
+| Drive | Own/private files create/update/copy/trash, spreadsheets and conversions, comments/replies on own files, owner permission, permission removal | Public/shared/non-owned targets/parents, external permission, comments/replies with a mention (`+name`, `@name`, a mail address) or on a non-owned file | Permanent file deletion, emptyTrash, watch, shared-drive management |
 | Docs | Create and owned/private batchUpdate, images and links by URL included | Public/non-owned documents | Other writes |
 | Sheets | Create and writes on owned/private spreadsheets | Public/shared/non-owned spreadsheets, also as a `copyTo` destination | Non-API routes, `copyTo` without a valid destination |
 | Gmail | Reads | Never | Every write; send-capable OAuth scopes |
