@@ -1,0 +1,37 @@
+# Slack app for slack-watch.ts: Create New App -> From a manifest. Rename Dori to the Dori's name.
+# Default: the app sees DMs to it and messages that mention it. To let it read every message of the channels it is
+# invited to (untagged thread replies included), uncomment the channels/groups lines in both lists: the owner decides.
+_metadata:
+  major_version: 1
+display_information:
+  name: Dori
+  description: Dori answers here as a bot.
+features:
+  bot_user:
+    display_name: Dori
+    always_online: true
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - im:history
+      - chat:write
+      - users:read
+      # - channels:history
+      # - groups:history
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      # - message.channels
+      # - message.groups
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

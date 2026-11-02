@@ -16,6 +16,7 @@ What you get:
 | `self-restart.sh` | The one safe way to restart an aoe session, the Dori's own included, e.g. after an agent update. A lane restarts with `launchEnv` unless it uses the GPU (`dori launch-env`). |
 | `google-watch.ts` (unit `dori-google-watch`) | Read-only zele polling for new unread mail and upcoming calendar events; writes JSONL and remembers notified ids. |
 | `kakao-watch.ts`, `kakao-login.ts` | Optional, for a Dori with its own KakaoTalk account: polls its rooms through agent-messenger, appends new messages to the inbox, prints `KAKAO_MSG` for the Dori's monitor and marks the rooms read, again until it holds. Off unless `DORI_KAKAO_SELF_ID` is set. |
+| `slack-watch.ts`, `slack-app-manifest.yaml` | Optional, for a Dori that answers on Slack as its own Slack app (a bot, no member seat): Socket Mode, so no public port. Each human message the bot can see becomes an inbox row (`scope: "slack"`); a DM, a mention or a reply in a thread the Dori posted in also prints `SLACK_MSG` for the Dori's monitor. Off unless `DORI_SLACK_APP_TOKEN` is set. |
 | `usage-snapshot.ts` | Captures the omo-usage TUI with ANSI colors and renders a PNG using headless Firefox. |
 | `dori.sh` | Starts `dori-inbound` and `dori-google-watch`, starts the current lead session if needed, then attaches to it. Requires the separate `dori lead` PR. |
 | `transcribe.sh`, `setup-asr.sh` | Local speech-to-text with whisper.cpp (CUDA when available) for `hooks.transcribe`. A whisper-cli that dies in a CUDA error gets one more try after `dori gpu-room` (`TRANSCRIBE_CUDA_RETRY`); a second failure fails with its code and the last lines of its error. |
@@ -104,6 +105,8 @@ One `KEY=VALUE` per line, `#` comments, absolute paths (neither systemd nor the 
 | `DORI_KAKAO_ACCOUNT_FILE`, `DORI_KAKAO_DEVICE_TYPE` | no | the file it names is | Login only (`kakao-login.ts`); the password lives in that separate 0600 file, never in `dori.env` |
 | `DORI_USAGE_DIR`, `DORI_USAGE_SNAP_DIR` | no | no | Usage screenshot ([below](#usage-screenshot)) |
 | `DORI_SLACK_TOKEN`, `DORI_SLACK_COOKIE`, `DORI_TELEGRAM_TOKEN` | no | yes | Other messengers: `dori send slack\|telegram`, `dori presence`, `dori inbound slack` |
+| `DORI_SLACK_APP_TOKEN` | no | yes | Turns the Slack watcher on (`slack-watch.ts`; an `xapp-` app-level token with `connections:write`); it also needs `DORI_SLACK_TOKEN` to be the app's `xoxb-` bot token ([section](#slack-as-a-bot)) |
+| `DORI_SLACK_OWNER_ID`, `DORI_SLACK_API`, `DORI_SLACK_WAIT_MS` | no | no | The owner's Slack member ids (rows get `author_kind: "owner"`), the Web API base (a test server; default `https://slack.com/api`, also used by `dori send slack`), the token re-read interval of `--wait` (default 30000) |
 | `PATH` | no | no | The units' PATH (zele, node for agent-messenger); overrides the unit default |
 
 Not in `dori.env`; the wrapper, a unit or dori itself sets these for one run:
@@ -303,6 +306,47 @@ or past that message, which is what the sender's "1" counts.
 A monitor keeps running the code it started with: after an update that changes `kakao-watch.ts`, stop the running watcher
 and arm the monitor again once (`pgrep -f kakao-watch.ts` shows exactly one).
 
+### Slack as a bot
+
+For a Dori that answers on Slack under its own name. It uses a Slack app's bot, never a member's account or token, and
+Socket Mode, so nothing listens on a public port.
+
+1. **App.** In the workspace, open https://api.slack.com/apps, **Create New App** -> **From a manifest**, pick the
+   workspace and paste `slack-app-manifest.yaml` (rename `Dori` to the Dori's name). It asks for the least the watcher
+   needs: DMs to the app and mentions of it (`im:history`, `app_mentions:read`), posting (`chat:write`) and display
+   names (`users:read`). To also take in every message of the channels the app is invited to (and so untagged replies
+   in a thread the Dori posted in), uncomment `channels:history` / `groups:history` and `message.channels` /
+   `message.groups`: that is the owner's choice of what the Dori may read.
+2. **Install** it to the workspace (**Install App**), then **Basic Information** -> **App-Level Tokens** -> **Generate
+   Token and Scopes** with `connections:write`.
+3. **Tokens.** In a terminal of the Dori's account run `bun "$S/slack-watch.ts" --set-tokens`: it asks for the
+   **Bot User OAuth Token** (`xoxb-`) and the app-level token (`xapp-`) without echoing them, and optionally the owner's
+   member ID (Slack profile -> ⋮ -> **Copy member ID**). It checks both with Slack (`auth.test`,
+   `apps.connections.open`) and only then writes `DORI_SLACK_TOKEN`, `DORI_SLACK_APP_TOKEN` and `DORI_SLACK_OWNER_ID`
+   into `dori.env` (mode 0600, other lines untouched). It prints `SLACK_TOKENS_SET team <team> bot <bot>` or
+   `SLACK_TOKENS_REFUSED <why>; nothing was written`; a member's `xoxp-` token is refused.
+4. **Invite** the app to a channel (`/invite @Dori`) for it to see that channel; DMs work at once.
+
+Run `bun "$S/slack-watch.ts"` as a persistent monitor in the Dori's own session. Without tokens it prints
+`SLACK_WATCH_OFF <why>` and exits 0; with `--wait` it prints `SLACK_WATCH_WAIT <why>` and starts by itself once the
+tokens are in `dori.env`, so the monitor can be armed before the owner has installed the app.
+
+- **Connection.** `SLACK_WATCH_START team <team> bot <bot>`, then `SLACK_WATCH_READY` on Slack's hello. Every envelope
+  is acked at once. Slack refreshes a connection every few hours (`SLACK_WATCH_REFRESH <reason>`); the watcher opens a
+  new one (`SLACK_WATCH_RECONNECTED`). A connection that dies without a close (the machine slept, a route dropped) is
+  found by a WebSocket ping every 30 s: no frame and no pong since the last one prints `SLACK_WATCH_STALE ...` and
+  opens a new one. A connection that cannot be opened is `SLACK_CONNECT_FAIL`, and an `auth.test` that fails at start
+  (Slack or the network down) is `SLACK_AUTH_FAIL`; both are retried from 1 s up to every 60 s instead of exiting.
+- **Messages.** A person's message (plain, `thread_broadcast` or `file_share`) becomes one inbox row. Bot messages,
+  the app's own, edits and deletes are not taken in. A mention in a channel arrives twice (`app_mention` and
+  `message.channels`) and Slack retries an envelope it thinks was lost: each message is taken in once.
+- **Waking the Dori.** Only an addressed message prints
+  `SLACK_MSG <channel> <reply thread or -> <dm|mention|own-thread> <name>[ (owner)]: <text>`: a DM, a mention of the bot,
+  or a reply in a thread `dori send slack` posted in (`<stateDir>/slack-threads.json`). Other channel messages are in
+  the inbox only.
+- **Answering.** `dori send slack --to <channel> --text ...`, plus `--thread <reply thread>` unless the line says `-`
+  (a plain DM is answered in the DM). The post is the bot's, with `DORI_SLACK_TOKEN`.
+
 ### Usage screenshot
 
 Set `DORI_USAGE_DIR` to the omo-usage checkout (required) and optionally `DORI_USAGE_SNAP_DIR`
@@ -434,6 +478,7 @@ In the Dori's own session, arm these as persistent monitors (`references/setup.m
 | lane sweeps | `tail -n 0 -F ~/.dori/dori-lanes.log` | `LANE_\|DEAD_PANE\|HOST_GUARD ALERT\|NUDGED\|POSTED\|NO-REPORT\|FAIL\|STUCK\|INTENT_CHECK\|ROLLOVER_\|RESEARCH_NOT_STARTED\|NOT_SUBMITTED\|SAME_FIX` |
 | listener health | `tail -n 0 -F ~/.dori/inbound.log ~/.dori/session-watch.log` | `FATAL\|_FAIL\|SESSION-WATCH-FAIL` |
 | KakaoTalk (only with `DORI_KAKAO_SELF_ID`) | `PATH=/absolute/node/bin:$PATH bun <fork>/skills/dori-mode/setups/discord-aoe/kakao-watch.ts` | `KAKAO_(MSG\|NEW_ROOM\|WATCH_OFF\|[A-Z_]*FAIL)` |
+| Slack as a bot (only with `DORI_SLACK_APP_TOKEN`, or `--wait` until it is set) | `bun <fork>/skills/dori-mode/setups/discord-aoe/slack-watch.ts --wait` | `SLACK_(MSG\|WATCH_OFF\|WATCH_READY\|[A-Z_]*FAIL)` |
 
 `DISCORD_LISTENER_CLOSED` alone is not worth a ping: the gateway asks for reconnects several times a day. Only alert when no `DISCORD_LISTENER_READY` follows within a minute.
 
@@ -451,6 +496,12 @@ A KakaoTalk message (`kakao-watch.ts`):
 
 ```json
 {"ts":"...","id":"<log id>","channel_id":"<chat id>","scope":"kakao","room":"<room name>","author_id":"<kakao user id>","author_name":"<nickname>","author_kind":"owner","content":"...","sent_at":1791900000,"mentions_self":false}
+```
+
+A Slack message (`slack-watch.ts`); `addressed` is `dm`, `mention`, `own-thread` or `null`, and `reply_thread` is the `--thread` of an answer (`null`: answer in the DM itself):
+
+```json
+{"ts":"...","id":"<message ts>","channel_id":"<channel id>","thread_ts":null,"reply_thread":"<ts>","scope":"slack","author_id":"<member id>","author_name":"<display name>","author_kind":"member","addressed":"mention","mentions_self":true,"content":"..."}
 ```
 
 A card answer:

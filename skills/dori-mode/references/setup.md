@@ -86,6 +86,7 @@ Arm these as persistent monitors in your own session:
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |
 | freshness | `dori freshness --loop 5` | `^(NUDGED\|NUDGE-FAILED\|POSTED\|NO-REPORT\|STUCK\|ROLLOVER_DUE\|RESEARCH_NOT_STARTED)` |
 | Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
+| Slack as a bot (Socket Mode, `setups/discord-aoe/slack-watch.ts`) | `bun <fork>/skills/dori-mode/setups/discord-aoe/slack-watch.ts --wait` | `SLACK_(MSG\|WATCH_OFF\|WATCH_READY\|[A-Z_]*FAIL)` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
 
 ## 6. First look around

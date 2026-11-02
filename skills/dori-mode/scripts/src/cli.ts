@@ -1496,7 +1496,7 @@ try {
         return r;
       };
       if (platform === "slack") {
-        const slack = new Slack(fetchHttp, realClock, { token: token("DORI_SLACK_TOKEN"), cookie: process.env.DORI_SLACK_COOKIE }, undefined, new ThreadLedger(`${config.stateDir}/slack-threads.json`));
+        const slack = new Slack(fetchHttp, realClock, { token: token("DORI_SLACK_TOKEN"), cookie: process.env.DORI_SLACK_COOKIE }, process.env.DORI_SLACK_API?.trim() || undefined, new ThreadLedger(`${config.stateDir}/slack-threads.json`));
         if (edit) await slack.edit(to, edit, text);
         else await once(async () => (await slack.post(to, text, thread)).ts);
       } else if (platform === "telegram") {
@@ -1587,7 +1587,7 @@ try {
       if (key !== "slack") die("inbound supports slack and discord");
       const auth = { token: process.env.DORI_SLACK_TOKEN ?? die("DORI_SLACK_TOKEN is not set"), cookie: process.env.DORI_SLACK_COOKIE };
       const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
-      const slack = new Slack(fetchHttp, realClock, auth, undefined, ledger);
+      const slack = new Slack(fetchHttp, realClock, auth, process.env.DORI_SLACK_API?.trim() || undefined, ledger);
       const me = String((await slack.call("auth.test", {})).user_id ?? die("auth.test returned no user_id"));
       console.log("INBOUND_READY slack");
       await every(loopMin, async () => {
