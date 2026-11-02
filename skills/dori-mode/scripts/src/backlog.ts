@@ -750,6 +750,19 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
       lines.push(`BACKLOG_ASK ${item.id} ${q.id}: content ${q.hash} in the lead's inbox; not started before dori backlog decide --question ${q.id} --hash ${q.hash}`);
     }
 
+    // 2c. an owner's order about a todo whose lane runs now is the lead's at once (lead 2026-11-02: a stop or a change of
+    // direction must reach that lane now, not after it): handed over with a backlog-held row, never touched again; checked
+    // after running items followed their lanes, so a lane that closed is not taken for a running one
+    for (const order of listItems(d.stateDir).filter((i) => i.status === "open" && i.row !== undefined && i.by === "owner")) {
+      const todo = todoOf(order);
+      const sibling = todo === undefined ? undefined : listItems(d.stateDir).find((o) => o.id !== order.id && o.status === "running" && todoOf(o) === todo);
+      if (!sibling) continue;
+      const to = sibling.lane ?? laneKeyOf(sibling.id);
+      save(d.stateDir, logged(order, at, `dropped: handed to the lead, todo ${todo} runs in lane ${to}`, { status: "dropped" }));
+      d.inbox("backlog-held", `backlog-held-${order.id}-${at}`, `BACKLOG_ORDER_TO_LEAD ${order.row} (${order.title}): todo ${todo} is worked on by lane ${to} (${sibling.pane ?? "?"}) now -> the order is yours: put it into that lane with dori type, so a stop or a change reaches it now; the backlog does not touch it again`);
+      lines.push(`BACKLOG_ORDER_TO_LEAD ${order.id}: todo ${todo} runs in lane ${to}; the lead puts the order into that lane`);
+    }
+
     // 3. the next items start at once, by priority, within the limits
     const waiting = listItems(d.stateDir).filter((i) => i.status === "open" && !i.ask && !i.approvalAsk && !i.held && !i.paused).sort(byTurn);
     const room = Math.max(0, Math.min(d.settings.maxLanes - runningIds.size, d.settings.maxStarts));
