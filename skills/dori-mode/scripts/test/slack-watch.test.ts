@@ -34,12 +34,12 @@ const fakeSlack = () => {
   let opens = 0;
   let port = 0;
   let pings = 0;
-  // unreact: the error code reactions.remove answers with ("" = ok, "stall" = never answers); reactHold: reactions.add
-  // answers only when the test calls release()
-  const failing = { auth: 0, reactScope: false, reactStall: false, reactHold: false, unreact: "" };
-  const held: (() => void)[] = [];
-  const release = () => {
-    for (const r of held.splice(0)) r();
+  // unreact (or unreactBy[ts] for one message): what reactions.remove answers - "" ok, an error code, "stall" never,
+  // "hold" only on release("remove"); reactHold: reactions.add answers only on release("add")
+  const failing = { auth: 0, reactScope: false, reactStall: false, reactHold: false, unreact: "", unreactBy: {} as Record<string, string> };
+  const held = { add: [] as (() => void)[], remove: [] as (() => void)[] };
+  const release = (kind?: "add" | "remove") => {
+    for (const k of kind ? [kind] : (["add", "remove"] as const)) for (const r of held[k].splice(0)) r();
   };
   const server = Bun.serve({
     port: 0,
@@ -63,10 +63,13 @@ const fakeSlack = () => {
       if (method === "users.info") return reply({ user: { profile: { display_name: `name-${String(body.user)}` } } });
       if (method === "chat.postMessage") return reply({ channel: body.channel, ts: "1700000100.000100" });
       if (method === "reactions.add" && failing.reactStall) return new Promise<Response>(() => {});
-      if (method === "reactions.add" && failing.reactHold) return new Promise<Response>((r) => held.push(() => r(reply({}))));
-      if (method === "reactions.remove" && failing.unreact === "stall") return new Promise<Response>(() => {});
+      if (method === "reactions.add" && failing.reactHold) return new Promise<Response>((r) => held.add.push(() => r(reply({}))));
+      const unreact = failing.unreactBy[String(body.timestamp)] ?? failing.unreact;
+      if (method === "reactions.remove" && unreact === "stall") return new Promise<Response>(() => {});
+      if (method === "reactions.remove" && unreact === "hold") return new Promise<Response>((r) => held.remove.push(() => r(reply({}))));
+      if (method === "reactions.remove" && unreact) return Response.json({ ok: false, error: unreact });
       if (method === "reactions.add") return failing.reactScope ? Response.json({ ok: false, error: "missing_scope" }) : reply({});
-      if (method === "reactions.remove") return failing.unreact ? Response.json({ ok: false, error: failing.unreact }) : reply({});
+      if (method === "reactions.remove") return reply({});
       return Response.json({ ok: false, error: "unknown_method" });
     },
     websocket: {
@@ -337,6 +340,68 @@ test("eyes that land after the answer already cleared the message come off again
   // Then the watcher takes them off again, with the bot token
   await slack.until("the second removal", () => unreacted(slack).length === 2);
   expect(unreacted(slack)).toEqual(["D1 1700000000.000100 eyes bot", "D1 1700000000.000100 eyes bot"]);
+});
+
+test("eyes landing while the same answer still waits on another message's removal come off again", async () => {
+  // Given two DMs whose reactions.add answer late (200 ms deadline)
+  const slack = fakeSlack();
+  slack.failing.reactHold = true;
+  const w = await watcher(slack, [], 30_000, {}, 200);
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "a", ts: "1700000000.000100" });
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "b", ts: "1700000000.000110" });
+  await slack.until("both DMs", () => w.msgs().length === 2);
+  // When one answer finds no eyes on A yet and is still waiting on B's removal
+  slack.failing.unreactBy = { "1700000000.000100": "no_reaction", "1700000000.000110": "hold" };
+  const answer = send(w, slack, ["--to", "D1", "--text", "둘 다"]);
+  await slack.until("B's removal asked", () => unreacted(slack).includes("D1 1700000000.000110 eyes bot"));
+  slack.failing.unreactBy = { "1700000000.000110": "hold" };
+  slack.release("add");
+  // Then the watcher takes A's late eyes off before that answer is over
+  await slack.until("A's second removal", () => unreacted(slack).filter((c) => c.startsWith("D1 1700000000.000100 ")).length === 2);
+  slack.release("remove");
+  expect((await answer).code).toBe(0);
+});
+
+test("late eyes the watcher could not take off are asked about again on the next answer", async () => {
+  // Given a DM whose reactions.add answers late, answered while its eyes were not on yet
+  const slack = fakeSlack();
+  slack.failing.reactHold = true;
+  const w = await watcher(slack, [], 30_000, {}, 200);
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "a", ts: "1700000000.000100" });
+  await slack.until("the DM", () => w.msgs().length === 1);
+  slack.failing.unreact = "no_reaction";
+  expect((await send(w, slack, ["--to", "D1", "--text", "x"])).code).toBe(0);
+  // When the eyes land and the watcher's removal fails
+  slack.failing.unreact = "internal_error";
+  slack.release("add");
+  await slack.until("the watcher's SLACK_UNEYE_FAIL", () => w.lines.includes("SLACK_UNEYE_FAIL D1 1700000000.000100 slack reactions.remove: internal_error"));
+  // Then the next answer there asks again, and it sticks
+  slack.failing.unreact = "";
+  const next = await send(w, slack, ["--to", "D1", "--text", "y"]);
+  await send(w, slack, ["--to", "D1", "--text", "z"]);
+  expect([next.code, next.out.trim().split("\n").length]).toEqual([0, 1]);
+  expect(unreacted(slack).length).toBe(3);
+});
+
+test("two answers at once in different DMs both keep their record", async () => {
+  // Given addressed DMs in D1 and D2
+  const slack = fakeSlack();
+  const w = await watcher(slack);
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "a", ts: "1700000000.000100" });
+  slack.event({ type: "message", channel_type: "im", channel: "D2", user: "UGUEST", text: "b", ts: "1700000000.000200" });
+  await slack.until("both DMs", () => w.msgs().length === 2);
+  // When the D1 answer is still waiting on its removal while the D2 answer runs start to end
+  slack.failing.unreactBy = { "1700000000.000100": "hold" };
+  const d1 = send(w, slack, ["--to", "D1", "--text", "x"]);
+  await slack.until("D1's removal asked", () => unreacted(slack).length === 1);
+  expect((await send(w, slack, ["--to", "D2", "--text", "y"])).code).toBe(0);
+  slack.release("remove");
+  expect((await d1).code).toBe(0);
+  // Then later answers in both places ask Slack nothing again
+  slack.failing.unreactBy = {};
+  await send(w, slack, ["--to", "D1", "--text", "x2"]);
+  await send(w, slack, ["--to", "D2", "--text", "y2"]);
+  expect(unreacted(slack)).toEqual(["D1 1700000000.000100 eyes bot", "D2 1700000000.000200 eyes bot"]);
 });
 
 test("more than 2,000 answered messages are each asked about once, never again", async () => {
