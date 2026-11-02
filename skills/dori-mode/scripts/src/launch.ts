@@ -1,10 +1,10 @@
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 import { AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
 import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { type GoalRead, laneGoal } from "./goal.ts";
-import { AGENT, descendants, ended, procTable, shellPidOf } from "./session-id.ts";
+import { AGENT, argvSessionId, descendants, ended, hasSessionSelector, procTable, shellPidOf } from "./session-id.ts";
 import { readScreen, sendVerified } from "./panes.ts";
 import { hasThread, LANE_KEY, type Lane, NO_THREAD, threadRefProblem } from "./registry.ts";
 import { areaLabel, type AreaQuery, areaSignals, pastSignalsSection, tagsOf } from "./lane-signals.ts";
@@ -471,14 +471,11 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
     ({ draft, text } = await renderBrief(deps, { ...input, thread: ref }));
   }
   await Bun.write(input.brief, text);
-  const promptAt = deps.clock.now();
-  // the token names this launch, so launch finds the goal of the session it typed into and no other (startupGoal)
-  const token = crypto.randomUUID().slice(0, 8);
-  const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane (launch ${token}); report as the brief's footer says.`;
+  const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane; report as the brief's footer says.`;
   const opened = await (deps.config.backend === "aoe" ? openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : openHerdr(deps, input.key, cwd, model, prompt)).catch((e: unknown) => {
     throw e instanceof LaunchFailed && openedThread ? new LaunchFailed(e.message, openedThread) : e;
   });
-  const lane: Lane = { ...draft, pane: opened.pane, ...(opened.tab ? { tab: opened.tab } : {}) };
+  const lane: Lane = { ...draft, pane: opened.pane, ...(opened.tab ? { tab: opened.tab } : {}), ...(opened.session ? { session: opened.session, sessionVia: "launch" } : {}) };
   await deps.registry.write(lane);
   // registered first, so the queue counts this lane as working in the thread; a thread --thread new just opened is 🔄 already
   if (input.thread !== NEW_THREAD) {
@@ -492,14 +489,14 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${bad[0]}` };
   const started = deps.config.backend === "aoe" ? await aoeStartup(deps, input.key, opened.pane, screen) : `STARTUP_OK ${input.key} ${opened.pane}`;
   if (!started.startsWith("STARTUP_OK")) return { lane, startup: started };
-  return { lane, startup: (await startupGoal(deps, input.key, opened.pane, cwd, promptAt, token)) ?? started };
+  return { lane, startup: (await startupGoal(deps, input.key, opened.pane, cwd, opened.session ?? "")) ?? started };
 };
 
 // A running agent is not yet a good start: a lane that never sets its goal does its first turn and stops, and the lead
 // found the quiet lane long after a STARTUP_OK (dori-superagent issue #50 reproduced here (MIT):
 // https://github.com/sisyphuslabs/dori-superagent/issues/50; upstream PR #51 reads herdr's screen, this reads omo's
-// goal store, the file `dori pause`/`dori resume` confirm with, of the one session this launch typed its prompt into,
-// told apart by its per-launch token, goal.ts laneGoal). Read right after the 20 s check, then
+// goal store, the file `dori pause`/`dori resume` confirm with, of the session id the lane's agent runs under, read from
+// its command line: aoe's own --session-id, or the one launch gave a herdr omo; goal.ts laneGoal). Read right after the 20 s check, then
 // every 10 s for up to 60 s more, so a goal set a little late is still a start; an agent that ends or shows a startup failure meanwhile is STARTUP_ERROR, and no goal by
 // then is STARTUP_NO_GOAL with the last lines (exit 3, like the other non-OK results).
 export const GOAL_WAIT = { checks: 6, everyMs: 10_000 } as const;
@@ -518,9 +515,11 @@ const agentGone = async (deps: FlowDeps, pane: string): Promise<string | undefin
   return live ? undefined : "no agent runs in the pane any more";
 };
 
-const startupGoal = async (deps: FlowDeps, key: string, pane: string, cwd: string, since: number, token: string): Promise<string | undefined> => {
-  const marker = `You are the ${key} lane (launch ${token});`;
-  const read = deps.readGoal ?? (async () => laneGoal(deps.config.sessionsDir, cwd, marker, since - 2_000));
+const startupGoal = async (deps: FlowDeps, key: string, pane: string, cwd: string, session: string): Promise<string | undefined> => {
+  // no session id in the agent's command line (aoe did not pin one, or an agentCommand that is not omo): which session is
+  // the lane's is not known, and guessing it could read another session's goal
+  if (!deps.readGoal && !session) return `STARTUP_UNCONFIRMED ${key} ${pane}: the agent runs but its command line names no session id, so its goal cannot be read; last lines: ${lastLines(await readScreen(deps.run, deps.config.backend, pane, 40))}`;
+  const read = deps.readGoal ?? (async () => laneGoal(deps.config.sessionsDir, cwd, session));
   let goal: GoalRead = "unknown";
   for (let check = 0; ; check++) {
     // a goal is no good news from an agent that already ended, so the agent is read before its goal, every time
@@ -554,7 +553,13 @@ export const aoeStartup = async (deps: FlowDeps, key: string, pane: string, scre
 const lastLines = (screen: string): string =>
   screen.split("\n").map((s) => s.trim()).filter(Boolean).slice(-3).join(" / ").replace(/\/(Users|home|Volumes|private|tmp)\/\S+/g, "(local path)").slice(0, 240) || "(blank)";
 
-type Opened = { readonly pane: string; readonly tab?: string; readonly failure?: string };
+// session: the id the lane's agent runs under, from its command line ("" or absent when it names none)
+type Opened = { readonly pane: string; readonly tab?: string; readonly failure?: string; readonly session?: string };
+
+// A herdr lane's agent picks its own session unless told: an omo agentCommand that names no session of its own gets
+// --session-id <a new id> after the program, so launch knows the lane's session exactly. Any other command is run as it is.
+export const withSessionId = (argv: readonly string[], id: string): string[] =>
+  basename(argv[0] ?? "") === "omo" && !hasSessionSelector(argv) ? [argv[0] ?? "omo", "--session-id", id, ...argv.slice(1)] : [...argv];
 
 const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string): Promise<Opened> => {
   const created = await deps.run(["herdr", "tab", "create", ...(deps.config.laneWorkspace ? ["--workspace", deps.config.laneWorkspace] : []), "--cwd", cwd, "--label", key, "--no-focus"]);
@@ -562,8 +567,12 @@ const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string
   const made = (JSON.parse(created.out) as { result: { root_pane: { pane_id: string; tab_id?: string }; tab_id?: string } }).result;
   const pane = made.root_pane.pane_id;
   const tab = made.tab_id ?? made.root_pane.tab_id;
-  await deps.run(["herdr", "pane", "run", pane, fill(deps.config.agentCommand, { model, prompt }).map(quoteForPane).join(" ")]);
-  return { pane, ...(tab ? { tab } : {}) };
+  // the template is checked, not the filled argv: the prompt is one argument and never a selector
+  const argv = fill(withSessionId(deps.config.agentCommand, crypto.randomUUID()), { model, prompt });
+  await deps.run(["herdr", "pane", "run", pane, argv.map(quoteForPane).join(" ")]);
+  // a command with its own --session-dir keeps its sessions (and goals) outside sessionsDir, so launch cannot read them
+  const elsewhere = argv.some((a) => a === "--session-dir" || a.startsWith("--session-dir="));
+  return { pane, ...(tab ? { tab } : {}), session: elsewhere ? "" : argvSessionId(argv) };
 };
 
 const openAoe = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string, env: Readonly<Record<string, string | undefined>>): Promise<Opened> => {
@@ -576,11 +585,22 @@ const openAoe = async (deps: FlowDeps, key: string, cwd: string, model: string, 
   }
   const failure = await awaitPrompt(deps, pane);
   if (failure) return { pane, failure };
+  const session = await aoeAgentSession(deps, pane);
   // a lane that missed launchEnv (the GPU guard) gets no prompt: it would start working with the GPU in reach
   const off = await envMismatch(deps.run, pane, env);
   if (off.length) return { pane, failure: `launchEnv not in the session: ${off.join(", ")}; the lane prompt was not sent` };
   if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, prompt))) return { pane, failure: "the launch prompt was not submitted (see NOT_SUBMITTED in the watch log)" };
-  return { pane };
+  return { pane, session };
+};
+
+// The session aoe started the lane's agent with: aoe pins an omo session by putting --session-id <id> in its command line
+// (openAoeSession gives aoe add the PATH it needs for that). launch adds no selector of its own: aoe would then refuse
+// every restart of the session ("already contains native session selector"). The agent is the first agent process under
+// the pane's shell, read once its prompt shows.
+const aoeAgentSession = async (deps: FlowDeps, pane: string): Promise<string> => {
+  const shell = await shellPidOf(pane, { run: deps.run, sessionsDir: deps.config.sessionsDir, backend: "aoe" });
+  const agent = shell ? descendants(await procTable(deps.run), shell).find((p) => AGENT.test(p.cmd) && !ended(p)) : undefined;
+  return agent ? argvSessionId(agent.cmd.split(/\s+/)) : "";
 };
 
 // The agent's ❯ prompt, or the first startup error on screen: an agent that exits at once never shows a prompt.

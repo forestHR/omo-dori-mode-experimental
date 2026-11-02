@@ -1,5 +1,5 @@
 import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import type { Pane } from "./panes.ts";
 import type { Clock, Runner } from "./run.ts";
@@ -184,15 +184,33 @@ export const sessionPath = (path: string, nvmDir: string): string | undefined =>
   return [...dirs.slice(0, cut), nvm, ...dirs.slice(cut).filter((d) => d !== nvm)].join(":");
 };
 
+// aoe pins an omo session (it puts --session-id <id> in the agent's command line and remembers the id, so dori launch reads
+// the lane's session exactly and a restart resumes that same session) only when a `pi` command is on the PATH aoe add runs
+// with. A systemd unit's PATH has none, and a lane its sweeps launched started with no id at all (aoe 1.20.0, 2026-11-02).
+// A PATH without pi gets, at its end, the node_modules/.bin that holds the pi of the agent's own install (found walking
+// up from the real path of `tool` on that PATH); a PATH that has one, or no such install, stays as it is.
+export const withPi = (path: string, tool: string): string => {
+  const dirs = path.split(":").filter(Boolean);
+  if (dirs.some((d) => runnable(join(d, "pi")))) return path;
+  const bin = dirs.map((d) => join(d, tool)).find(runnable);
+  if (!bin) return path;
+  for (let d = dirname(realpathSync(bin)); d !== dirname(d); d = dirname(d)) {
+    const pi = join(d, "node_modules", ".bin", "pi");
+    if (runnable(pi)) return [...dirs, dirname(pi)].join(":");
+  }
+  return path;
+};
+
 // aoe add refuses a title+path pair that already exists, even in the trash (aoe rm --purge clears it).
 // thinking goes in as its own --thinking flag: omo 5.1.30 can start a session at medium although the model id ends in :high.
 // env: laneEnv for the session (see forwardEnv); left out or {} touches neither tmux nor aoe's environment.
-// PATH: sessionPath of this process's PATH, passed to aoe add only when it differs; no node at all refuses (NO_NODE).
+// PATH: sessionPath of this process's PATH, with withPi, passed to aoe add only when it differs; no node at all refuses (NO_NODE).
 export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>> }): Promise<string> => {
   const env = opts.env && Object.keys(opts.env).length ? opts.env : undefined;
   const callerPath = process.env.PATH ?? "";
   const nvmDir = process.env.NVM_DIR || join(process.env.HOME ?? "", ".nvm");
-  const path = sessionPath(callerPath, nvmDir);
+  const node = sessionPath(callerPath, nvmDir);
+  const path = node === undefined ? undefined : withPi(node, opts.tool);
   if (path === undefined) throw new AoeError(`NO_NODE no node on PATH (${callerPath}) or in ${nvmDir}: the session's senpi task model probe and omo hooks run #!/usr/bin/env node and would exit 127; install node with nvm or put it on the caller's PATH`);
   if (env) await forwardEnv(run, Object.keys(env));
   const addEnv = path === callerPath ? env : { ...env, PATH: path };

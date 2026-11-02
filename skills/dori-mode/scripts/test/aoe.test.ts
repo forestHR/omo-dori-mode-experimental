@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { sessionPath } from "../src/aoe.ts";
+import { sessionPath, withPi } from "../src/aoe.ts";
 import { leadAlertPoster } from "../src/autoturn.ts";
 import { deadPaneTick, newDeadPaneState, UNRECOGNISED_ALERT_AFTER } from "../src/dead-panes.ts";
 import { claimDone, type FlowDeps, watchTick } from "../src/done-flow.ts";
@@ -11,11 +11,11 @@ import { RESUME_TEXT } from "../src/lead-limit.ts";
 import type { Question } from "../src/messenger/discord-cards.ts";
 import { missedAnswersTick, sawAnswer } from "../src/missed-answers.ts";
 import type { DoriConfig } from "../src/config.ts";
-import { eightSteps, launchEnvArgs, launchLane } from "../src/launch.ts";
+import { eightSteps, launchEnvArgs, launchLane, withSessionId } from "../src/launch.ts";
 import { listPanes, sendVerified } from "../src/panes.ts";
 import { SUBMIT_TIMING } from "../src/submit.ts";
 import type { Lane } from "../src/registry.ts";
-import { resolveSession } from "../src/session-id.ts";
+import { argvSessionId, resolveSession } from "../src/session-id.ts";
 import { depsFor, fakeClock, NEW_AOE_ID, newWorld, RUNNING, sent, withState, type World } from "./fakes.ts";
 
 const T0 = Date.parse("2026-01-01T12:00:00.000Z");
@@ -55,8 +55,7 @@ test("a launch opens an aoe session, waits for the prompt and types the lane pro
   expect(r.lane.pane).toBe(pane);
   expect(r.startup).toBe(`STARTUP_OK smoke ${pane}`);
   expect(sent(world)).toHaveLength(1);
-  expect(sent(world)[0]?.replace(/ \(launch [0-9a-f]{8}\);/, ";")).toBe(`ulw set goal and work. Read and execute the lane brief at ${brief} in full. You are the smoke lane; report as the brief's footer says.`);
-  expect(sent(world)[0]).toMatch(/You are the smoke lane \(launch [0-9a-f]{8}\); /);
+  expect(sent(world)[0]).toBe(`ulw set goal and work. Read and execute the lane brief at ${brief} in full. You are the smoke lane; report as the brief's footer says.`);
   expect(world.calls).toContainEqual(["tmux", "send-keys", "-t", `=${pane}:`, "Enter"]);
   expect(await Bun.file(brief).text()).toContain(`run ["dori","type","aoe_Dori_0a1b2c3d","--text","<report line>"]`);
   expect(await Bun.file(brief).text()).not.toContain("send-keys");
@@ -319,7 +318,7 @@ test("a herdr lane is held to its goal the same way: STARTUP_NO_GOAL without one
   expect((await launchLane(herdr(["none"]), input("hd"))).startup).toStartWith("STARTUP_NO_GOAL hd w:p9: the agent runs but no goal in its session 80 s after its prompt");
   expect((await launchLane(herdr(["unknown", { status: "active" }]), input("hd2"))).startup).toBe("STARTUP_OK hd2 w:p9");
   // herdr runs the agent with the lane's own prompt in its command line: a key or brief named mcp is not an MCP server
-  world.ps = "500 1 bash\n501 500 omo --model m ulw. Read and execute the lane brief at /tmp/mcp.md in full. You are the mcp-fix lane (launch 1234abcd); report as the brief's footer says.";
+  world.ps = "500 1 bash\n501 500 omo --model m ulw. Read and execute the lane brief at /tmp/mcp.md in full. You are the mcp-fix lane; report as the brief's footer says.";
   expect((await launchLane(herdr([{ status: "active" }]), input("mcp-fix"))).startup).toBe("STARTUP_OK mcp-fix w:p9");
   world.ps = "500 1 bash";
   expect((await launchLane(herdr(["none"]), input("hd3"))).startup).toBe("STARTUP_ERROR hd3 w:p9: no agent runs in the pane any more");
@@ -327,7 +326,19 @@ test("a herdr lane is held to its goal the same way: STARTUP_NO_GOAL without one
   expect((await launchLane(herdr([{ status: "active" }]), input("hd4"))).startup).toBe("STARTUP_ERROR hd4 w:p9: no agent runs in the pane any more");
 });
 
-test("the goal is read from omo's own files of the session this launch typed into (its token), under a symlinked cwd's real path, never another session's", async () => {
+// The lane's session is the exact id its agent runs under, read from the agent's command line: aoe pins it, herdr omo gets
+// one from launch. No prompt marker, no transcript search: a sibling in the same cwd holding this lane's prompt never counts.
+const ID = "99999999-9999-4999-8999-999999999999";
+const sessionFiles = (sessions: string, cwd: string) => {
+  const dir = join(sessions, `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`);
+  mkdirSync(join(dir, "extensions", "goal"), { recursive: true });
+  return (id: string, prompt: string, goal?: string) => {
+    writeFileSync(join(dir, `2026-01-01T12-00-01-000Z_${id}.jsonl`), `${JSON.stringify({ type: "message", message: { role: "user", content: prompt } })}\n`);
+    if (goal) writeFileSync(join(dir, "extensions", "goal", `${id}.json`), JSON.stringify({ goal: { status: goal } }));
+  };
+};
+
+test("exact session id: an aoe lane's goal is read from the session aoe put in its agent's command line, under a symlinked cwd's real path; launch adds no selector and the registry keeps the id", async () => {
   const brief = join(state.dir, "brief.md");
   await Bun.write(brief, "# brief\n");
   const sessions = join(state.dir, "sessions");
@@ -335,37 +346,136 @@ test("the goal is read from omo's own files of the session this launch typed int
   const link = join(state.dir, "link");
   mkdirSync(real, { recursive: true });
   symlinkSync(real, link);
-  const dir = join(sessions, `--${realpathSync(real).replace(/^\//, "").replace(/\//g, "-")}--`);
-  mkdirSync(join(dir, "extensions", "goal"), { recursive: true });
-  const line = (role: string, text: string) => JSON.stringify({ type: "message", timestamp: new Date(T0 + 1_000).toISOString(), message: { role, content: [{ type: "text", text }] } });
-  const session = (id: string, prompt: string, goal?: string, quoted?: string, earlier?: string) => {
-    const lines = [JSON.stringify({ type: "session", id }), ...(earlier ? [line("user", earlier)] : []), line("user", prompt), ...(quoted ? [line("toolResult", quoted)] : [])];
-    writeFileSync(join(dir, `2026-01-01T12-00-00-000Z_${id}.jsonl`), `${lines.join("\n")}\n`);
-    if (goal) writeFileSync(join(dir, "extensions", "goal", `${id}.json`), JSON.stringify({ goal: { status: goal } }));
-  };
-  // at the 20 s check the sessions hold what `write` puts there, given the prompt this launch typed
+  const session = sessionFiles(sessions, realpathSync(real));
+  // the pane's shell (tmux pane_pid 10) runs aoe's wrapper, which runs the agent aoe pinned
+  world.ps = `10 1 /bin/bash /dev/fd/4\n11 10 /home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js --extension /x/plugin -e /x/pi-aoe-session-id.js --model m --session-id ${ID}`;
   const launch = async (key: string, write: (own: string) => void) => {
     const base: FlowDeps = { ...at(T0), readGoal: undefined, config: { ...at(T0).config, sessionsDir: sessions } };
     const deps: FlowDeps = { ...base, clock: { ...base.clock, sleep: async (ms: number) => { if (ms === 20_000) write(sent(world).at(-1) ?? ""); } } };
-    return (await launchLane(deps, { noThread: "test lane", key, title: key, brief, done: "file /tmp/ok", cwd: link })).startup;
+    return launchLane(deps, { noThread: "test lane", key, title: key, brief, done: "file /tmp/ok", cwd: link });
   };
   const pane = (key: string) => `aoe_${key}_${NEW_AOE_ID.slice(0, 8)}`;
-  // a sibling with a goal that captured this lane's pane (the prompt is in one of its tool results) is not this lane
-  expect(await launch("smoke0", (own) => session("11111111-1111-1111-1111-111111111111", "ulw. You are the other lane (launch 0000aaaa); report as", "active", `❯ ${own}`))).toStartWith(`STARTUP_NO_GOAL smoke0 ${pane("smoke0")}: the agent runs but no goal found for its session`);
-  // another Dori instance launched the same key in the same cwd at the same time and its lane has a goal; this one's has none
-  expect(await launch("smoke", (own) => {
-    session("22222222-2222-2222-2222-222222222222", own);
-    session("44444444-4444-4444-4444-444444444444", own.replace(/\(launch [0-9a-f]{8}\)/, "(launch ffffffff)"), "active");
-  })).toStartWith(`STARTUP_NO_GOAL smoke ${pane("smoke")}: the agent runs but no goal in its session`);
-  // a lane that writes its goal: read from its own session's goal file
-  expect(await launch("smoke2", (own) => session("33333333-3333-3333-3333-333333333333", own, "active"))).toBe(`STARTUP_OK smoke2 ${pane("smoke2")}`);
-  // a session an agentCommand resumed holds the prompt after its earlier messages, so every user message counts
-  expect(await launch("smoke3", (own) => session("55555555-5555-5555-5555-555555555555", own, "active", undefined, "an earlier turn of this session"))).toBe(`STARTUP_OK smoke3 ${pane("smoke3")}`);
-  // the same prompt sent again by hand into a second session: neither is known to be this lane's, so no goal is read
-  expect(await launch("smoke4", (own) => {
-    session("66666666-6666-6666-6666-666666666666", own);
-    session("77777777-7777-7777-7777-777777777777", own, "active");
-  })).toStartWith(`STARTUP_NO_GOAL smoke4 ${pane("smoke4")}: the agent runs but no goal found for its session`);
+  // a sibling (or another Dori's same-key launch) in the same cwd holds this lane's very prompt and a goal; the lane's own session has none
+  const r = await launch("smoke", (own) => {
+    session("22222222-2222-4222-8222-222222222222", own, "active");
+    session(ID, own);
+  });
+  expect(r.startup).toStartWith(`STARTUP_NO_GOAL smoke ${pane("smoke")}: the agent runs but no goal in its session`);
+  expect(r.lane.session).toBe(ID);
+  expect((await at(T0).registry.read("smoke"))?.session).toBe(ID);
+  expect(world.calls.filter((c) => c[0] === "aoe" && c[1] === "add").every((c) => !c.join(" ").includes("--session"))).toBe(true);
+  // the lane's own session writes its goal: STARTUP_OK
+  expect((await launch("smoke2", (own) => session(ID, own, "active"))).startup).toBe(`STARTUP_OK smoke2 ${pane("smoke2")}`);
+});
+
+test("exact session id: an aoe agent whose command line names no session is STARTUP_UNCONFIRMED, never a goal borrowed from a session holding its prompt", async () => {
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# brief\n");
+  const sessions = join(state.dir, "sessions");
+  const session = sessionFiles(sessions, "/tmp/w");
+  world.ps = "10 1 /bin/bash /dev/fd/4\n11 10 /home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js --extension /x/plugin --model m";
+  const base: FlowDeps = { ...at(T0), readGoal: undefined, config: { ...at(T0).config, sessionsDir: sessions } };
+  const deps: FlowDeps = { ...base, clock: { ...base.clock, sleep: async (ms: number) => { if (ms === 20_000) session("33333333-3333-4333-8333-333333333333", sent(world).at(-1) ?? "", "active"); } } };
+  const r = await launchLane(deps, { noThread: "test lane", key: "smoke", title: "smoke", brief, done: "file /tmp/ok", cwd: "/tmp/w" });
+  expect(r.startup).toStartWith(`STARTUP_UNCONFIRMED smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}: the agent runs but its command line names no session id`);
+  expect(r.lane.session).toBeUndefined();
+});
+
+test("exact session id: a herdr omo lane gets launch's own --session-id after the program and its goal is read from that session; an agentCommand with its own selector is run as it is", async () => {
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# brief\n");
+  const sessions = join(state.dir, "sessions");
+  const session = sessionFiles(sessions, "/tmp/w");
+  world.ps = "500 1 bash\n501 500 omo --model m";
+  const herdr = (agentCommand: readonly string[], write: (cmd: string) => void): FlowDeps => {
+    const base = depsFor(world, fakeClock(T0), state.dir, { sessionsDir: sessions, agentCommand: [...agentCommand] });
+    let cmd = "";
+    return { ...base, clock: { ...base.clock, sleep: async (ms: number) => { if (ms === 20_000) write(cmd); } }, run: async (argv, o) => {
+      if (argv[0] === "herdr" && argv[1] === "tab" && argv[2] === "create") return { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w:p9" }, tab_id: "w:t9" } }), err: "" };
+      if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "process-info") return { code: 0, out: JSON.stringify({ result: { process_info: { shell_pid: 500 } } }), err: "" };
+      if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "run") cmd = argv[4] ?? "";
+      return base.run(argv, o);
+    } };
+  };
+  const input = (key: string) => ({ noThread: "test lane", key, title: key, brief, done: "file /tmp/ok", cwd: "/tmp/w" });
+  let id = "";
+  const r = await launchLane(herdr(["omo", "--model", "{model}", "{prompt}"], (cmd) => {
+    id = /^omo --session-id ([0-9a-f-]{36}) --model /.exec(cmd)?.[1] ?? "";
+    session("44444444-4444-4444-8444-444444444444", "You are the hd lane; report", "active");
+    session(id, "You are the hd lane; report", "active");
+  }), input("hd"));
+  expect(id).not.toBe("");
+  expect(r.startup).toBe("STARTUP_OK hd w:p9");
+  expect(r.lane.session).toBe(id);
+  // a session the lane did not run under never lends its goal: the same launch whose own session has none
+  const r2 = await launchLane(herdr(["omo", "--model", "{model}", "{prompt}"], (cmd) => {
+    session("55555555-5555-4555-8555-555555555555", cmd, "active");
+    session(/--session-id (\S+)/.exec(cmd)?.[1] ?? "", cmd);
+  }), input("hd2"));
+  expect(r2.startup).toStartWith("STARTUP_NO_GOAL hd2 w:p9: the agent runs but no goal in its session");
+  // --continue picks the session itself: no second selector, and no id to read
+  let continued = "";
+  const r3 = await launchLane(herdr(["omo", "--continue", "--model", "{model}", "{prompt}"], (cmd) => { continued = cmd; }), input("hd3"));
+  expect(continued).toStartWith("omo --continue --model ");
+  expect(r3.startup).toStartWith("STARTUP_UNCONFIRMED hd3 w:p9: the agent runs but its command line names no session id");
+  // --session with a partial uuid is resolved by omo itself: the prefix is not the session's id, so no goal file is guessed
+  let partial = "";
+  const r4 = await launchLane(herdr(["omo", "--session", "99999999", "--model", "{model}", "{prompt}"], (cmd) => { partial = cmd; session(ID, cmd, "active"); }), input("hd4"));
+  expect(partial).toStartWith("omo --session 99999999 --model ");
+  expect(r4.startup).toStartWith("STARTUP_UNCONFIRMED hd4 w:p9: the agent runs but its command line names no session id");
+  // --session with a whole uuid names that session exactly
+  const r5 = await launchLane(herdr(["omo", "--session", ID, "--model", "{model}", "{prompt}"], (cmd) => session(ID, cmd, "active")), input("hd5"));
+  expect(r5.startup).toBe("STARTUP_OK hd5 w:p9");
+  expect(r5.lane.session).toBe(ID);
+  // a command that keeps its sessions in its own --session-dir: the goal is not under sessionsDir, so it is not read there
+  let own = "";
+  const r6 = await launchLane(herdr(["omo", "--session-dir", "/elsewhere", "--model", "{model}", "{prompt}"], (cmd) => { own = /--session-id (\S+)/.exec(cmd)?.[1] ?? ""; session(own, cmd, "active"); }), input("hd6"));
+  expect(own).not.toBe("");
+  expect(r6.startup).toStartWith("STARTUP_UNCONFIRMED hd6 w:p9: the agent runs but its command line names no session id");
+});
+
+test("exact session id: argvSessionId reads only an exact id: --session-id, a session file, or a whole uuid; never a partial uuid", () => {
+  expect(argvSessionId(["omo", "--session-id", ID])).toBe(ID);
+  expect(argvSessionId(["omo", "--session", `/s/--x--/2026-01-01T12-00-00-000Z_${ID}.jsonl`])).toBe(ID);
+  expect(argvSessionId(["omo", "--session", ID])).toBe(ID);
+  expect(argvSessionId(["omo", "--session", "99999999"])).toBe("");
+  expect(argvSessionId(["omo", "--fork", ID])).toBe("");
+  expect(argvSessionId(["omo", "--model", "m"])).toBe("");
+});
+
+test("exact session id: withSessionId adds one --session-id only to an omo command that names no session itself", () => {
+  expect(withSessionId(["omo", "--model", "{model}", "{prompt}"], ID)).toEqual(["omo", "--session-id", ID, "--model", "{model}", "{prompt}"]);
+  expect(withSessionId(["/home/u/.bun/bin/omo", "{prompt}"], ID)).toEqual(["/home/u/.bun/bin/omo", "--session-id", ID, "{prompt}"]);
+  for (const own of [["omo", "--session", "/s/x.jsonl"], ["omo", "--session-id=abc"], ["omo", "--continue"], ["omo", "-c"], ["omo", "--resume"], ["omo", "-r"], ["omo", "--fork", "/s/x.jsonl"], ["omo", "--rebind", "/old/repo/x.jsonl"], ["omo", "--rebind=abc"], ["omo", "--no-session"], ["claude", "{prompt}"]]) expect(withSessionId(own, ID)).toEqual(own);
+});
+
+test("exact session id: aoe add gets the pi of the agent's own install when its PATH has none, so aoe pins the session", () => {
+  const root = join(state.dir, "pi-install");
+  const install = join(root, "global", "node_modules");
+  mkdirSync(join(install, "omo-ai", "bin"), { recursive: true });
+  mkdirSync(join(install, ".bin"), { recursive: true });
+  mkdirSync(join(root, "bin"), { recursive: true });
+  writeFileSync(join(install, "omo-ai", "bin", "omo.js"), "#!/bin/sh\n");
+  chmodSync(join(install, "omo-ai", "bin", "omo.js"), 0o755);
+  writeFileSync(join(install, ".bin", "pi"), "#!/bin/sh\n");
+  chmodSync(join(install, ".bin", "pi"), 0o755);
+  symlinkSync(join(install, "omo-ai", "bin", "omo.js"), join(root, "bin", "omo"));
+  const bare = `${join(root, "bin")}:/usr/bin:/bin`;
+  expect(withPi(bare, "omo")).toBe(`${bare}:${join(install, ".bin")}`);
+  // a PATH with a pi already, or with no such agent, stays as it is
+  expect(withPi(`${bare}:${join(install, ".bin")}`, "omo")).toBe(`${bare}:${join(install, ".bin")}`);
+  expect(withPi("/usr/bin:/bin", "omo")).toBe("/usr/bin:/bin");
+});
+
+test("exact session id: a pane resumed through a selector omo resolves itself is never matched to a sibling started nearby", async () => {
+  // a sibling lane's new session, written a second after this agent started, in the same directory
+  const sibling = "2026-01-01T12-00-01-000Z_22222222-2222-4222-8222-222222222222.jsonl";
+  const deps = { run: at(T0).run, sessionsDir: "/s", backend: "aoe" as const, listDir: () => [sibling] };
+  world.agentStart = "Thu Jan  1 12:00:00 UTC 2026";
+  const agent = (args: string) => [{ pid: 10, ppid: 1, cmd: "/bin/bash /dev/fd/4" }, { pid: 11, ppid: 10, cmd: `/home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js --extension /x/plugin ${args}` }];
+  // with no selector the start time still finds the session the agent created
+  expect((await resolveSession(PANE, "/repo", agent("--model m"), deps)).id).toBe("22222222-2222-4222-8222-222222222222");
+  for (const args of ["--session 01a11bb6", "--continue", "--resume", "--fork 01a11bb6", "--rebind /old/x.jsonl"]) expect(await resolveSession(PANE, "/repo", agent(`--model m ${args}`), deps)).toEqual({ id: "", via: "none", pid: 11 });
 });
 
 test("an aoe pane resumed with --session <session file> gets the uuid from the file name, not the path", async () => {

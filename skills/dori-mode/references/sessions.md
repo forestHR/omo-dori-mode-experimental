@@ -10,7 +10,7 @@ dori launch fix-login --title "Fix the login redirect loop" \
   --thread "telegram:<chat>/<topic>" --model anthropic/claude-opus-5-5
 ```
 
-`launch` checks the key and the `Done =` line, appends a footer to the brief, opens a tab in `laneWorkspace`, starts the agent, and after 20 seconds reads the pane for startup errors (missing module, no API key, rate limit, quota). On `STARTUP_ERROR`, relaunch on another model. On `STARTUP_NO_GOAL` (the agent runs, but its session held no goal 80 s after the prompt) look at the pane and tell the lane to set its goal: without one it stops after its first turn. On `STARTUP_UNCONFIRMED` (aoe: the session runs but shows neither a running turn nor its prompt) look at the pane first: answer a dialog it waits on, or close and relaunch it.
+`launch` checks the key and the `Done =` line, appends a footer to the brief, opens a tab in `laneWorkspace`, starts the agent, and after 20 seconds reads the pane for startup errors (missing module, no API key, rate limit, quota). On `STARTUP_ERROR`, relaunch on another model. On `STARTUP_NO_GOAL` (the agent runs, but its own session, the id in its command line, held no goal 80 s after the prompt) look at the pane and tell the lane to set its goal: without one it stops after its first turn. On `STARTUP_UNCONFIRMED` (aoe: the session runs but shows neither a running turn nor its prompt; or the agent's command line names no session id, so its goal cannot be read) look at the pane first: answer a dialog it waits on, or close and relaunch it.
 
 Write the brief like a careful prompt, on this template. The four fields and the eight steps are the owner's shared prompt for big tasks (2026-10-14): fill in the four fields, keep the steps as written here, and put the lane's own lines under them. Each step carries the owner's original prompt (owner, 2026-10-14 21:09 KST) with its typos and spacing corrected and its repeats merged (owner, 21:27 and 21:29 KST): every point and its strength (타협 없이, 1:1 100%, 예외 없이 핑계 없이, the end user, 이유와 함께, plan approval, set goal and mass-ulw) stays as written here, never dropped or softened; a line in parentheses says how a step meets one of the rules below. A small fix keeps the same frame and the same eight steps; only the lane's own lines get shorter.
 
@@ -125,9 +125,9 @@ One JSON file per lane under `<stateDir>/lanes/`, written atomically (temp file 
 
 How the session id is found for a pane, in order:
 
-1. the agent process's `--session <id>` argument;
+1. the agent process's exact `--session-id <id>`, `--session <session file>` or `--session <whole uuid>` argument;
 2. `PI_SESSION_ID` in the environment of one of its child processes;
-3. the session file whose timestamp falls within three minutes after the agent process started.
+3. the session file whose timestamp falls within three minutes after the agent process started, only when the agent's command line has no session selector: one omo resolves itself (a partial `--session` uuid, `--continue`, `--resume`, `--fork`, `--rebind`) can open an older session, and a sibling's new session nearby is not it, so the id stays unknown.
 
 The id from step 1 is the session the agent was launched with. If someone switches sessions inside the agent, only steps 2 and 3 notice.
 

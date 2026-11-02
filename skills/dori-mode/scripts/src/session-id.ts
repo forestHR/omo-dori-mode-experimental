@@ -37,6 +37,24 @@ export const descendants = (table: readonly Proc[], root: number): Proc[] => {
 
 export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(sessionsDir, `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`);
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The exact session an agent's command line names: --session-id <id> (omo: "use exact project session ID"), or
+// --session <path to the session .jsonl> (the uuid at the end of that file name; aoe resumes a session this way) or a
+// whole uuid. "" when it names none, or only a partial uuid omo would resolve itself (which session that is, is not known).
+export const argvSessionId = (argv: readonly string[]): string => {
+  const flagAt = argv.findIndex((a) => a === "--session" || a === "--session-id");
+  const value = flagAt >= 0 ? (argv[flagAt + 1] ?? "") : "";
+  if (argv[flagAt] === "--session-id") return value;
+  if (value.endsWith(".jsonl")) return SESSION_FILE.exec(basename(value))?.[5] ?? "";
+  return UUID.test(value) ? value : "";
+};
+
+// The flags with which omo picks its session itself (omo --help: --session, --session-id, --continue/-c, --resume/-r,
+// --fork, --rebind, --no-session), as a separate word or as --flag=value.
+const SELECTORS = ["--session", "--session-id", "--continue", "-c", "--resume", "-r", "--fork", "--rebind", "--no-session"];
+export const hasSessionSelector = (argv: readonly string[]): boolean => argv.some((a) => SELECTORS.some((s) => a === s || a.startsWith(`${s}=`)));
+
 export type SessionDeps = { readonly run: Runner; readonly sessionsDir: string; readonly backend?: Backend; readonly listDir?: (dir: string) => readonly string[] };
 
 export const shellPidOf = async (pane: string, deps: SessionDeps): Promise<number> => {
@@ -50,16 +68,17 @@ export const resolveSession = async (pane: string, cwd: string, table: readonly 
   const agent = shellPid ? descendants(table, shellPid).find((p) => AGENT.test(p.cmd) && !/\bmcp\b/.test(p.cmd)) : undefined;
   if (!agent) return { id: "", via: "none" };
   const argv = agent.cmd.split(/\s+/);
-  const flagAt = argv.findIndex((a) => a === "--session" || a === "--session-id");
-  // omo also takes --session <path to the session .jsonl>; the id is the uuid at the end of that file name
-  const flagValue = flagAt >= 0 ? (argv[flagAt + 1] ?? "") : "";
-  const fromFlag = flagValue.endsWith(".jsonl") ? (SESSION_FILE.exec(basename(flagValue))?.[5] ?? "") : flagValue;
+  const fromFlag = argvSessionId(argv);
   if (fromFlag) return { id: fromFlag, via: "argv", pid: agent.pid };
+  // a selector omo resolves itself (a partial --session uuid, --continue, --resume, --fork, --rebind) can open an older
+  // session, whose file name is no start time: only a child's exact PI_SESSION_ID may name it, never a nearby new session
+  const selected = hasSessionSelector(argv);
   for (const child of descendants(table, agent.pid).slice(0, 40)) {
     const env = await deps.run(["ps", "eww", "-o", "command=", "-p", String(child.pid)]);
     const hit = ENV_ID.exec(env.out);
     if (hit?.[1]) return { id: hit[1], via: "child-env", pid: agent.pid };
   }
+  if (selected) return { id: "", via: "none", pid: agent.pid };
   const started = Date.parse((await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out);
   if (Number.isNaN(started)) return { id: "", via: "none", pid: agent.pid };
   const list = deps.listDir ?? ((d: string) => { try { return readdirSync(d); } catch { return []; } });
