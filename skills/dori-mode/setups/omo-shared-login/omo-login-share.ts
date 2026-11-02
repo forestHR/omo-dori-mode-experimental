@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// omo-login-share: one omo login (zzangdori, oriclaw) borrowed by okdori, moodori, yoodori and gongdori.
+// omo-login-share: one omo login (zzangdori, oriclaw) borrowed by okdori, moodori, yoodori, gongdori and godori.
 // Only this account redeems refresh grants; borrowers receive access tokens with the refresh
 // replaced by a placeholder, so no copy can rotate a grant out from under the others.
 // Tokens travel on stdin only (never argv, env, logs or the state dir).
@@ -354,7 +354,7 @@ function unitText(): Record<string, string> {
 	const script = join(import.meta.dir, "omo-login-share.ts");
 	const env = `Environment=PATH=${UNIT_PATH}\n`;
 	return {
-		"omo-login-share.service": `[Unit]\nDescription=omo shared login: refresh zzangdori's login ahead and lend it to okdori, moodori, yoodori, gongdori\nOnFailure=omo-login-share-failed.service\n\n[Service]\nType=oneshot\n${env}ExecStart=${bun} ${script} sync --quiet\n`,
+		"omo-login-share.service": `[Unit]\nDescription=omo shared login: refresh zzangdori's login ahead and lend it to okdori, moodori, yoodori, gongdori, godori\nOnFailure=omo-login-share-failed.service\n\n[Service]\nType=oneshot\n${env}ExecStart=${bun} ${script} sync --quiet\n`,
 		"omo-login-share.timer": `[Unit]\nDescription=omo shared login every 3 minutes\n\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec=3min\nAccuracySec=15s\n\n[Install]\nWantedBy=timers.target\n`,
 		"omo-login-share.path": `[Unit]\nDescription=omo shared login on every change of zzangdori's auth.json\n\n[Path]\nPathChanged=${SOURCE_AUTH}\nUnit=omo-login-share.service\nTriggerLimitIntervalSec=60\nTriggerLimitBurst=20\n\n[Install]\nWantedBy=default.target\n`,
 		"omo-login-share-failed.service": `[Unit]\nDescription=omo shared login failure alert to the lead\n\n[Service]\nType=oneshot\n${env}ExecStart=${bun} ${script} alert-failed\n`,
