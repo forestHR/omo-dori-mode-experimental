@@ -6,7 +6,8 @@
 // The idea is dori-superagent's hourly loop (#23, https://github.com/sisyphuslabs/dori-superagent/pull/23, MIT), rewritten
 // here for aoe and dori launch: no GitHub issue import (owner 2026-11-02 23:14 KST "github 이슈는 필요없고"), the start goes
 // through the same launch as the lead's (directives, eight steps, work thread), and it never merges, pushes or closes.
-import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
 import type { BacklogSettings } from "./config.ts";
@@ -200,9 +201,12 @@ export const itemLine = (item: BacklogItem): string => {
 // One file per backlog lane a Dori started, in a directory every account can write (mode 1777, sticky: only the owner
 // removes its file). A file whose mtime is older than this belongs to a Dori whose loop stopped touching it.
 export const HOST_STALE_MS = 6 * 3_600_000;
-export type HostSlots = { readonly dir: string; readonly user: string; readonly max: number };
+// instance: this Dori among those of one account (a hash of its state directory), so two Doris of one user keep apart
+export type HostSlots = { readonly dir: string; readonly user: string; readonly instance: string; readonly max: number };
+export const instanceOf = (stateDir: string): string => createHash("sha256").update(resolve(stateDir)).digest("hex").slice(0, 8);
 
-const slotFile = (h: HostSlots, key: string): string => join(h.dir, `${h.user}.${key}.json`);
+const mine = (h: HostSlots): string => `${h.user}.${h.instance}.`;
+const slotFile = (h: HostSlots, key: string): string => join(h.dir, `${mine(h)}${key}.json`);
 
 const hostDir = (h: HostSlots): void => {
   if (existsSync(h.dir)) return;
@@ -230,24 +234,27 @@ export const hostLanes = (h: HostSlots, now: number): { readonly name: string; r
 // this Dori's files follow its running items: touched while running, removed once not
 const hostRefresh = (h: HostSlots, running: ReadonlySet<string>, now: number): void => {
   if (!existsSync(h.dir)) return;
-  for (const name of readdirSync(h.dir).filter((f) => f.startsWith(`${h.user}.`) && f.endsWith(".json"))) {
-    const key = name.slice(h.user.length + 1, -".json".length);
+  for (const name of readdirSync(h.dir).filter((f) => f.startsWith(mine(h)) && f.endsWith(".json"))) {
+    const key = name.slice(mine(h).length, -".json".length);
     const file = join(h.dir, name);
     if (running.has(key)) utimesSync(file, now / 1000, now / 1000);
     else rmSync(file, { force: true });
   }
 };
 
-/** Takes a host slot for a start: written first, then ranked, so two Doris passing at once never both go over. */
-const hostReserve = (h: HostSlots, key: string, now: number): string | undefined => {
+/** Takes a host slot for a start: counted and written under the host directory's lock, so the cap holds across Doris. */
+export const hostReserve = async (h: HostSlots, key: string, now: number): Promise<string | undefined> => {
   hostDir(h);
-  const mine = `${h.user}.${key}.json`;
-  writeAtomic(slotFile(h, key), JSON.stringify({ user: h.user, key, at: new Date(now).toISOString() }));
-  const live = hostLanes(h, now);
-  const rank = live.findIndex((l) => l.name === mine);
-  if (rank >= 0 && rank < h.max) return undefined;
-  rmSync(slotFile(h, key), { force: true });
-  return `the host has ${live.length - 1} backlog lane(s) of all Doris (backlog.hostMaxLanes ${h.max}): ${live.filter((l) => l.name !== mine).map((l) => l.name.slice(0, -5)).join(", ")}`;
+  const held = await flockDir(h.dir, 30);
+  if (!held) return `the host's backlog lock (${h.dir}) was not free in 30 s`;
+  try {
+    const live = hostLanes(h, now).filter((l) => l.name !== `${mine(h)}${key}.json`);
+    if (live.length >= h.max) return `the host has ${live.length} backlog lane(s) of all Doris (backlog.hostMaxLanes ${h.max}): ${live.map((l) => l.name.slice(0, -5)).join(", ")}`;
+    writeAtomic(slotFile(h, key), JSON.stringify({ user: h.user, instance: h.instance, key, at: new Date(now).toISOString() }));
+    return undefined;
+  } finally {
+    await held.release();
+  }
 };
 
 export type InboxRow = { readonly id: string; readonly ts?: string; readonly kind?: string | null; readonly scope?: string; readonly author_id?: string; readonly channel_id?: string; readonly content?: string | null; readonly transcript?: string | null; readonly url?: string };
@@ -418,15 +425,20 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
       }
       continue;
     }
-    if (old) continue;
-    const brief = join(dir(d.stateDir), "intake", `${id}.md`);
     // only an entry the owner approved by card: auto_applied must say false (a board that applies proposals itself sets it
     // true); a missing or unreadable field only drafts
     const approved = Boolean(todo.approved_at) && todo.auto_applied === false;
-    writeAtomic(brief, feedBrief(todo, id, approved));
     const title = String(todo.title ?? ref).slice(0, 60);
-    addItem(d.stateDir, { id, title, brief, done: d.settings.intakeDone.replaceAll("{id}", id).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
-    lines.push(`BACKLOG_INTAKE ${id} (feed, ${approved ? "owner-approved" : "draft only"}): ${title}`);
+    // approved after it came in as a draft: an open draft is upgraded in place; one whose draft lane already ran gets an
+    // approved follow-up item once that lane closed (its draft is in the lane's report)
+    const upgrade = approved && old?.draftOnly && old.status === "open";
+    const followUp = approved && old?.draftOnly && old.status === "done" ? `${id}-ok`.slice(0, 61) : undefined;
+    if (old && !upgrade && !(followUp && !readItem(d.stateDir, followUp))) continue;
+    const itemId = followUp ?? id;
+    const brief = join(dir(d.stateDir), "intake", `${itemId}.md`);
+    writeAtomic(brief, feedBrief(todo, itemId, approved) + (followUp ? `\n[앞 단계] 승인 전 초안 레인 ${id}이 이미 끝났다. 그 보고서(${old?.done ?? "?"})의 초안을 먼저 읽고 이어서 한다.\n` : ""));
+    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", id).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
+    lines.push(upgrade ? `BACKLOG_FEED_APPROVED ${id}: the owner approved it; it now works within its scope` : `BACKLOG_INTAKE ${itemId} (feed, ${approved ? "owner-approved" : "draft only"}${followUp ? `, after draft ${id}` : ""}): ${title}`);
   }
   return lines;
 };
@@ -477,35 +489,38 @@ export type TickDeps = {
   readonly intake?: (sweep: boolean) => Promise<readonly string[]>;
 };
 
-type Lock = { readonly release: () => void } | { readonly holder: string };
+export type Held = { readonly release: () => Promise<void> };
 
-const pidAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
+/**
+ * An exclusive flock(1) on a directory, held by a child process: the kernel lets go when that child ends, our process
+ * with it, so a crash leaves no lock behind and there is no half-written lock file to misread. A directory, not a file:
+ * every account can open it, also another user's in a sticky /tmp directory. undefined when not free within waitSec.
+ */
+export const flockDir = async (path: string, waitSec: number): Promise<Held | undefined> => {
+  mkdirSync(path, { recursive: true });
+  const p = Bun.spawn(["flock", "-x", ...(waitSec > 0 ? ["-w", String(waitSec)] : ["-n"]), path, "sh", "-c", "echo LOCKED; exec cat >/dev/null"], { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+  const first = await p.stdout.getReader().read();
+  if (first.done || !new TextDecoder().decode(first.value).includes("LOCKED")) {
+    await p.exited;
+    return undefined;
   }
+  return {
+    release: async () => {
+      p.stdin.end();
+      await p.exited;
+    },
+  };
 };
 
-// one pass at a time (the freshness loop and a hand-run dori backlog tick); a dead holder's lock is taken over
-const lock = (stateDir: string): Lock => {
-  const file = join(dir(stateDir), "lock");
-  mkdirSync(dir(stateDir), { recursive: true });
-  for (let i = 0; i < 2; i++) {
-    try {
-      const fd = openSync(file, "wx");
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      return { release: () => rmSync(file, { force: true }) };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const pid = Number(readFileSync(file, "utf8"));
-      if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) return { holder: `pass ${pid} runs` };
-      rmSync(file, { force: true });
-    }
+/** add, drop and decide run under the pass's lock, so a pass never starts what was just dropped or given a question. */
+export const withBacklogLock = async <T>(stateDir: string, waitSec: number, fn: () => T): Promise<T> => {
+  const held = await flockDir(dir(stateDir), waitSec);
+  if (!held) throw new BacklogError(`a backlog pass held ${dir(stateDir)} for more than ${waitSec} s; try again`);
+  try {
+    return fn();
+  } finally {
+    await held.release();
   }
-  return { holder: "lock contended" };
 };
 
 const isOpenLane = (l: Lane): boolean => statusOf(l) !== "closed";
@@ -522,8 +537,8 @@ export const lastRun = (stateDir: string): { readonly at: string; readonly lines
  * backlog.everyMin minutes, so the log does not repeat it each tick.
  */
 export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean } = {}): Promise<string[]> => {
-  const held = lock(d.stateDir);
-  if ("holder" in held) return opts.force ? [`BACKLOG_SKIPPED ${held.holder}`] : [];
+  const held = await flockDir(dir(d.stateDir), 0);
+  if (!held) return opts.force ? [`BACKLOG_SKIPPED another pass holds ${dir(d.stateDir)}`] : [];
   try {
     const last = lastRun(d.stateDir);
     const at = new Date(d.now()).toISOString();
@@ -564,8 +579,10 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
     const hold = waiting.length && room > 0 ? [...(await d.busy()), ...[d.limited()].filter((x): x is string => Boolean(x))] : [];
     if (hold.length) quiet.push(`BACKLOG_HOLD ${hold.join(" | ")}; ${waiting.length} item(s) wait`);
     let tried = 0;
-    for (const item of hold.length ? [] : waiting.slice(0, room)) {
-      const full = hostReserve(d.host, item.id, d.now());
+    for (const queued of hold.length ? [] : waiting.slice(0, room)) {
+      const item = readItem(d.stateDir, queued.id);
+      if (!item || item.status !== "open" || item.ask || item.held) continue;
+      const full = await hostReserve(d.host, item.id, d.now());
       if (full) {
         quiet.push(`BACKLOG_HOLD ${full}; ${waiting.length - tried} item(s) wait`);
         break;
@@ -574,6 +591,7 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
       const copy = join(dir(d.stateDir), "launched", `${item.id}.md`);
       mkdirSync(dirname(copy), { recursive: true });
       copyFileSync(item.brief, copy);
+      save(d.stateDir, logged(item, at, "starting", { status: "running", pane: "starting" }));
       try {
         const r = await d.launch(item, copy);
         save(d.stateDir, logged(item, at, `started: ${r.startup}`, { status: "running", pane: r.pane }));
@@ -592,7 +610,7 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
         rmSync(slotFile(d.host, item.id), { force: true });
         const failures = (item.startFailures ?? 0) + 1;
         const heldWhy = e instanceof StartRefused ? `dori launch refused it: ${why}` : failures >= MAX_FAILED_STARTS ? `start failed ${failures} times, last: ${why}` : undefined;
-        save(d.stateDir, logged(item, at, `start failed: ${why}`, { startFailures: failures, ...(heldWhy ? { held: heldWhy } : {}) }));
+        save(d.stateDir, logged(item, at, `start failed: ${why}`, { status: "open", pane: undefined, startFailures: failures, ...(heldWhy ? { held: heldWhy } : {}) }));
         if (heldWhy) d.inbox("backlog-held", `backlog-held-${item.id}-${at}`, `BACKLOG_HELD ${item.id} (${item.title}): ${heldWhy} -> fix it with dori backlog add ${item.id} ... (replaces it), or dori backlog drop ${item.id}`);
         lines.push(heldWhy ? `BACKLOG_HELD ${item.id}: ${heldWhy}` : `BACKLOG_START_FAILED ${item.id} (${failures}/${MAX_FAILED_STARTS}): ${why}`);
       }
@@ -608,6 +626,6 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
     writeAtomic(runFile(d.stateDir), JSON.stringify({ at: sweep ? at : (last?.at ?? at), lines: out.length ? out : (last?.lines ?? []), quiet }));
     return out;
   } finally {
-    held.release();
+    await held.release();
   }
 };

@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
-import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, itemLine, lastRun, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps } from "./backlog.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, instanceOf, itemLine, lastRun, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree, tailOf } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
@@ -804,7 +804,7 @@ const backlogDeps = (): TickDeps => ({
     const provider = config.defaultModel.split("/")[0];
     return poolFree(config.sessionsDir, provider, Date.now()) ? undefined : `usage limit: no ${provider} account is free in omo's credential pool`;
   },
-  host: { dir: config.backlog.hostDir, user: userInfo().username, max: config.backlog.hostMaxLanes },
+  host: { dir: config.backlog.hostDir, user: userInfo().username, instance: instanceOf(config.stateDir), max: config.backlog.hostMaxLanes },
   intake: async (sweep) => {
     // the last 2 MB of the inbox: a pass runs every freshness tick, and new rows are at the end
     const rows = (): InboxRow[] => (existsSync(auditInbox()) ? tailOf(auditInbox(), 2 * 1024 * 1024) : "").split("\n").flatMap((line): InboxRow[] => {
@@ -1579,15 +1579,18 @@ try {
           const ownerLink = opt("owner-link");
           const ownerProblem = ownerLink ? await ownerLinkProblem(ownerLink) : undefined;
           if (ownerLink && ownerProblem && !config.backlog.writeNeedsOwnerLink) die(`BACKLOG_REFUSED --owner-link ${ownerLink}: ${ownerProblem}`, 2);
-          const r = addItem(config.stateDir, { id: itemId, title: need("title"), brief: need("brief"), done: need("done"), priority: opt("priority"), cwd: opt("cwd"), thread: threadOpt(), noThread: noThreadOpt(), whyNew: whyNewOpt(), goal: opt("goal"), tags: tags(), ask: flags.values.ask === true ? "" : opt("ask"), by: opt("by"), readOnly: Boolean(flags.values["read-only"]), ownerLink }, { registered: Boolean(await deps.registry.read(itemId)), at, needOwnerLink: config.backlog.writeNeedsOwnerLink, ownerProblem });
+          const registered = Boolean(await deps.registry.read(itemId));
+          const r = await withBacklogLock(config.stateDir, 120, () => addItem(config.stateDir, { id: itemId, title: need("title"), brief: need("brief"), done: need("done"), priority: opt("priority"), cwd: opt("cwd"), thread: threadOpt(), noThread: noThreadOpt(), whyNew: whyNewOpt(), goal: opt("goal"), tags: tags(), ask: flags.values.ask === true ? "" : opt("ask"), by: opt("by"), readOnly: Boolean(flags.values["read-only"]), ownerLink }, { registered, at, needOwnerLink: config.backlog.writeNeedsOwnerLink, ownerProblem }));
           console.log(`${r.replaced ? "BACKLOG_REPLACED" : "BACKLOG_ADDED"} ${itemLine(r.item)}`);
           if (!config.backlog.enabled) console.log(state);
         } else if (sub === "drop") {
-          dropItem(config.stateDir, id ?? die("usage: dori backlog drop <id> [--reason R]"), many("reason").join("; ") || "by the lead", at);
+          const dropId = id ?? die("usage: dori backlog drop <id> [--reason R]");
+          await withBacklogLock(config.stateDir, 120, () => dropItem(config.stateDir, dropId, many("reason").join("; ") || "by the lead", at));
           console.log(`BACKLOG_DROPPED ${id}`);
         } else if (sub === "decide") {
           const kst = `${new Date(Date.now() + 9 * 3_600_000).toISOString().slice(0, 16).replace("T", " ")} KST`;
-          const item = decideItem(config.stateDir, id ?? die("usage: dori backlog decide <id> --text \"<the owner's answer>\""), opt("text") ?? "", at, kst);
+          const decideId = id ?? die("usage: dori backlog decide <id> --text \"<the owner's answer>\"");
+          const item = await withBacklogLock(config.stateDir, 120, () => decideItem(config.stateDir, decideId, opt("text") ?? "", at, kst));
           console.log(`BACKLOG_DECIDED ${item.id}: the answer is in its brief; it starts at a pass when its turn comes`);
         } else if (sub === "tick") {
           if (!config.backlog.enabled && !flags.values.force) die(state, 4);

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps } from "../src/backlog.ts";
+import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, type FeedTodo, flockDir, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 
@@ -27,7 +27,7 @@ const deps = (patch: Partial<TickDeps> = {}, settings: Partial<BacklogSettings> 
   lanes: async () => lanes,
   busy: async () => [],
   limited: () => undefined,
-  host: { dir: join(root, "host"), user: "me", max: settings.hostMaxLanes ?? SETTINGS.hostMaxLanes },
+  host: { dir: join(root, "host"), user: "me", instance: "i1", max: settings.hostMaxLanes ?? SETTINGS.hostMaxLanes },
   launch: async (item) => {
     launched.push(item.id);
     lanes.push(lane(item.id));
@@ -159,7 +159,7 @@ test("backlog lanes of all Doris on the host count toward hostMaxLanes; a stale 
   // Then
   expect(full[0]).toStartWith("BACKLOG_HOLD the host has 2 backlog lane(s) of all Doris (backlog.hostMaxLanes 2): ok.a, moo.b");
   expect(free[0]).toStartWith("BACKLOG_STARTED mine");
-  expect(existsSync(join(host, "me.mine.json"))).toBe(false);
+  expect(existsSync(join(host, "me.i1.mine.json"))).toBe(false);
   expect(done).toEqual(["BACKLOG_DONE mine: its lane closed (verified done)"]);
   expect(readdirSync(host).sort()).toEqual(["gone.c.json", "ok.a.json"]);
 });
@@ -325,4 +325,109 @@ test("a feed entry the owner approved by card runs within its own scope; one the
     expect([item?.draftOnly, item?.by]).toEqual([true, "feed"]);
     expect(readFileSync(item?.brief ?? "", "utf8")).toContain("[넘으면 안 되는 선] 읽기와 초안까지만");
   }
+});
+
+const gated = () => {
+  let open = (): void => {};
+  const gate = new Promise<void>((r) => {
+    open = r;
+  });
+  return { gate, open };
+};
+
+test("two Doris of one account keep their own host slots: one Dori's pass never removes the other's", async () => {
+  // Given: Dori 1 runs a backlog lane; Dori 2 of the same user has its own state
+  add("one");
+  await backlogTick(deps());
+  const other = join(root, "state2");
+  // When
+  await backlogTick({ ...deps(), stateDir: other, lanes: async () => [], host: { dir: join(root, "host"), user: "me", instance: "i2", max: 3 } }, { force: true });
+  // Then
+  expect(readdirSync(join(root, "host")).filter((f) => f.endsWith(".json"))).toEqual(["me.i1.one.json"]);
+});
+
+test("two Doris starting at the same moment with one host slot left: exactly one starts", async () => {
+  // Given: two Doris, each with one item, hostMaxLanes 1; whoever gets the slot waits inside its launch
+  const g = gated();
+  const doriB = join(root, "stateB");
+  addItem(doriB, { id: "bee", title: "bee", brief, done: "file /tmp/x" }, { registered: false, at: "2026-11-02T15:00:00Z" });
+  add("ay");
+  const slow = (d: TickDeps): TickDeps => ({ ...d, launch: async (item, b) => {
+    await g.gate;
+    return d.launch(item, b);
+  } });
+  // When: the Dori that did not get the slot finishes first; only then the launch goes on
+  const a = backlogTick(slow(deps({}, { hostMaxLanes: 1 })));
+  const b = backlogTick(slow({ ...deps({}, { hostMaxLanes: 1 }), stateDir: doriB, host: { dir: join(root, "host"), user: "me", instance: "iB", max: 1 } }));
+  const first = await Promise.race([a, b]);
+  g.open();
+  const lines = [...(await a), ...(await b)];
+  // Then
+  expect(first).toEqual([expect.stringMatching(/^BACKLOG_HOLD the host has 1 backlog lane\(s\)/)]);
+  expect(lines.filter((l) => l.startsWith("BACKLOG_STARTED")).length).toBe(1);
+});
+
+test("a second pass while one runs is skipped, a change to the list cannot run inside a pass, and a drop after it sees the item running", async () => {
+  // Given: a pass suspended inside the launch of its item
+  const g = gated();
+  let entered = (): void => {};
+  const inLaunch = new Promise<void>((r) => {
+    entered = r;
+  });
+  add("slow");
+  const running = backlogTick(deps({ launch: async (item) => {
+    entered();
+    await g.gate;
+    lanes.push(lane(item.id));
+    return { pane: "aoe_slow", startup: "STARTUP_OK slow" };
+  } }), { force: true });
+  await inLaunch;
+  // When
+  const second = await backlogTick(deps(), { force: true });
+  const during = readItem(state, "slow");
+  const blocked = await withBacklogLock(state, 0, () => dropItem(state, "slow", "lead", "t")).then(() => "ran", (e: unknown) => String(e));
+  g.open();
+  await running;
+  const after = await withBacklogLock(state, 10, () => dropItem(state, "slow", "lead", "t")).then(() => "ran", (e: unknown) => String(e));
+  // Then
+  expect(second[0]).toStartWith("BACKLOG_SKIPPED");
+  expect([during?.status, during?.pane]).toEqual(["running", "starting"]);
+  expect(blocked).toContain("a backlog pass held");
+  expect(after).toContain("is running as a lane");
+  expect(readItem(state, "slow")).toMatchObject({ status: "running", pane: "aoe_slow" });
+});
+
+test("a feed entry approved after it came in as a draft: an open draft is upgraded, a finished draft gets an approved follow-up", async () => {
+  // Given
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const entry = (h: string, approved: boolean) => ({ todo_id: `pb-${h}-1`, title: `일 ${h}`, status: "진행", ...(approved ? { approved_at: "2026-11-02T15:00:00Z", auto_applied: false } : {}) });
+  const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  await sweep([entry("aaaaaaaaaaaa", false), entry("bbbbbbbbbbbb", false)]);
+  const finished = readItem(state, "todo-pb-bbbbbbbbbbbb-1")!;
+  writeFileSync(join(state, "backlog", "items", "todo-pb-bbbbbbbbbbbb-1.json"), JSON.stringify({ ...finished, status: "done" }));
+  // When
+  const lines = await sweep([entry("aaaaaaaaaaaa", true), entry("bbbbbbbbbbbb", true)]);
+  const again = await sweep([entry("aaaaaaaaaaaa", true), entry("bbbbbbbbbbbb", true)]);
+  // Then
+  expect(lines).toEqual(["BACKLOG_FEED_APPROVED todo-pb-aaaaaaaaaaaa-1: the owner approved it; it now works within its scope", "BACKLOG_INTAKE todo-pb-bbbbbbbbbbbb-1-ok (feed, owner-approved, after draft todo-pb-bbbbbbbbbbbb-1): 일 bbbbbbbbbbbb"]);
+  expect(again).toEqual([]);
+  expect([readItem(state, "todo-pb-aaaaaaaaaaaa-1")?.draftOnly, readItem(state, "todo-pb-aaaaaaaaaaaa-1")?.status]).toEqual([undefined, "open"]);
+  expect(readItem(state, "todo-pb-bbbbbbbbbbbb-1-ok")?.draftOnly).toBeUndefined();
+});
+
+test("a host slot is counted and written only under the host directory's lock that every Dori takes", async () => {
+  // Given: another Dori holds the host lock
+  const hostDir = join(root, "host");
+  const other = await flockDir(hostDir, 5);
+  const h = { dir: hostDir, user: "me", instance: "i1", max: 1 };
+  // When
+  const reserving = hostReserve(h, "ay", now);
+  const writtenWhileHeld = existsSync(join(hostDir, "me.i1.ay.json"));
+  await other?.release();
+  const result = await reserving;
+  // Then
+  expect(other).toBeDefined();
+  expect(writtenWhileHeld).toBe(false);
+  expect(result).toBeUndefined();
+  expect(existsSync(join(hostDir, "me.i1.ay.json"))).toBe(true);
 });
