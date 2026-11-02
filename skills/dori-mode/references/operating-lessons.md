@@ -15,7 +15,7 @@ If you want the lane to do one more thing after it claimed:
 
 `dori freshness` nudges every lane whose status is `working` and has been silent too long, and posts a short status line to the thread. For a lane that is deliberately waiting on an owner decision, that repeats a ping nobody can act on.
 
-Pause it instead: `dori pause <key> "waiting on the owner's decision about X"`. The lane's status becomes `paused` and the reason goes into its history. From then on freshness neither nudges nor posts for it, `dori watch` reports no `LANE_BLOCKED` for it, `dori dead-panes` skips its pane, and a done claim it makes is announced (`LANE_DONE_CLAIMED_PAUSED`) but does not close it on a timer. When the owner answers, `dori resume <key>` puts back the status it had (working or not-done) and restarts its silence clock. Don't edit the registry file by hand for this any more.
+Pause it instead: `dori pause <key> "waiting on the owner's decision about X"`. The lane's status becomes `paused` and the reason goes into its history; with aoe the omo goal of its session is paused first, so it starts no turn on its own (exit 3, `PAUSE_UNVERIFIED`: not confirmed, the lane is unchanged; look at the pane and pause again). From then on freshness neither nudges nor posts for it, `dori watch` reports no `LANE_BLOCKED` for it, `dori dead-panes` skips its pane, and a done claim it makes is announced (`LANE_DONE_CLAIMED_PAUSED`) but does not close it on a timer. When the owner answers, `dori resume <key>` puts back the status it had (working or not-done) and restarts its silence clock. Don't edit the registry file by hand for this any more.
 
 ## 3. A new lane thread starts with what it is for
 

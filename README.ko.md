@@ -168,7 +168,7 @@ watcher는 레인을 닫을 때 셸 없이 이 확인을 직접 다시 돌리고
 | `dori set-thread <key> <adapter>:<id>` | 레인의 작업 스레드를 바꿈; `launch`, `adopt`, `set-thread`는 `discord:`처럼 빈 값이나 틀린 형식을 거부 |
 | `dori sync [--write]` | 레지스트리와 실제 pane 비교, 어긋난 곳 표시 |
 | `dori claim-done` / `object-done` / `close` | 완료 흐름; 쓸 수 있는 스레드가 없으면 스레드 훅을 조용히 건너뛰지 않고 `THREAD_MISSING <key>`를 출력; `DORI_DISCORD_TOKEN`이 있으면 close가 `discord:` 작업 스레드를 완료로 표시하고 보관; 다른 열린 lane이나 열린 질문 카드가 그 스레드를 아직 쓰면 lane 결과만 올리고 스레드 상태는 그대로 |
-| `dori pause <key> <이유>` / `dori resume <key>` | 사람을 기다리는 레인을 멈춰 둠: freshness 알림·게시, `LANE_BLOCKED`, `DEAD_PANE`이 나오지 않고 완료 요청이 와도 자동으로 닫지 않음; `resume`은 멈추기 전 상태로 되돌림 |
+| `dori pause <key> <이유>` / `dori resume <key>` | 사람을 기다리는 레인을 멈춰 둠: freshness 알림·게시, `LANE_BLOCKED`, `DEAD_PANE`이 나오지 않고 완료 요청이 와도 자동으로 닫지 않음; aoe에서는 레인 세션의 omo goal도 멈추고 다시 읽어 확인함(`/goal pause`, 확인 안 되면 `PAUSE_UNVERIFIED`, exit 3); `resume`은 멈추기 전 상태와 멈췄던 goal을 되돌림 |
 | `dori watch` | 자동 닫기 watcher와 aoe `LANE_BLOCKED` 이벤트. 지속 모니터로 돌립니다 |
 | `dori freshness [--loop MIN]` | 조용해진 레인을 깨우고, 스레드에 짧은 상태 한 줄을 올리고 마지막 보고는 리드에게 넘김 |
 | `dori dead-panes [--loop MIN]` | 멈춘 에이전트 pane 보고 |

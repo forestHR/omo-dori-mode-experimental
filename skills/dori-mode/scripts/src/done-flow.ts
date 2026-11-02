@@ -1,3 +1,4 @@
+import { type GoalAct, goalCommand, type GoalRead, liveSession } from "./goal.ts";
 import { existsSync } from "node:fs";
 
 import { closeAoeSession, paneActivity, paneLife } from "./aoe.ts";
@@ -54,9 +55,13 @@ export type FlowDeps = {
   readonly openThread?: (title: string) => Promise<string>;
   // ids of channels that are not threads (this Dori's channel, the pair channel, watched channels): refused as --thread
   readonly channels?: readonly string[];
+  // the omo goal of a pane's session (goal.ts sessionGoal reads its goal file when unset); tests set it
+  readonly readGoal?: (pane: string) => Promise<GoalRead>;
 };
 
 export class LaneStateError extends Error {}
+// the goal command was typed or could not be, and its effect was not read back: the lane is left as it was (exit 3)
+export class GoalUnverifiedError extends Error {}
 
 const signalIo = (deps: FlowDeps, lane: Lane): SignalIo => ({ cwd: lane.cwd ?? deps.config.defaultCwd, ...deps.signalIo });
 
@@ -168,21 +173,47 @@ export const objectDone = async (deps: FlowDeps, lane: Lane, reasons: readonly s
 
 const pausedAt = (lane: Lane): string => lane.history?.findLast((h) => h.status === "paused" && h.note.startsWith("PAUSED:"))?.at ?? "";
 
-// Parks a lane that waits on the owner: freshness, LANE_BLOCKED and dead-pane alerts skip it until it is resumed.
-export const pauseLane = async (deps: FlowDeps, lane: Lane, reason: string): Promise<string> => {
+// Parks a lane that waits on the owner: freshness, LANE_BLOCKED and dead-pane alerts skip it until it is resumed, and the
+// omo goal of its session is paused first, read back, so it starts no turn on its own (goal.ts). A live session whose
+// goal pause is not read back leaves the lane as it was (GoalUnverifiedError, PAUSE_UNVERIFIED).
+export const pauseLane = async (deps: FlowDeps, lane: Lane, reason: string): Promise<string[]> => {
   const from = statusOf(lane);
   if (from !== "working" && from !== "not-done") throw new LaneStateError(`lane ${lane.key} is ${from}; only a working or not-done lane can be paused`);
-  await deps.registry.write(withStatus(lane, "paused", `PAUSED: ${reason}`, iso(deps.clock), { pausedFrom: from, blocked: undefined, idleSince: undefined, waitingOn: undefined }));
-  return `LANE_PAUSED ${lane.key} (was ${from}) ${reason}`;
+  const goal = await goalLine(deps, lane, "pause");
+  await deps.registry.write(withStatus(lane, "paused", `PAUSED: ${reason}`, iso(deps.clock), { pausedFrom: from, pausedGoal: goal?.changed || undefined, blocked: undefined, idleSince: undefined, waitingOn: undefined }));
+  return [`LANE_PAUSED ${lane.key} (was ${from}) ${reason}`, ...(goal ? [goal.line] : [])];
+};
+
+// The goal step of pause and resume, for an aoe lane with a pane (herdr panes are left as before): its GOAL_* line and
+// whether the goal was changed; undefined when there is nothing to do.
+const goalLine = async (deps: FlowDeps, lane: Lane, act: GoalAct): Promise<{ readonly line: string; readonly changed: boolean } | undefined> => {
+  const pane = lane.pane;
+  if (!pane || deps.config.backend !== "aoe") return undefined;
+  const head = act === "pause" ? "PAUSE_UNVERIFIED" : "RESUME_UNVERIFIED";
+  const dead = await liveSession(deps, pane);
+  if (dead) return { line: `GOAL_SKIPPED ${lane.key} ${pane}: no live session (${dead}), nothing to ${act}`, changed: false };
+  const r = await goalCommand(deps, pane, act);
+  switch (r.outcome) {
+    case "confirmed":
+      return { line: `GOAL_${act === "pause" ? "PAUSED" : "RESUMED"} ${lane.key} ${pane}: ${r.detail}`, changed: true };
+    case "no-goal":
+    case "not-active":
+      return { line: `GOAL_SKIPPED ${lane.key} ${pane}: ${r.detail}`, changed: false };
+    case "unconfirmed":
+    case "failed":
+      throw new GoalUnverifiedError(`${head} ${lane.key} ${pane}: ${r.detail}; lane left ${statusOf(lane)}`);
+  }
 };
 
 // Back to the status it had before the pause; the silence clock restarts now, so the first nudge comes a full interval later.
 export const resumeLane = async (deps: FlowDeps, lane: Lane): Promise<string[]> => {
   if (statusOf(lane) !== "paused") throw new LaneStateError(`lane ${lane.key} is ${statusOf(lane)}, not paused`);
   const to = lane.pausedFrom ?? "working";
-  const { pausedFrom: _, ...rest } = lane;
+  // only a goal this pause paused is resumed: one the agent or the owner paused stays paused
+  const goal = lane.pausedGoal ? await goalLine(deps, lane, "resume") : undefined;
+  const { pausedFrom: _, pausedGoal: __, ...rest } = lane;
   await deps.registry.write(withStatus(rest, to, "RESUMED", iso(deps.clock), { lastReplyAt: deps.clock.now() }));
-  const out = [`LANE_RESUMED ${lane.key} ${to}`];
+  const out = [`LANE_RESUMED ${lane.key} ${to}`, ...(goal ? [goal.line] : [])];
   // a thread left ⏸️ while this lane was paused (its last working lane closed) is worked in again
   if (deps.requestThreadStatus && hasThread(lane) && lane.thread.startsWith("discord:")) {
     await deps.requestThreadStatus(lane.thread, "working").catch((e: unknown) => out.push(`THREAD_STATUS_WARN ${lane.key} ${lane.thread}: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`));

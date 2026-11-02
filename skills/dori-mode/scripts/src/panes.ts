@@ -136,6 +136,18 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
         read: () => readScreen(run, config.backend, pane),
       };
 
+// A slash command (/goal pause) runs in omo itself and never becomes a user message of the transcript, so it cannot be
+// confirmed the way submitToPane confirms a text; the caller reads its effect back instead. Typed into a live aoe pane
+// only: undefined when typed and entered, else why not.
+export const typeLine = async (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): Promise<string | undefined> => {
+  const keys = paneKeys(run, clock, config, pane, text);
+  const why = await keys.type(text);
+  if (why) return why;
+  await clock.sleep(500);
+  await keys.enter();
+  return undefined;
+};
+
 // Every text the scripts type into a pane goes through here; NOT_SUBMITTED lands in the watch log for the lead. A pane a
 // handover froze reads nothing, so the text goes to the session that replaced it (pane: where it went; FORWARDED in the
 // watch log).

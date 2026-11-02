@@ -20,6 +20,8 @@ let state: ReturnType<typeof withState>;
 let world: World;
 const at = (ms: number, patch: Partial<FlowDeps> = {}): FlowDeps => ({
   ...depsFor(world, fakeClock(ms), state.dir, { backend: "aoe", leadPane: "aoe_Dori_0a1b2c3d", hooks: { threadReply: ["notify", "{thread}", "{text}"] } }),
+  // the lane's session has no omo goal (pause-goal.test.ts covers one)
+  readGoal: async () => "none",
   ...patch,
 });
 const read = async () => (await at(T0).registry.read("fix-a")) ?? lane;
@@ -39,7 +41,7 @@ const waitingForHuman = () => {
 };
 
 test("a paused lane gets no freshness nudge or post, no LANE_BLOCKED and no DEAD_PANE; resume brings them back a full interval later", async () => {
-  expect(await pauseLane(at(T0), lane, "waiting on the owner's pick")).toBe("LANE_PAUSED fix-a (was working) waiting on the owner's pick");
+  expect(await pauseLane(at(T0), lane, "waiting on the owner's pick")).toEqual(["LANE_PAUSED fix-a (was working) waiting on the owner's pick", `GOAL_SKIPPED fix-a ${PANE}: no goal in its session`]);
   waitingForHuman();
   expect(await freshnessTick(at(T0 + 30 * MIN), "/home/test")).toEqual([]);
   expect(await watchTick(at(T0 + 30 * MIN))).toEqual([]);

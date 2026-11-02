@@ -167,7 +167,7 @@ Done = command ["bun","test"] stdout~" 0 fail"; file qa/report.json json:.passed
 | `dori adopt <key> --pane ID ...` | 登记一条已经在运行的 lane |
 | `dori sync [--write]` | 对照登记表和实际 pane,列出不一致 |
 | `dori claim-done` / `object-done` / `close` | 完成流程；设置了 `DORI_DISCORD_TOKEN` 时，close 会把 `discord:` 工作线程标为完成并归档 |
-| `dori pause <key> <原因>` / `dori resume <key>` | 暂停一条在等人的 lane:不再催促或代发进度、不报 `LANE_BLOCKED` 和 `DEAD_PANE`,完成声明也不会自动关闭它；`resume` 恢复暂停前的状态 |
+| `dori pause <key> <原因>` / `dori resume <key>` | 暂停一条在等人的 lane:不再催促或代发进度、不报 `LANE_BLOCKED` 和 `DEAD_PANE`,完成声明也不会自动关闭它；使用 aoe 时还会暂停该 lane 会话的 omo goal 并读回确认(`/goal pause`,未确认则 `PAUSE_UNVERIFIED`,exit 3);`resume` 恢复暂停前的状态和被暂停的 goal |
 | `dori watch` | 自动关闭的 watcher,以及 aoe `LANE_BLOCKED` 事件，作为常驻监控运行 |
 | `dori freshness [--loop MIN]` | 提醒变安静的 lane,在线程里发一行简短状态，把最后一条汇报交给 lead |
 | `dori dead-panes [--loop MIN]` | 报告已停止的智能体 pane |

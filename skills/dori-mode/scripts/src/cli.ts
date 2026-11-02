@@ -24,7 +24,7 @@ import { retryLaneTells } from "./lane-tells.ts";
 import { applyUpdate } from "./update.ts";
 import { announceChange } from "./update-announce.ts";
 import { deadPaneTick } from "./dead-panes.ts";
-import { claimDone, closeLane, type FlowDeps, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
+import { claimDone, closeLane, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
 import { ownerSpeechProblem, plainSummaryProblem } from "./close-summary.ts";
 import { literalNewlineProblem } from "./messenger/literal-newline.ts";
 import { autoReadyLine, freshnessTick } from "./freshness.ts";
@@ -152,8 +152,11 @@ const USAGE = `dori <command> [options]
                                        last report and REPORT.md
   object-done <key> --reason TEXT [--reason TEXT ...]
   pause  <key> <reason>                park a lane that waits on a human: no freshness nudge or post, LANE_BLOCKED or
-                                       DEAD_PANE for it, and a done claim does not close it; the reason goes in its history
-  resume <key>                         back to the status it had before the pause
+                                       DEAD_PANE for it, and a done claim does not close it; the reason goes in its history.
+                                       With aoe it first pauses the omo goal of the lane's session (/goal pause, read back:
+                                       GOAL_PAUSED or GOAL_SKIPPED); PAUSE_UNVERIFIED, exit 3, lane unchanged, if not confirmed
+  resume <key>                         back to the status it had before the pause, and /goal resume for a goal the pause
+                                       paused (RESUME_UNVERIFIED, exit 3, still paused, if not confirmed)
   fix-attempt <key> --metric M --hypothesis H [--hypotheses H1 --test T1 ...] [--improved] [--no-hypotheses REASON]
                                        record that you asked the lane for another fix of M on hypothesis H; first prints
                                        PRIOR_FIX lines (hypotheses already tried on M in this area). One step of the stuck
@@ -899,7 +902,13 @@ try {
     }
     case "pause": {
       const reason = flags.positionals.slice(1).join(" ").trim() || die("usage: dori pause <key> <reason>");
-      console.log(await pauseLane(deps, await lane(key ?? die("pause needs a lane key")), reason));
+      try {
+        for (const line of await pauseLane(deps, await lane(key ?? die("pause needs a lane key")), reason)) console.log(line);
+      } catch (e) {
+        if (!(e instanceof GoalUnverifiedError)) throw e;
+        console.log(e.message);
+        process.exit(3);
+      }
       break;
     }
     case "fix-attempt": {
@@ -1086,7 +1095,13 @@ try {
       break;
     }
     case "resume":
-      for (const line of await resumeLane(deps, await lane(key ?? die("resume needs a lane key")))) console.log(line);
+      try {
+        for (const line of await resumeLane(deps, await lane(key ?? die("resume needs a lane key")))) console.log(line);
+      } catch (e) {
+        if (!(e instanceof GoalUnverifiedError)) throw e;
+        console.log(e.message);
+        process.exit(3);
+      }
       break;
     case "close": {
       const summary = opt("summary");

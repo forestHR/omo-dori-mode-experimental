@@ -167,7 +167,7 @@ watcher はレーンを閉じるときに、シェルを通さずこの確認を
 | `dori adopt <key> --pane ID ...` | すでに動いているレーンを登録 |
 | `dori sync [--write]` | レジストリと実際の pane を比べ、ずれを表示 |
 | `dori claim-done` / `object-done` / `close` | 完了フロー。`DORI_DISCORD_TOKEN` があれば、close は `discord:` の作業スレッドを完了にしてアーカイブする |
-| `dori pause <key> <理由>` / `dori resume <key>` | 人を待っているレーンを止めておく。freshness の催促・投稿、`LANE_BLOCKED`、`DEAD_PANE` を出さず、完了申告が来ても自動では閉じない。`resume` で止める前の状態に戻す |
+| `dori pause <key> <理由>` / `dori resume <key>` | 人を待っているレーンを止めておく。freshness の催促・投稿、`LANE_BLOCKED`、`DEAD_PANE` を出さず、完了申告が来ても自動では閉じない。aoe ではレーンのセッションの omo goal も止めて読み戻す(`/goal pause`、確認できなければ `PAUSE_UNVERIFIED`、exit 3)。`resume` で止める前の状態と止めた goal を戻す |
 | `dori watch` | 自動クローズの watcher と aoe の `LANE_BLOCKED` イベント。常駐モニターとして動かします |
 | `dori freshness [--loop MIN]` | 静かになったレーンに声をかけ、スレッドに短い状況一行を投稿し、最後の報告はリードに渡す |
 | `dori dead-panes [--loop MIN]` | 止まったエージェントの pane を報告 |

@@ -78,6 +78,8 @@ export type Lane = {
   readonly worktrees?: readonly string[];
   readonly status?: LaneStatus;
   readonly pausedFrom?: LaneStatus;
+  // dori pause paused the omo goal of the lane's session (read back), so dori resume resumes it
+  readonly pausedGoal?: boolean;
   readonly claim?: Claim;
   // the newest posts its own session made in its work thread, oldest first (at most 5, text cut to 120 characters)
   readonly threadPosts?: readonly ThreadPost[];

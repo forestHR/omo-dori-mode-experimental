@@ -485,7 +485,8 @@ test("a paused lane gets no rollover proposal, and pausing does not make it safe
   // Given
   const base = await setup();
   const deps = { ...base, config: { ...base.config, handover: { ...base.config.handover, laneContextPct: 80 } } };
-  await pauseLane(deps, await readLane(deps), "waits on the owner");
+  // its session has no omo goal (pause-goal.test.ts covers the goal step)
+  await pauseLane({ ...deps, readGoal: async () => "none" }, await readLane(deps), "waits on the owner");
   // When
   const due = await freshnessTick(deps, "/home/test", { signals: async () => ({ contextPct: 99 }) });
   const chain = await laneHandover(deps, "demo", "aoe_lead_x", OK);
