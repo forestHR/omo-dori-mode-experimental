@@ -192,7 +192,7 @@ else:
   chmodSync(join(bin, "gh"), 0o755);
   const r = await run([], { UPSTREAM_WATCH_GH_DIR: "", PATH: `${bin}:/usr/bin:/bin` });
   expect(r.code).toBe(0);
-  const items = inbox().filter((x) => x.kind === "upstream-change").map((x) => x.item);
+  const items = inbox().filter((x) => x.kind === "upstream-change").map((x) => x.item ?? "");
   // pr:22 is class 1: our checkout cites upstream issue #22, and GitHub numbers PRs and issues together.
   expect(items.filter((i) => i.startsWith("pr:"))).toHaveLength(149);
   expect(items).not.toContain("pr:22");
