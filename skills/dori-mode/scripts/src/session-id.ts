@@ -67,13 +67,18 @@ export const resolveSession = async (pane: string, cwd: string, table: readonly 
   const shellPid = await shellPidOf(pane, deps);
   const agent = shellPid ? descendants(table, shellPid).find((p) => AGENT.test(p.cmd) && !/\bmcp\b/.test(p.cmd)) : undefined;
   if (!agent) return { id: "", via: "none" };
-  const fromFlag = argvSessionId(agent.cmd.split(/\s+/));
+  const argv = agent.cmd.split(/\s+/);
+  const fromFlag = argvSessionId(argv);
   if (fromFlag) return { id: fromFlag, via: "argv", pid: agent.pid };
+  // a selector omo resolves itself (a partial --session uuid, --continue, --resume, --fork, --rebind) can open an older
+  // session, whose file name is no start time: only a child's exact PI_SESSION_ID may name it, never a nearby new session
+  const selected = hasSessionSelector(argv);
   for (const child of descendants(table, agent.pid).slice(0, 40)) {
     const env = await deps.run(["ps", "eww", "-o", "command=", "-p", String(child.pid)]);
     const hit = ENV_ID.exec(env.out);
     if (hit?.[1]) return { id: hit[1], via: "child-env", pid: agent.pid };
   }
+  if (selected) return { id: "", via: "none", pid: agent.pid };
   const started = Date.parse((await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out);
   if (Number.isNaN(started)) return { id: "", via: "none", pid: agent.pid };
   const list = deps.listDir ?? ((d: string) => { try { return readdirSync(d); } catch { return []; } });

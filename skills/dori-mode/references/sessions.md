@@ -125,9 +125,9 @@ One JSON file per lane under `<stateDir>/lanes/`, written atomically (temp file 
 
 How the session id is found for a pane, in order:
 
-1. the agent process's `--session <id>` argument;
+1. the agent process's exact `--session-id <id>`, `--session <session file>` or `--session <whole uuid>` argument;
 2. `PI_SESSION_ID` in the environment of one of its child processes;
-3. the session file whose timestamp falls within three minutes after the agent process started.
+3. the session file whose timestamp falls within three minutes after the agent process started, only when the agent's command line has no session selector: one omo resolves itself (a partial `--session` uuid, `--continue`, `--resume`, `--fork`, `--rebind`) can open an older session, and a sibling's new session nearby is not it, so the id stays unknown.
 
 The id from step 1 is the session the agent was launched with. If someone switches sessions inside the agent, only steps 2 and 3 notice.
 

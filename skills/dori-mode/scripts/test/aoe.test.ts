@@ -467,6 +467,17 @@ test("exact session id: aoe add gets the pi of the agent's own install when its 
   expect(withPi("/usr/bin:/bin", "omo")).toBe("/usr/bin:/bin");
 });
 
+test("exact session id: a pane resumed through a selector omo resolves itself is never matched to a sibling started nearby", async () => {
+  // a sibling lane's new session, written a second after this agent started, in the same directory
+  const sibling = "2026-01-01T12-00-01-000Z_22222222-2222-4222-8222-222222222222.jsonl";
+  const deps = { run: at(T0).run, sessionsDir: "/s", backend: "aoe" as const, listDir: () => [sibling] };
+  world.agentStart = "Thu Jan  1 12:00:00 UTC 2026";
+  const agent = (args: string) => [{ pid: 10, ppid: 1, cmd: "/bin/bash /dev/fd/4" }, { pid: 11, ppid: 10, cmd: `/home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js --extension /x/plugin ${args}` }];
+  // with no selector the start time still finds the session the agent created
+  expect((await resolveSession(PANE, "/repo", agent("--model m"), deps)).id).toBe("22222222-2222-4222-8222-222222222222");
+  for (const args of ["--session 01a11bb6", "--continue", "--resume", "--fork 01a11bb6", "--rebind /old/x.jsonl"]) expect(await resolveSession(PANE, "/repo", agent(`--model m ${args}`), deps)).toEqual({ id: "", via: "none", pid: 11 });
+});
+
 test("an aoe pane resumed with --session <session file> gets the uuid from the file name, not the path", async () => {
   const file = "/home/u/.omo/agent/sessions/--home-u-Documents-kakaodori--/2026-10-08T13-31-43-234Z_01a11bb6-6f02-7f43-932d-4f19bae69e1c.jsonl";
   const table = [{ pid: 10, ppid: 1, cmd: "/bin/bash /tmp/aoe-pane-env-fLuABz" }, { pid: 11, ppid: 10, cmd: `/home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js --extension /x/plugin --session ${file}` }];
