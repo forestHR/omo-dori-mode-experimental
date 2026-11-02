@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
-import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, instanceOf, itemLine, lastRun, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "./backlog.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree, tailOf } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
@@ -115,8 +115,8 @@ const USAGE = `dori <command> [options]
                                        comes in (other Doris' #dori-pair posts by backlog.pairRepairPattern /
                                        pairRequestPattern, a request only with an owner message link that holds; the owner's
                                        orders by backlog.orderKinds; at each backlog.everyMin sweep the backlog.feedCommand
-                                       list: an entry the owner approved by card works within its own scope, any other only
-                                       drafts), a running item whose lane closed is done (BACKLOG_DONE), an
+                                       list: an entry whose current content the owner approved works within its own scope,
+                                       any other only drafts; the limit is added at each launch from the item's state), a running item whose lane closed is done (BACKLOG_DONE), an
                                        item with --ask puts one backlog-ask row in the lead's inbox and never starts before
                                        decide (BACKLOG_ASK), and the next open items start at once by priority through dori
                                        launch (its directives, eight steps and work thread; --thread new by default) while
@@ -789,9 +789,9 @@ const backlogDeps = (): TickDeps => ({
     const host = await sampleHost(run, config.backend);
     return [...canLaunch(host, config.guard).reasons, ...(host.load1 > config.guard.loadOk ? [`load ${host.load1.toFixed(1)} > ${config.guard.loadOk}`] : [])];
   },
-  launch: async (item, brief) => {
+  launch: async (item, brief, key) => {
     const leadBrief = readFileSync(brief, "utf8");
-    const input = { key: item.id, title: item.title, brief, done: item.done, thread: item.thread, noThread: item.noThread, whyNew: item.whyNew, cwd: item.cwd, tags: [...(item.tags ?? []), "backlog"], goal: item.goal };
+    const input = { key, backlog: true, title: item.title, brief, done: item.done, thread: item.thread, noThread: item.noThread, whyNew: item.whyNew, cwd: item.cwd, tags: [...(item.tags ?? []), "backlog"], goal: item.goal };
     const r = await launchLane(deps, input, (line) => console.log(line)).catch((e: unknown) => {
       throw e instanceof LaunchError ? new StartRefused(e.message) : e;
     });
@@ -1579,7 +1579,7 @@ try {
           const ownerLink = opt("owner-link");
           const ownerProblem = ownerLink ? await ownerLinkProblem(ownerLink) : undefined;
           if (ownerLink && ownerProblem && !config.backlog.writeNeedsOwnerLink) die(`BACKLOG_REFUSED --owner-link ${ownerLink}: ${ownerProblem}`, 2);
-          const registered = Boolean(await deps.registry.read(itemId));
+          const registered = Boolean(await deps.registry.read(laneKeyOf(itemId)));
           const r = await withBacklogLock(config.stateDir, 120, () => addItem(config.stateDir, { id: itemId, title: need("title"), brief: need("brief"), done: need("done"), priority: opt("priority"), cwd: opt("cwd"), thread: threadOpt(), noThread: noThreadOpt(), whyNew: whyNewOpt(), goal: opt("goal"), tags: tags(), ask: flags.values.ask === true ? "" : opt("ask"), by: opt("by"), readOnly: Boolean(flags.values["read-only"]), ownerLink }, { registered, at, needOwnerLink: config.backlog.writeNeedsOwnerLink, ownerProblem }));
           console.log(`${r.replaced ? "BACKLOG_REPLACED" : "BACKLOG_ADDED"} ${itemLine(r.item)}`);
           if (!config.backlog.enabled) console.log(state);

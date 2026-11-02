@@ -40,6 +40,8 @@ export type LaunchInput = {
   readonly ui?: boolean;
   // directive id -> the lead's reason: dori launch --waive <id> "<reason>" leaves that directive of the ledger out
   readonly waive?: Readonly<Record<string, string>>;
+  // started by the backlog pass (dori backlog), the only launch that may use a "bl-" key
+  readonly backlog?: boolean;
 };
 
 export class LaunchError extends Error {}
@@ -64,6 +66,8 @@ const STARTUP_FAILURE = /Cannot find module|All fallback models failed|No API ke
 
 export const validateLaunch = async (deps: FlowDeps, input: LaunchInput): Promise<void> => {
   if (!LANE_KEY.test(input.key)) throw new LaunchError(`key must match ${LANE_KEY}`);
+  // backlog lanes are bl-<item>: no other launch takes such a key, so an ordinary lane never shares one with the backlog
+  if (input.key.startsWith("bl-") && !input.backlog) throw new LaunchError(`key ${input.key}: keys starting with bl- belong to the backlog (dori backlog); pick another key`);
   if (await deps.registry.read(input.key)) throw new LaunchError(`lane ${input.key} is already registered`);
   if (input.thread !== undefined && input.thread !== NO_THREAD && input.thread !== NEW_THREAD) {
     const problem = threadRefProblem(input.thread);
