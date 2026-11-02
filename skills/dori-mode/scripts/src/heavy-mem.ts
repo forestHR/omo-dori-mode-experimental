@@ -186,9 +186,11 @@ print(f"pushed {touched // 1024}M of cache out in {time.time() - t:.1f}s (stop: 
 // Runs the room maker in its own scope (MemoryMax a little over its budget, no swap, oom_score_adj 500 like a job) when one
 // can be made. Resolves with its line, or why it did not run; never throws, a job still starts after a failed attempt.
 export const makeGpuRoom = async (plan: Extract<RoomPlan, { make: true }>, label: string): Promise<{ readonly ok: boolean; readonly line: string }> => {
-  const cmd = ["python3", "-I", "-c", ROOM_PY, String(plan.wantKb), String(plan.budgetKb), String(plan.floorKb)];
+  // whole kB for the helper's int(): a --mem like 70.1G gives fractions; the budget rounds down, the floor up
+  const wantKb = Math.ceil(plan.wantKb), budgetKb = Math.floor(plan.budgetKb);
+  const cmd = ["python3", "-I", "-c", ROOM_PY, String(wantKb), String(budgetKb), String(Math.ceil(plan.floorKb))];
   const no = await canScope();
-  const argv = no ? cmd : scopeArgv(unitName(`gpu-room-${label}`, process.pid, ++scopes), (plan.budgetKb + 256 * 1024) * 1024, cmd);
+  const argv = no ? cmd : scopeArgv(unitName(`gpu-room-${label}`, process.pid, ++scopes), (budgetKb + 256 * 1024) * 1024, cmd);
   try {
     const p = Bun.spawn(argv, { env: { ...process.env, ...userBusEnv() }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);

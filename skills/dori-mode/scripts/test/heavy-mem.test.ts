@@ -101,4 +101,23 @@ test("the room maker touches memory up to its budget and lets it go, and touches
   expect(r).toMatchObject({ ok: true, line: expect.stringMatching(/^pushed (256|512)M of cache out in [\d.]+s \(stop: (enough|budget)\): free \d+M -> \d+M, in 2M\+ blocks \d+M -> \d+M$/) });
   const floor = await makeGpuRoom({ make: true, wantKb: m.freeKb + 1024 ** 2, budgetKb: 1024 ** 2, floorKb: m.availKb + 1024 ** 2, why: "" }, "test");
   expect(floor).toMatchObject({ ok: true, line: expect.stringMatching(/^pushed 0M of cache out in [\d.]+s \(stop: floor\)/) });
+  // a --mem of 70.1G makes fractional kB; the helper still runs (it stops at the floor here, touching nothing)
+  const fraction = await makeGpuRoom({ make: true, wantKb: m.freeKb + 73_505_996.8, budgetKb: 1024 ** 2 + 0.6, floorKb: m.availKb + 1024 ** 2 + 0.4, why: "" }, "test");
+  expect(fraction).toMatchObject({ ok: true, line: expect.stringMatching(/\(stop: floor\)/) });
+});
+
+test("dori gpu-room reads --want as a size and refuses one it cannot read", async () => {
+  const config = join(state.dir, "config.json");
+  await Bun.write(config, JSON.stringify({ stateDir: join(state.dir, "state") }));
+  const own = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("DORI_")));
+  const run = async (...args: string[]) => {
+    const p = Bun.spawn([process.execPath, CLI, "gpu-room", ...args], { env: { ...own, DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "none.env"), DORI_STATE_DIR: join(state.dir, "state") }, stdout: "pipe", stderr: "pipe" });
+    return { code: await p.exited, err: await new Response(p.stderr).text() };
+  };
+  const bad = await run("--want", "lots");
+  expect(bad.code).not.toBe(0);
+  expect(bad.err).toContain('dori gpu-room --want takes a size like 20G, not "lots"');
+  // 1K is always free: nothing to do, nothing said (read as the 20G default it would push cache out)
+  const small = await run("--want", "1K");
+  expect({ code: small.code, room: small.err.includes("HEAVY_GPU_ROOM") }).toEqual({ code: 0, room: false });
 });
