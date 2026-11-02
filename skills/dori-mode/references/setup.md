@@ -82,7 +82,7 @@ Arm these as persistent monitors in your own session:
 |---|---|---|
 | inbound messages | your messenger's watch command | new owner messages |
 | done flow (and `LANE_BLOCKED` with aoe) | `dori watch` | `^LANE_` |
-| dead panes | `dori dead-panes --loop 3` | `^DEAD_PANE` |
+| dead panes | `dori dead-panes --loop 3` | `^(DEAD\|UNRECOGNISED)_PANE` |
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |
 | freshness | `dori freshness --loop 5` | `^(NUDGED\|NUDGE-FAILED\|POSTED\|NO-REPORT\|STUCK\|ROLLOVER_DUE\|RESEARCH_NOT_STARTED)` |
 | Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |

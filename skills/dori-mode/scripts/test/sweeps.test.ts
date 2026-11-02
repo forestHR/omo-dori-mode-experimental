@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node
 import { join } from "node:path";
 
 import { defaultDiscordWords } from "../src/config.ts";
-import { deadPaneTick } from "../src/dead-panes.ts";
+import { deadPaneTick, newDeadPaneState } from "../src/dead-panes.ts";
 import { claimDone } from "../src/done-flow.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { parseGpuQuery, parsePmon, treeOf, type Usage } from "../src/heavy-headroom.ts";
@@ -178,14 +178,16 @@ test("a nudge that never reaches the lane's pane is reported as failed, not as s
   expect((await freshnessTick(deps, "/home/test")).map((a) => a.kind)).toEqual(["nudge-failed"]);
 });
 
-test("a stopped agent pane is reported once per hour and the lead pane is never reported", async () => {
+test("a stopped agent pane is reported once per hour after two reads a tick apart agree, and the lead pane is never reported", async () => {
   world.panes = [{ pane_id: "w:p1", workspace_id: "w" }, { pane_id: "lead:p1", workspace_id: "lead" }];
   world.screen = "omo has stopped\n$ ";
   const deps = depsFor(world, fakeClock(T0), state.dir);
   const seen = new Set<string>();
-  expect(await deadPaneTick(deps.run, deps.config, seen, "2026-01-01T12")).toEqual(["DEAD_PANE w:p1"]);
-  expect(await deadPaneTick(deps.run, deps.config, seen, "2026-01-01T12")).toEqual([]);
-  expect(await deadPaneTick(deps.run, deps.config, seen, "2026-01-01T13")).toEqual(["DEAD_PANE w:p1"]);
+  const panes = newDeadPaneState();
+  expect(await deadPaneTick(deps.run, deps.config, seen, "2026-01-01T12", [], panes)).toEqual([]);
+  expect(await deadPaneTick(deps.run, deps.config, seen, "2026-01-01T12", [], panes)).toEqual(["DEAD_PANE w:p1"]);
+  expect(await deadPaneTick(deps.run, deps.config, seen, "2026-01-01T12", [], panes)).toEqual([]);
+  expect(await deadPaneTick(deps.run, deps.config, seen, "2026-01-01T13", [], panes)).toEqual(["DEAD_PANE w:p1"]);
 });
 
 test("the host guard alerts on low disk, clears when it recovers, and flips compute readiness on load", () => {

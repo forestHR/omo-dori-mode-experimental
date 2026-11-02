@@ -23,7 +23,7 @@ import { paneTranscriptHas, sendVerified, submitToPane } from "./panes.ts";
 import { retryLaneTells } from "./lane-tells.ts";
 import { applyUpdate } from "./update.ts";
 import { announceChange } from "./update-announce.ts";
-import { deadPaneTick } from "./dead-panes.ts";
+import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
 import { claimDone, closeLane, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
 import { ownerSpeechProblem, plainSummaryProblem } from "./close-summary.ts";
 import { literalNewlineProblem } from "./messenger/literal-newline.ts";
@@ -1222,9 +1222,10 @@ try {
       break;
     case "dead-panes": {
       const seen = new Set<string>();
+      const panes = newDeadPaneState();
       await every(loopMin, async () => {
         const paused = (await deps.registry.open()).flatMap((l) => (statusOf(l) === "paused" && l.pane ? [l.pane] : []));
-        for (const line of await deadPaneTick(run, config, seen, new Date().toISOString().slice(0, 13), paused)) console.log(line);
+        for (const line of await deadPaneTick(run, config, seen, new Date().toISOString().slice(0, 13), paused, panes)) console.log(line);
       });
       break;
     }

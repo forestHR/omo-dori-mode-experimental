@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { defaultDiscordWords, type DiscordWords } from "../src/config.ts";
-import { deadPaneTick } from "../src/dead-panes.ts";
+import { deadPaneTick, newDeadPaneState } from "../src/dead-panes.ts";
 import { claimDone, closeLane, type FlowDeps, LaneStateError, pauseLane, resumeLane, watchTick } from "../src/done-flow.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { Discord } from "../src/messenger/discord.ts";
@@ -47,7 +47,8 @@ test("a paused lane gets no freshness nudge or post, no LANE_BLOCKED and no DEAD
   expect(await watchTick(at(T0 + 30 * MIN))).toEqual([]);
   world.screen = "omo has stopped\n$ ";
   const paused = (await at(T0).registry.open()).flatMap((l) => (statusOf(l) === "paused" && l.pane ? [l.pane] : []));
-  expect(await deadPaneTick(at(T0).run, at(T0).config, new Set(), "2026-01-01T12", paused)).toEqual([]);
+  const panes = newDeadPaneState();
+  for (let i = 0; i < 3; i++) expect(await deadPaneTick(at(T0).run, at(T0).config, new Set(), "2026-01-01T12", paused, panes)).toEqual([]);
   expect(sent(world)).toEqual([]);
   expect(world.calls.some((c) => c[0] === "notify")).toBe(false);
 

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import { agentTree, closeDueFrozen, type FrozenRecord, readFrozen, thawFrozen, writeFrozen } from "../src/frozen.ts";
-import { deadPaneTick } from "../src/dead-panes.ts";
+import { deadPaneTick, newDeadPaneState } from "../src/dead-panes.ts";
 import { syncRegistry } from "../src/sync.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, withState, type World } from "./fakes.ts";
 
@@ -75,10 +75,12 @@ test("sync and dead-panes leave a frozen old lead alone: it is neither an unregi
   w.screen = "omo has stopped";
   // When
   const before = (await syncRegistry(deps, false)).unregistered.map((r) => r.pane);
-  const deadBefore = await deadPaneTick(deps.run, deps.config, new Set(), "h1");
+  const panes = newDeadPaneState();
+  await deadPaneTick(deps.run, deps.config, new Set(), "h1", [], panes);
+  const deadBefore = await deadPaneTick(deps.run, deps.config, new Set(), "h1", [], panes);
   writeFrozen(state.dir, rec());
   const after = (await syncRegistry(deps, false)).unregistered.map((r) => r.pane);
-  const deadAfter = await deadPaneTick(deps.run, deps.config, new Set(), "h2");
+  const deadAfter = await deadPaneTick(deps.run, deps.config, new Set(), "h2", [], panes);
   // Then
   expect(before).toEqual([OLD]);
   expect(deadBefore).toEqual([`DEAD_PANE ${OLD}`]);

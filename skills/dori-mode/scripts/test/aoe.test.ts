@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { sessionPath } from "../src/aoe.ts";
 import { leadAlertPoster } from "../src/autoturn.ts";
-import { deadPaneTick } from "../src/dead-panes.ts";
+import { deadPaneTick, newDeadPaneState, UNRECOGNISED_ALERT_AFTER } from "../src/dead-panes.ts";
 import { claimDone, watchTick } from "../src/done-flow.ts";
 import { RESUME_TEXT } from "../src/lead-limit.ts";
 import type { Question } from "../src/messenger/discord-cards.ts";
@@ -397,10 +397,46 @@ test("once its background work ended, or when the work is from before the agent 
   expect(await watchTick(w.deps(T0 + 71 * MIN))).toEqual([`LANE_BLOCKED fix-a idle ${PANE}`]);
 });
 
-test("a stopped agent in an aoe session is reported, and the lead's session is skipped", async () => {
+test("a stopped agent in an aoe session is reported once two reads a tick apart agree, and the lead's session is skipped", async () => {
   world.screen = "omo has stopped\n$ ";
   const deps = at(T0);
-  expect(await deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12")).toEqual([`DEAD_PANE ${PANE}`]);
+  const panes = newDeadPaneState();
+  expect(await deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12", [], panes)).toEqual([]);
+  expect(await deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12", [], panes)).toEqual([`DEAD_PANE ${PANE}`]);
+});
+
+// ported from dori-superagent 40034ad (#7): positive evidence first, never one screen read alone
+test("an aoe agent showing its prompt or a running turn is alive, whatever dead words its output holds", async () => {
+  const deps = at(T0);
+  const panes = newDeadPaneState();
+  for (const screen of ["the training job has stopped\n❯ ", `omo has stopped earlier, retrying\n${" • Working (esc to interrupt)"}`]) {
+    world.screen = screen;
+    for (let i = 0; i < 4; i++) expect(await deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12", [], panes)).toEqual([]);
+  }
+});
+
+test("a dead marker on a screen that changes between ticks is never DEAD_PANE", async () => {
+  const deps = at(T0);
+  const panes = newDeadPaneState();
+  for (let i = 0; i < 4; i++) {
+    world.screen = `omo has stopped\nredraw ${i}\n$ `;
+    expect(await deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12", [], panes)).toEqual([]);
+  }
+});
+
+test("an aoe pane with no prompt, no running turn and no dead marker is named once after three ticks, and again only after it was alive", async () => {
+  const deps = at(T0);
+  const panes = newDeadPaneState();
+  const tick = () => deadPaneTick(deps.run, deps.config, new Set(), "2026-01-01T12", [], panes);
+  world.screen = "Do you trust this folder?\n  1. Trust (this session only)";
+  for (let i = 1; i < UNRECOGNISED_ALERT_AFTER; i++) expect(await tick()).toEqual([]);
+  expect(await tick()).toEqual([`UNRECOGNISED_PANE ${PANE} dead-panes: no agent prompt, running turn or dead marker for 3 ticks`]);
+  expect(await tick()).toEqual([]);
+  world.screen = "❯ ";
+  expect(await tick()).toEqual([]);
+  world.screen = "Do you trust this folder?";
+  for (let i = 1; i < UNRECOGNISED_ALERT_AFTER; i++) expect(await tick()).toEqual([]);
+  expect((await tick())[0]).toStartWith(`UNRECOGNISED_PANE ${PANE}`);
 });
 
 const typed = () => ({ type: "message", message: { role: "user", content: [{ type: "text", text: "go" }] } });
