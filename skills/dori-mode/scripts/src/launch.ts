@@ -1,10 +1,12 @@
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 
 import { AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
 import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { agentGone, firstTurnRuns, GOAL_WAIT, goalReader, lastLines, noGoalWhy } from "./pending-goal.ts";
-import { AGENT, argvSessionId, descendants, ended, hasSessionSelector, procTable, shellPidOf } from "./session-id.ts";
+import { AGENT, argvSessionId, descendants, ended, hasSessionSelector, procTable, sessionDirFor, shellPidOf } from "./session-id.ts";
+import { leadReplies } from "./lead-limit.ts";
 import { readScreen, sendVerified } from "./panes.ts";
 import { hasThread, LANE_KEY, type Lane, NO_THREAD, threadRefProblem } from "./registry.ts";
 import { areaLabel, type AreaQuery, areaSignals, pastSignalsSection, tagsOf } from "./lane-signals.ts";
@@ -77,6 +79,58 @@ export class DirectiveMissingError extends LaunchError {
 }
 
 const STARTUP_FAILURE = /Cannot find module|All fallback models failed|No API key|model_not_available|usage limit|rate limit|quota|Session crashed|unknown provider|Model "[^"\n]*" not found|Pane is dead/i;
+
+// A failure word is a failed start only where the agent itself put it (dori-superagent PR #51 review reproduced here (MIT):
+// https://github.com/sisyphuslabs/dori-superagent/pull/51#discussion_r4445875794, a working lane quotes such words). On
+// 2026-11-02 two healthy lanes got STARTUP_ERROR rate limit from the 40 lines launch reads: the cat of a log, the lane's
+// own brief in a tool result, and the status lines under the input box (the session title and goal objective omo makes
+// from the brief, the account usage bars). Measured on omo 5.1.51: its own errors are one line each, drawn above the
+// input box at most one space in, as "Error: ..." (No API key found, 429, out of quota; the CLI's Model "x" not found),
+// "The <provider> account usage limit has been reached" or "All <name> accounts for <provider> are currently blocked";
+// tmux adds "Pane is dead" at the bottom; bun's own crash is "error: Cannot find module". So a failure word counts only on
+// such a line (prose that merely starts with a failure word or "Error handling ..." is none), never while a turn runs (a
+// running lane quotes what it reads; a 429 omo retries shows no running-turn mark and still counts), and never once the
+// model has answered this launch: the newest reply in the lane's own session, written since the launch began, ended
+// without an error (a resumed session's older replies say nothing about this start).
+const OWN_ERROR = /^ ?(?:error:|All \S+ accounts for \S+ are currently blocked|The \S+ account usage limit has been reached|Pane is dead)/i;
+
+// omo draws its running-turn mark ("── • Working (4s • esc to interrupt) ──") on the border right above the ❯ line;
+// the status lines under the box may quote the words (a session title), so only the lines just above the ❯ are read
+export const startupFailure = (screen: string, answered = false): string | undefined => {
+  const lines = screen.split("\n");
+  const box = lines.findLastIndex((l) => l.trimStart().startsWith("❯"));
+  const running = box >= 0 && lines.slice(Math.max(0, box - 3), box).some((l) => l.toLowerCase().includes(BUSY_MARK));
+  if (answered || running) return undefined;
+  for (const [i, line] of lines.entries()) {
+    const own = box < 0 || i < box ? OWN_ERROR.test(line) : line.startsWith("Pane is dead");
+    const bad = own ? STARTUP_FAILURE.exec(line) : null;
+    if (bad) return bad[0];
+  }
+  return undefined;
+};
+
+// whether the newest model reply in the lane's own session (the exact id from its command line, under the cwd or its real
+// path) is from this launch (at or after since) and ended without an error; no id, no transcript or no such reply is none
+const modelAnswered = (sessionsDir: string, cwd: string, session: string, since: number): boolean => {
+  if (!session) return false;
+  const at = resolve(cwd);
+  let real = at;
+  try {
+    real = realpathSync(at);
+  } catch {}
+  for (const dir of new Set([sessionDirFor(sessionsDir, at), sessionDirFor(sessionsDir, real)])) {
+    try {
+      const name = readdirSync(dir).find((n) => n.endsWith(`_${session}.jsonl`));
+      if (!name) continue;
+      const last = leadReplies(readFileSync(join(dir, name), "utf8")).at(-1);
+      return last !== undefined && last.at >= since && last.error === undefined;
+    } catch {}
+  }
+  return false;
+};
+
+const failureOf = (deps: FlowDeps, screen: string, cwd: string, session: string, since: number): string | undefined =>
+  startupFailure(screen, modelAnswered(deps.config.sessionsDir, cwd, session, since));
 
 export const validateLaunch = async (deps: FlowDeps, input: LaunchInput): Promise<void> => {
   if (!LANE_KEY.test(input.key)) throw new LaunchError(`key must match ${LANE_KEY}`);
@@ -472,6 +526,8 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   }
   await Bun.write(input.brief, text);
   const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane; report as the brief's footer says.`;
+  // a model reply older than this is not an answer to this launch (a resumed session holds earlier ones)
+  const launchedAt = deps.clock.now();
   const opened = await (deps.config.backend === "aoe" ? openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : openHerdr(deps, input.key, cwd, model, prompt)).catch((e: unknown) => {
     throw e instanceof LaunchFailed && openedThread ? new LaunchFailed(e.message, openedThread) : e;
   });
@@ -485,11 +541,11 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   if (opened.failure) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${opened.failure}` };
   await deps.clock.sleep(20_000);
   const screen = await readScreen(deps.run, deps.config.backend, opened.pane, 40);
-  const bad = STARTUP_FAILURE.exec(screen);
-  if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${bad[0]}` };
+  const bad = failureOf(deps, screen, cwd, opened.session ?? "", launchedAt);
+  if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${bad}` };
   const started = deps.config.backend === "aoe" ? await aoeStartup(deps, input.key, opened.pane, screen) : `STARTUP_OK ${input.key} ${opened.pane}`;
   if (!started.startsWith("STARTUP_OK")) return { lane, startup: started };
-  return { lane, startup: (await startupGoal(deps, input.key, opened.pane, cwd, opened.session ?? "")) ?? started };
+  return { lane, startup: (await startupGoal(deps, input.key, opened.pane, cwd, opened.session ?? "", launchedAt)) ?? started };
 };
 
 // A running agent is not yet a good start: a lane that never sets its goal does its first turn and stops, and the lead
@@ -501,7 +557,7 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
 // STARTUP_OK; a first turn still on (its turn running, or the agent waiting on a background job of its own) is
 // STARTUP_PENDING_GOAL (exit 0; the lane is marked and dori watch finishes the judgement); three idle reads 10 s apart
 // with no goal are STARTUP_NO_GOAL (exit 3); an agent that ends or shows a startup failure is STARTUP_ERROR.
-const startupGoal = async (deps: FlowDeps, key: string, pane: string, cwd: string, session: string): Promise<string | undefined> => {
+const startupGoal = async (deps: FlowDeps, key: string, pane: string, cwd: string, session: string, launchedAt: number): Promise<string | undefined> => {
   // no session id in the agent's command line (aoe did not pin one, or an agentCommand that is not omo): which session is
   // the lane's is not known, and guessing it could read another session's goal
   if (!deps.readGoal && !session) return `STARTUP_UNCONFIRMED ${key} ${pane}: the agent runs but its command line names no session id, so its goal cannot be read; last lines: ${lastLines(await readScreen(deps.run, deps.config.backend, pane, 40))}`;
@@ -513,8 +569,8 @@ const startupGoal = async (deps: FlowDeps, key: string, pane: string, cwd: strin
     const goal = await read(pane);
     if (typeof goal === "object") return undefined;
     const screen = await readScreen(deps.run, deps.config.backend, pane, 40);
-    const bad = STARTUP_FAILURE.exec(screen);
-    if (bad) return `STARTUP_ERROR ${key} ${pane}: ${bad[0]}`;
+    const bad = failureOf(deps, screen, cwd, session, launchedAt);
+    if (bad) return `STARTUP_ERROR ${key} ${pane}: ${bad}`;
     if (await firstTurnRuns(deps, pane, cwd, session, screen)) {
       await deps.registry.patch(key, { pendingGoal: { idle: 0, at: deps.clock.now() } });
       return `STARTUP_PENDING_GOAL ${key} ${pane}: its first turn is still on and has set no goal yet; dori watch says LANE_NO_GOAL if it ends without one`;
@@ -574,7 +630,9 @@ const openAoe = async (deps: FlowDeps, key: string, cwd: string, model: string, 
   // a lane that missed launchEnv (the GPU guard) gets no prompt: it would start working with the GPU in reach
   const off = await envMismatch(deps.run, pane, env);
   if (off.length) return { pane, failure: `launchEnv not in the session: ${off.join(", ")}; the lane prompt was not sent` };
-  if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, prompt))) return { pane, failure: "the launch prompt was not submitted (see NOT_SUBMITTED in the watch log)" };
+  // an agent with no API key shows its error where the prompt went in and keeps the text: that error is the reason
+  if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, prompt)))
+    return { pane, failure: startupFailure(await readScreen(deps.run, "aoe", pane)) ?? "the launch prompt was not submitted (see NOT_SUBMITTED in the watch log)" };
   return { pane, session };
 };
 
@@ -593,8 +651,8 @@ export const awaitPrompt = async (deps: FlowDeps, pane: string): Promise<string 
   for (let i = 0; i < 90; i++) {
     const screen = await readScreen(deps.run, "aoe", pane);
     if (inputLine(screen) !== undefined) return undefined;
-    const bad = STARTUP_FAILURE.exec(screen);
-    if (bad) return bad[0];
+    const bad = startupFailure(screen);
+    if (bad) return bad;
     await deps.clock.sleep(2_000);
   }
   return "no ❯ prompt within 3 minutes";

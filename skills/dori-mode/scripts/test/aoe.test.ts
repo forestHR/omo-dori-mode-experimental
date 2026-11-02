@@ -1224,3 +1224,57 @@ test("a card answered before its session started (a rollover) is not re-sent, an
   expect(await missedAnswersTick(deps)).toEqual([`CARD_ANSWER_REDELIVERED Q8 aoe_Dori_0a1b2c3d: answered ${iso(T0 - 10 * MIN)}, not in that session's transcript; typed it there (SUBMITTED)`]);
   expect(world.calls.some((c) => c.join(" ").includes("=aoe_Dori_0a1b2c3d:"))).toBe(true);
 });
+
+// dori-superagent PR #51 review reproduced here (MIT): https://github.com/sisyphuslabs/dori-superagent/pull/51#discussion_r4445875794
+// a failure word on a lane's screen is a failed start only where the agent itself drew it; the screens below are the
+// shapes measured on omo 5.1.51 (2026-11-02), the false STARTUP_ERRORs that day among them
+const BOX = "────────────────────────────────────────\n❯ \n────────────────────────────────────────";
+const STATUS = " Claude·cbaekdong ▕████░░░░░░▏ 29% 7d · resets 11/07 16:00 │ pool ▂▁ │ ⚠ Codex·dxlab 7d 0%\n/tmp/w • Print rate limit error message • 40K/1M (4.0%)\n(😺 OmO Native by Q Kim) qa quoted rate limit · Goal achieved (9s)";
+const scoped = async (key: string, screen: string, deps: FlowDeps = at(T0)) => {
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# brief: quotes rate limit, quota, usage limit, No API key\n");
+  const r = await launchLane(after20s(deps, () => void (world.screen = screen)), { noThread: "test lane", key, title: key, brief, done: "file /tmp/ok", cwd: "/tmp/w" });
+  return r.startup;
+};
+
+test("startup failure scope: failure words a working lane only quotes are no STARTUP_ERROR: a log it cats in a running turn, its brief, the status lines under its box", async () => {
+  // the lane's own launch at 22:01:58Z: its brief, read in a running turn, quoted rate limit
+  const running = [" $ cat rate.log", " Error: 429 rate limit reached for requests", " quota exceeded for this account", " │ the brief: STARTUP_ERROR ...: rate limit, usage limit", "── • Working (0s • esc to interrupt) ──────────", "❯ ", "────", STATUS].join("\n");
+  expect(await scoped("q1", running)).toBe(`STARTUP_OK q1 aoe_q1_${NEW_AOE_ID.slice(0, 8)}`);
+  // qa50d-e: an idle lane whose words sit in its goal card, a tool box and the status lines, none on an error line of its own
+  const idle = [" update_goal → complete", " quota accounting is done per account", " Error handling rate limits lives in submit.ts", "   qa quoted rate limit", " │ usage limit reached, retry later", "   All fallback models failed (quoted)", BOX, " Error: usage bar unavailable (429 rate limit)", STATUS].join("\n");
+  expect(await scoped("q2", idle)).toBe(`STARTUP_OK q2 aoe_q2_${NEW_AOE_ID.slice(0, 8)}`);
+});
+
+test("startup failure scope: once the model answered the lane in its own session, a reply line that reads like an error is no STARTUP_ERROR; after a failed call it is", async () => {
+  const sessions = join(state.dir, "sessions");
+  const session = sessionFiles(sessions, "/tmp/w");
+  world.ps = `10 1 /bin/bash /dev/fd/4\n11 10 /home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js -e /x/pi-aoe-session-id.js --model m --session-id ${ID}`;
+  const deps: FlowDeps = { ...at(T0), config: { ...at(T0).config, sessionsDir: sessions } };
+  const reply = (stopReason: string, errorMessage?: string, at = T0 + 5_000) => {
+    session(ID, "QA scratch. Read and execute the lane brief");
+    const file = join(sessions, "--tmp-w--", `2026-01-01T12-00-01-000Z_${ID}.jsonl`);
+    appendFileSync(file, `${JSON.stringify({ type: "message", timestamp: iso(at), message: { role: "assistant", stopReason, ...(errorMessage ? { errorMessage } : {}) } })}\n`);
+  };
+  const screen = [" Error: rate limit (quoted from a log)", " done", BOX, STATUS].join("\n");
+  reply("stop");
+  expect(await scoped("q3", screen, deps)).toBe(`STARTUP_OK q3 aoe_q3_${NEW_AOE_ID.slice(0, 8)}`);
+  // a resumed session (herdr --session) holds a good reply from before this launch: it is no answer to this one
+  reply("stop", undefined, T0 - 60 * MIN);
+  expect(await scoped("q5", [" Error: No API key found for groq.", BOX].join("\n"), deps)).toBe(`STARTUP_ERROR q5 aoe_q5_${NEW_AOE_ID.slice(0, 8)}: No API key`);
+  reply("error", "429 Rate limit reached for requests");
+  expect(await scoped("q4", screen, deps)).toBe(`STARTUP_ERROR q4 aoe_q4_${NEW_AOE_ID.slice(0, 8)}: rate limit`);
+});
+
+test("startup failure scope: the agent's own failures stay STARTUP_ERROR: no API key, out of quota, a 429 omo still retries, all accounts blocked, a dead pane", async () => {
+  const cases: [string, string, string][] = [
+    ["f1", [" Error: No API key found for groq.", " Use /login to log into a provider via OAuth or API key. See:", BOX, "/tmp/w • 0/131K (0.0%) (auto)    (groq) llama-3.3-70b-versatile"].join("\n"), "No API key"],
+    ["f2", [" The fakep account usage limit has been reached. Switch to another provider with /model.", " Error: The provider account is out of quota. Action: check the plan or credits.", " Welcome to OmO. Ask anything.", BOX].join("\n"), "usage limit"],
+    ["f3", [" say hi", ' Error: 429: {"message":"Rate limit reached for requests","type":"rate_limit_exceeded"}', "── ⠧ The model provider may be having trouble. Retrying... (2/5, in 1s; esc to cancel) ──", "❯ ", "────"].join("\n"), "Rate limit"],
+    ["f4", [" All Claude accounts for anthropic-subscription are currently blocked (rate limit or auth errors).", "  Soonest automatic retry: 2026-01-01T13:00:00.000Z.", BOX].join("\n"), "rate limit"],
+    ["f5", [BOX, "", "Pane is dead (status 1, Thu Jan  1 12:00:20 2026)"].join("\n"), "Pane is dead"],
+    // a session title in the status lines that quotes the running-turn mark is no running turn
+    ["f6", [' Error: 429: {"message":"Rate limit reached for requests"}', BOX, "/tmp/w • Fix esc to interrupt indicator • 40K/1M (4.0%)"].join("\n"), "Rate limit"],
+  ];
+  for (const [key, screen, word] of cases) expect(await scoped(key, screen)).toBe(`STARTUP_ERROR ${key} aoe_${key}_${NEW_AOE_ID.slice(0, 8)}: ${word}`);
+});
