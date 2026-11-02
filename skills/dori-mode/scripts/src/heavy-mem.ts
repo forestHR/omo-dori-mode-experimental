@@ -112,13 +112,124 @@ const scopeResult = async (unit: string): Promise<string> => {
   return result;
 };
 
-// props: more scope properties (CPUQuota=..., RuntimeMaxSec=...)
-export type ScopedRun = { readonly label: string; readonly cmd: readonly string[]; readonly free: number; readonly needBytes?: number; readonly props?: readonly string[]; readonly log?: (line: string) => void };
+// GPU room. On a unified-memory GPU (GB10) the driver takes a CUDA context's buffers from system memory, and when page
+// cache has left almost nothing free it does not wait for the kernel to reclaim it: on 2026-11-02 20:33 KST (MemFree 1G,
+// buff/cache 95G, MemAvailable 95G) the owner's voice note failed in ggml_cuda_init (exit 134) with the kernel saying
+// NV_ERR_NO_MEMORY in kgrctxAllocMainCtxBuffer; a 30G anonymous allocation that pushed the cache out made the same
+// whisper work. With MemFree at 1G the driver already fails its big-page allocations and falls back (NV_ERR_NO_MEMORY at
+// mem_desc.c on every run), so it fails outright when few large free blocks are left. NVIDIA's own workaround is root
+// (sync; echo 3 > /proc/sys/vm/drop_caches, docs.nvidia.com/dgx/dgx-spark/known-issues.html). Without root, before a GPU
+// job a helper process touches anonymous memory (madvised huge pages, so the kernel compacts as it reclaims) until
+// MemFree plus what it holds reaches the wanted free memory, then lets it all go: what it held comes back free in large
+// blocks. It never takes MemAvailable below the heavy headroom floor and stops once anything is swapped out, so it only
+// takes cache, never another job's memory.
+export type RoomInfo = MemInfo & { readonly freeKb: number };
+
+export const parseRoomInfo = (text: string): RoomInfo | undefined => {
+  const m = parseMeminfo(text);
+  const freeKb = Number(/^MemFree:\s+(\d+)/m.exec(text)?.[1]);
+  return m && Number.isFinite(freeKb) ? { ...m, freeKb } : undefined;
+};
+
+export type RoomPlan = { readonly make: false; readonly why: string } | { readonly make: true; readonly wantKb: number; readonly budgetKb: number; readonly floorKb: number; readonly why: string };
+
+// wantKb free before the job once free memory is under triggerKb; free: the heavy headroom percent MemAvailable must keep.
+// Touching takes the free memory first and only then makes the kernel reclaim cache (about 2G a second here), so making
+// 20G with 17G already free cost 8.6s for 2.5G gained (2026-11-02 QA): dori heavy acts only under a quarter of wantKb.
+export const gpuRoomPlan = (m: RoomInfo, wantKb: number, free: number, triggerKb = wantKb): RoomPlan => {
+  if (m.freeKb >= Math.min(wantKb, triggerKb)) return { make: false, why: `${fmtMem(m.freeKb * 1024)} free, ${fmtMem(wantKb * 1024)} wanted from under ${fmtMem(Math.min(wantKb, triggerKb) * 1024)}` };
+  const floorKb = Math.ceil((m.totalKb * free) / 100);
+  const budgetKb = Math.min(wantKb, m.availKb - floorKb);
+  if (budgetKb <= 0) return { make: false, why: `short: ${fmtMem(m.freeKb * 1024)} free and ${fmtMem(m.availKb * 1024)} available, no room above the ${free}% floor` };
+  return { make: true, wantKb, budgetKb, floorKb, why: `${fmtMem(m.freeKb * 1024)} free, ${fmtMem(wantKb * 1024)} wanted, up to ${fmtMem(budgetKb * 1024)} pushed out` };
+};
+
+// argv: want, budget, floor (kB). Prints one line: what it touched, why it stopped, MemFree and the free memory in blocks of
+// 2M or more (buddyinfo order >= 9) before and after.
+const ROOM_PY = `import mmap, sys, time
+want, budget, floor = map(int, sys.argv[1:4])
+def mi():
+    d = {}
+    for l in open("/proc/meminfo"):
+        k, v = l.split(":", 1)
+        d[k] = int(v.split()[0])
+    return d
+def big():
+    kb = 0
+    for l in open("/proc/buddyinfo"):
+        n = l.split()[4:]
+        kb += sum(int(c) * 4 * 2 ** o for o, c in enumerate(n) if o >= 9)
+    return kb
+CH = 256 * 1024
+m0, b0, t = mi(), big(), time.time()
+held, touched, why = [], 0, "enough"
+while True:
+    m = mi()
+    if m["MemFree"] + touched >= want: why = "enough"; break
+    if touched + CH > budget: why = "budget"; break
+    if m["MemAvailable"] - CH < floor: why = "floor"; break
+    if m0.get("SwapFree", 0) - m.get("SwapFree", 0) > CH: why = "swap"; break
+    b = mmap.mmap(-1, CH * 1024)
+    try:
+        b.madvise(mmap.MADV_HUGEPAGE)
+    except (AttributeError, OSError):
+        pass
+    b[::4096] = b"\\1" * (CH * 1024 // 4096)
+    held.append(b)
+    touched += CH
+for b in held:
+    b.close()
+m1 = mi()
+print(f"pushed {touched // 1024}M of cache out in {time.time() - t:.1f}s (stop: {why}): free {m0['MemFree'] // 1024}M -> {m1['MemFree'] // 1024}M, in 2M+ blocks {b0 // 1024}M -> {big() // 1024}M")
+`;
+
+// Runs the room maker in its own scope (MemoryMax a little over its budget, no swap, oom_score_adj 500 like a job) when one
+// can be made. Resolves with its line, or why it did not run; never throws, a job still starts after a failed attempt.
+export const makeGpuRoom = async (plan: Extract<RoomPlan, { make: true }>, label: string): Promise<{ readonly ok: boolean; readonly line: string }> => {
+  const cmd = ["python3", "-I", "-c", ROOM_PY, String(plan.wantKb), String(plan.budgetKb), String(plan.floorKb)];
+  const no = await canScope();
+  const argv = no ? cmd : scopeArgv(unitName(`gpu-room-${label}`, process.pid, ++scopes), (plan.budgetKb + 256 * 1024) * 1024, cmd);
+  try {
+    const p = Bun.spawn(argv, { env: { ...process.env, ...userBusEnv() }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    return code === 0 ? { ok: true, line: out.trim() } : { ok: false, line: `exit ${code}: ${(err || out).trim().split("\n").at(-1)?.slice(0, 200) ?? ""}` };
+  } catch (e) {
+    return { ok: false, line: String(e).slice(0, 200) };
+  }
+};
+
+// Before a GPU job: HEAVY_GPU_ROOM when it pushed cache out, HEAVY_GPU_ROOM_SHORT when the floor left no room,
+// HEAVY_GPU_ROOM_FAILED when the helper failed; nothing when enough is free or this host has no /proc/meminfo.
+export const gpuRoom = async (label: string, wantKb: number, free: number, log?: (line: string) => void, triggerKb = wantKb): Promise<void> => {
+  let text: string;
+  try {
+    text = readFileSync("/proc/meminfo", "utf8");
+  } catch {
+    return;
+  }
+  const m = parseRoomInfo(text);
+  if (!m) return;
+  const plan = gpuRoomPlan(m, wantKb, free, triggerKb);
+  if (!plan.make) {
+    if (plan.why.startsWith("short")) log?.(`HEAVY_GPU_ROOM_SHORT ${label}: ${plan.why}`);
+    return;
+  }
+  const r = await makeGpuRoom(plan, label);
+  log?.(r.ok ? `HEAVY_GPU_ROOM ${label}: ${r.line}` : `HEAVY_GPU_ROOM_FAILED ${label}: ${plan.why}; ${r.line}`);
+};
+
+// props: more scope properties (CPUQuota=..., RuntimeMaxSec=...); gpuFreeKb: a GPU job, so gpuRoom makes that much free
+// memory first (0 or absent: none)
+export type ScopedRun = { readonly label: string; readonly cmd: readonly string[]; readonly free: number; readonly needBytes?: number; readonly props?: readonly string[]; readonly log?: (line: string) => void; readonly gpuFreeKb?: number };
 type SpawnOpts = { cwd?: string; env?: Record<string, string | undefined>; stdin?: "inherit" | "ignore"; stdout?: "inherit" | "ignore" | "pipe" | ReturnType<typeof Bun.file>; stderr?: "inherit" | "ignore" | "pipe" };
 
 // Starts a heavy command in its own scope (HEAVY_SCOPE) or, where no user scope can be made, as before (HEAVY_NO_SCOPE).
 // Resolves with the command's exit code; HEAVY_OOM when the kernel killed it in its scope.
 export const spawnScoped = async (r: ScopedRun, opts: SpawnOpts, onStart?: (pid: number, proc: Bun.Subprocess) => void): Promise<number> => {
+  if (r.gpuFreeKb) {
+    const want = Math.max(r.gpuFreeKb, (r.needBytes ?? 0) / 1024);
+    await gpuRoom(r.label, want, r.free, r.log, want / 4);
+  }
   const m = readMeminfo();
   const no = m ? await canScope() : "no /proc/meminfo";
   const unit = unitName(r.label, process.pid, ++scopes);

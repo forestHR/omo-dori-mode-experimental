@@ -12,6 +12,8 @@ export type Headroom = {
   readonly free: number;
   readonly settleSec: number;
   readonly usage: (jobPids: readonly number[]) => Promise<UsageSample>;
+  // free memory a GPU job gets made before it starts (heavyGpuFreeGb in kB, heavy-mem.ts gpuRoom; 0: none)
+  readonly gpuFreeKb?: number;
 };
 
 export type SlotDeps = {

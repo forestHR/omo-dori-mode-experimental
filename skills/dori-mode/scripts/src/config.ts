@@ -425,6 +425,10 @@ export type DoriConfig = {
   readonly heavyMaxSlots: number;
   readonly heavyHeadroomPct: number;
   readonly heavySettleSec: number;
+  // GB of free memory a GPU job (the GPU line, plain dori heavy, --kind gpu) gets made before it starts: under a quarter of it, page
+  // cache is pushed out within MemAvailable over the heavyHeadroomPct floor (heavy-mem.ts gpuRoom; 0: never). On a
+  // unified-memory GPU (GB10) the driver fails a CUDA context when cache has left almost nothing free (2026-11-02).
+  readonly heavyGpuFreeGb: number;
   readonly heavyQueue: HeavyQueue;
   readonly deadPanePatterns: readonly string[];
   readonly guard: GuardThresholds;
@@ -478,6 +482,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   heavyMaxSlots: 8,
   heavyHeadroomPct: 10,
   heavySettleSec: 120,
+  heavyGpuFreeGb: 20,
   heavyQueue: { jobs: {}, helpers: [], queue: [], rl: true, jobDir: "/dev/shm/dori-heavy", exec: false, execMaxMin: 240 },
   deadPanePatterns: ["has stopped", "no suitable jobs"],
   guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },

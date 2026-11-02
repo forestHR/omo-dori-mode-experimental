@@ -18,7 +18,7 @@ What you get:
 | `kakao-watch.ts`, `kakao-login.ts` | Optional, for a Dori with its own KakaoTalk account: polls its rooms through agent-messenger, appends new messages to the inbox, prints `KAKAO_MSG` for the Dori's monitor and marks the rooms read, again until it holds. Off unless `DORI_KAKAO_SELF_ID` is set. |
 | `usage-snapshot.ts` | Captures the omo-usage TUI with ANSI colors and renders a PNG using headless Firefox. |
 | `dori.sh` | Starts `dori-inbound` and `dori-google-watch`, starts the current lead session if needed, then attaches to it. Requires the separate `dori lead` PR. |
-| `transcribe.sh`, `setup-asr.sh` | Local speech-to-text with whisper.cpp (CUDA when available) for `hooks.transcribe`. |
+| `transcribe.sh`, `setup-asr.sh` | Local speech-to-text with whisper.cpp (CUDA when available) for `hooks.transcribe`. A whisper-cli that dies in a CUDA error gets one more try after `dori gpu-room` (`TRANSCRIBE_CUDA_RETRY`); a second failure fails with its code and the last lines of its error. |
 | `transcribe_long.py`, `diarize.py`, `setup-diarize.sh` | Long recordings (meetings) in `transcribe.sh`: a line that whisper.cpp starts repeating is transcribed again, and each speaker turn gets a `[hh:mm:ss] 화자N:` line (pyannote `speaker-diarization-community-1`). |
 | `dori-transcribe`, `transcribe-relay.py`, `transcribe-job.sh`, `transcribe_fixes.py` | Recordings from every Dori account on a host to one transcriber account and the transcript back (speaker turns, the owner's correction ledger applied); see step 4. |
 | `dori-file-relay` | Files between Dori accounts on a host: by hand (`dori-file-relay <from> <file> <to>`) or as the service that delivers whatever a Dori puts in `~/outbox/to-<dori>/`; see step 4. |

@@ -489,7 +489,7 @@ export const heavyExec = async (ctx: HeavyCtx, words: readonly string[], d: Exec
     const pumps: Promise<void>[] = [];
     const ncpu = Math.max(1, cpus().length);
     const code = await spawnScoped(
-      { label, cmd: sandboxArgv(kind, spec, (p) => join(root, p), d.tools), free: ctx.deps.headroom?.free ?? 10, ...(mem ? { needBytes: mem } : {}), props: [`CPUQuota=${ncpu * 90}%`, `RuntimeMaxSec=${d.maxMin * 60}`], log },
+      { label, cmd: sandboxArgv(kind, spec, (p) => join(root, p), d.tools), free: ctx.deps.headroom?.free ?? 10, ...(mem ? { needBytes: mem } : {}), ...(kind === "gpu" ? { gpuFreeKb: ctx.deps.headroom?.gpuFreeKb ?? 0 } : {}), props: [`CPUQuota=${ncpu * 90}%`, `RuntimeMaxSec=${d.maxMin * 60}`], log },
       { cwd: dir, stdin: "ignore", stdout: "pipe", stderr: "pipe" },
       (_pid, proc) => {
         const pump = async (s: ReadableStream<Uint8Array> | undefined, tag: string) => {

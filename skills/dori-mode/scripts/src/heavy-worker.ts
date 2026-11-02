@@ -49,7 +49,7 @@ export const heavyWorker = async (ctx: HeavyCtx, command: string, caller?: strin
   });
   try {
     await unpackFrom("inherit", dir);
-    const r = await runJob(job, dir, args, { label, free: ctx.deps.headroom?.free ?? 10, ...(ctx.deps.log ? { log: ctx.deps.log } : {}) });
+    const r = await runJob(job, dir, args, { label, free: ctx.deps.headroom?.free ?? 10, gpuFreeKb: ctx.deps.headroom?.gpuFreeKb ?? 0, ...(ctx.deps.log ? { log: ctx.deps.log } : {}) });
     await packTo(dir, RESULT_ENTRIES, "inherit");
     ctx.deps.log?.(`HEAVY_WORKER_DONE ${label} ${kind}: exit ${r.code}`);
     return 0;
