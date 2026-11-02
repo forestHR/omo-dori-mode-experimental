@@ -819,7 +819,7 @@ const backlogDeps = (): TickDeps => ({
     // both took them)
     const inbox = inboxReader(config.stateDir, auditInbox());
     const orders = [
-      ...(await pairIntake({ stateDir: config.stateDir, settings: config.backlog, rows: inbox.rows, now: realClock.now, pairBots: idList(process.env.DORI_DISCORD_PAIR_BOT), guild: process.env.DORI_DISCORD_GUILD?.trim() ?? "", ownerLink: ownerLinkProblem, inbox: backlogInbox })),
+      ...pairIntake({ stateDir: config.stateDir, settings: config.backlog, rows: inbox.rows, now: realClock.now, pairBots: idList(process.env.DORI_DISCORD_PAIR_BOT), guild: process.env.DORI_DISCORD_GUILD?.trim() ?? "" }),
       ...orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows: inbox.rows, now: realClock.now }),
     ];
     inbox.commit();

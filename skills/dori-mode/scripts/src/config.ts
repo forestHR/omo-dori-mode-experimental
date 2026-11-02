@@ -389,10 +389,9 @@ export type BacklogSettings = {
   readonly maxStarts: number;
   readonly hostMaxLanes: number;
   readonly hostDir: string;
-  // the other Doris' #dori-pair posts taken in (empty: off): a repair request (the owner's standing rule fix-to-soodori is its
-  // approval) starts at once; a request only with an owner message link younger than 24 hours that holds
+  // the other Doris' #dori-pair posts that start a repair request (empty: off), a lane each at once: the owner's standing rule
+  // fix-to-soodori is its approval; a reply is not taken
   readonly pairRepairPattern: string;
-  readonly pairRequestPattern: string;
   // the Done line of an item the backlog made itself (a feed entry): {id} and {stateDir} are filled in
   readonly intakeDone: string;
   readonly writeNeedsOwnerLink: boolean;
@@ -589,7 +588,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
     proposalText: "Move {who} to a new session? {signals}. The handover note it would get: {note}{blockers}" },
   stateGit: { dirs: [], everyMin: 10, maxFileKb: 512, timeoutSec: 60, timeZone: "", backup: BACKUP_DEFAULTS },
   mergeGate: { repos: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
-  backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", pairRepairPattern: "", pairRequestPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" },
+  backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", pairRepairPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" },
   instances: [],
 });
 
