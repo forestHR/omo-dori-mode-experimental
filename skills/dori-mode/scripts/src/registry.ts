@@ -146,6 +146,16 @@ export const withStatus = (lane: Lane, status: LaneStatus, note: string, at: str
   history: [...(lane.history ?? []), { at, status, note }],
 });
 
+// A lane recorded before 2026-11-02 keeps its last check under ownerCheck (the periodic owner check, removed then; dori
+// intent-check wrote there too): it is read as intentCheck, so a pending finding can still be re-read and a confirmed
+// re-read still makes the next finding rung 4. The old field is not written back.
+type Recorded = Lane & { readonly ownerCheck?: Lane["intentCheck"] };
+const loaded = (raw: Recorded): Lane => {
+  const { ownerCheck: old, ...lane } = raw;
+  if (!old || lane.intentCheck) return lane;
+  return { ...lane, intentCheck: { at: old.at, lastReportAt: old.lastReportAt, model: old.model, kinds: old.kinds, ...(old.finding ? { finding: old.finding.replace(/^OWNER_CHECK /, "INTENT_CHECK ") } : {}), ...(old.rereadAt ? { rereadAt: old.rereadAt } : {}) } };
+};
+
 export class Registry {
   readonly dir: string;
   constructor(stateDir: string) {
@@ -158,7 +168,7 @@ export class Registry {
 
   async read(key: string): Promise<Lane | null> {
     const f = Bun.file(this.path(key));
-    return (await f.exists()) ? ((await f.json()) as Lane) : null;
+    return (await f.exists()) ? loaded((await f.json()) as Recorded) : null;
   }
 
   // temp file + rename so a concurrent reader never sees a half-written lane
@@ -179,7 +189,7 @@ export class Registry {
   async list(): Promise<Lane[]> {
     mkdirSync(this.dir, { recursive: true });
     const lanes: Lane[] = [];
-    for (const f of readdirSync(this.dir)) if (f.endsWith(".json")) lanes.push((await Bun.file(join(this.dir, f)).json()) as Lane);
+    for (const f of readdirSync(this.dir)) if (f.endsWith(".json")) lanes.push(loaded((await Bun.file(join(this.dir, f)).json()) as Recorded));
     return lanes;
   }
 

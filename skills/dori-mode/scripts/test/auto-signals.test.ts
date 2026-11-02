@@ -380,6 +380,24 @@ test("intent-check needs no new report; a finding again in the next check is run
   expect(sent(world)).toHaveLength(1);
 });
 
+test("a lane recorded before the periodic owner check was removed keeps its last check: its pending finding can be re-read and the confirmed re-read stays (review of #237, gpt-6-astra)", async () => {
+  const deps = intentCheckDeps(10, "VERDICT: OK", []);
+  // the record as the old code wrote it: ownerCheck with its daily count
+  const old = { ...lane(state.dir), ownerCheck: { at: at(5), lastReportAt: at(1), day: at(5).slice(0, 10), today: 3, model: "m", kinds: ["VIOLATION"], finding: 'OWNER_CHECK rl-e7 VIOLATION owner "학습은 멈추지 말고" vs report "학습 없음": x [reviewer m]', rereadAt: at(6) } };
+  mkdirSync(join(state.dir, "lanes"), { recursive: true });
+  writeFileSync(join(state.dir, "lanes", "rl-e7.json"), JSON.stringify(old));
+  const read = (await deps.registry.read("rl-e7")) as Lane;
+  expect(read.intentCheck).toEqual({ at: at(5), lastReportAt: at(1), model: "m", kinds: ["VIOLATION"], finding: 'INTENT_CHECK rl-e7 VIOLATION owner "학습은 멈추지 말고" vs report "학습 없음": x [reviewer m]', rereadAt: at(6) });
+  expect((await deps.registry.list()).find((l) => l.key === "rl-e7")?.intentCheck?.rereadAt).toBe(at(6));
+  const sentAgain = await sendReread(deps, read);
+  expect(sentAgain.line).toStartWith("REREAD_SENT rl-e7");
+  expect(sent(world).at(-1)).toContain('VIOLATION owner "학습은 멈추지 말고"');
+  // written back once, the old field is gone and the new one holds the re-read just sent
+  const raw = JSON.parse(await Bun.file(join(state.dir, "lanes", "rl-e7.json")).text());
+  expect("ownerCheck" in raw).toBe(false);
+  expect(raw.intentCheck.kinds).toEqual(["VIOLATION"]);
+});
+
 // hr35-e7, 2026-10-12: the relay of 10-11 21:46 quotes the owner's question, then goes on in the lead's words; the reviewer
 // quoted that lead text as the owner's, against a report the owner's card Q96 ("학습 전 형 확인") had asked for
 const E7_RELAY = '[LEAD] 형 질문(원문 https://discord.com/channels/1528936606264856737/1558257428561137764/1558958668404232243): "정지한 상태에서 목표 지형으로 가는 걸 학습하는 게 이렇게 어려운가? E6까지만 해도 이동을 넣었을 때 어느 정도 굴착이 잘 됐는데 이번엔 왜 진도가 안 나가는지 알려줘". 학습은 멈추지 말고, 이미 있는 기록·문서만으로(새 GPU 없이) 짧은 비교표를 만들어라';
