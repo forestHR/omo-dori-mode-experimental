@@ -24,11 +24,11 @@ import { watchLog } from "./watch-log.ts";
 const reportGrammar = (key: string): RegExp => new RegExp(`\\[REPORT\\] ${key.replace(/[.]/g, "\\.")} \\| [a-z]+ \\| (?!<)(?!.*(?:\\$\\{\\w|\\{\\w+\\}))(?!["']?(?:\\$\\w+|%[sd])(?:\\\\n)?["'\\])\\],;\\s]*$)\\S`);
 
 // A report counts only where a lane puts one: first on its line (after omo's "│ " cell border), as an argv element
-// ("--text","[REPORT] ...") or after --text; a line that quotes the grammar after other words (echo "[REPORT] ...",
+// right after --text ("--text","[REPORT] ...", --text "[REPORT] ..."); a line that quotes the grammar after other words (echo "[REPORT] ...",
 // printf, a sentence citing it) is not one (#29).
 const anchored = (line: string): boolean => {
   const before = line.slice(0, line.indexOf("[REPORT]")).replace(/^[\s│]+/, "").trimEnd();
-  return before === "" || /(?:^|[[,]|--text)\s*["']?$/.test(before);
+  return before === "" || /--text["']?(?:\s*,)?\s*["']?$/.test(before);
 };
 
 // A report the agent UI wrapped over several lines continues until the next blank line.

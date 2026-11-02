@@ -50,7 +50,10 @@ test("a report quoted mid-line or a bare $name / %s template is not the lane's r
     "[REPORT] demo-lane | milestone | $message",
     '[REPORT] demo-lane | milestone | "%s"',
     "the footer says to send [REPORT] demo-lane | milestone | checks passed",
+    'For example, "[REPORT] demo-lane | milestone | checks passed"',
+    '["[REPORT] demo-lane | milestone | checks passed"]',
   ]) expect(lastReportLine(fake, k)).toBeNull();
+  expect(lastReportLine(['[REPORT] demo-lane | milestone | PR open', 'For example, "[REPORT] demo-lane | done | all merged"'].join("\n"), k)).toBe("[REPORT] demo-lane | milestone | PR open");
   const real: [string, string][] = [
     [" [REPORT] demo-lane | milestone | set $HOME in docs", "[REPORT] demo-lane | milestone | set $HOME in docs"],
     ["[REPORT] demo-lane | done | 100% of checks green", "[REPORT] demo-lane | done | 100% of checks green"],
