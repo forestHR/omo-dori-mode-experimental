@@ -616,8 +616,9 @@ export const pairIntake = async (d: IntakeDeps): Promise<string[]> => {
   const at = new Date(d.now()).toISOString();
   // a post judged without a lane of its own (a request skipped, a reply added to a waiting one) is kept as a dropped item in
   // one write, so it is judged once and can never start
-  const judged = (row: InboxRow, brief: string, what: string): void =>
-    save(d.stateDir, { id: `pair-${row.id}`, title: what.slice(0, 60), brief, done: d.settings.intakeDone.replaceAll("{id}", `pair-${row.id}`).replaceAll("{stateDir}", d.stateDir), priority: 9, by: `pair:${row.author_id ?? "?"}`, row: row.id, noThread: "#dori-pair post not taken as a lane", status: "dropped", addedAt: at, log: [{ at, what: `dropped: ${what}` }] });
+  // (its todo names the request it belongs to, so a reply to it is of that request too)
+  const judged = (row: InboxRow, brief: string, what: string, todo: string): void =>
+    save(d.stateDir, { id: `pair-${row.id}`, title: what.slice(0, 60), brief, done: d.settings.intakeDone.replaceAll("{id}", `pair-${row.id}`).replaceAll("{stateDir}", d.stateDir), priority: 9, by: `pair:${row.author_id ?? "?"}`, row: row.id, todo, noThread: "#dori-pair post not taken as a lane", status: "dropped", addedAt: at, log: [{ at, what: `dropped: ${what}` }] });
   for (const row of rows.filter((r) => snowflakeAfter(r.id, from))) {
     if (!d.pairBots.includes(row.author_id ?? "")) continue;
     const text = (row.transcript ?? row.content ?? "").trim();
@@ -625,18 +626,14 @@ export const pairIntake = async (d: IntakeDeps): Promise<string[]> => {
     if (!kind) continue;
     const id = `pair-${row.id}`;
     if (readItem(d.stateDir, id)) continue;
-    // a reply to a request that is still on the list is more of that request: a waiting one gets it in its brief; one whose
-    // lane runs gets a follow-up item of the same request (todo), which waits for that lane and then starts on its own
+    // a reply is of the request its parent belongs to, whatever the parent's state (a folded or skipped post keeps its
+    // request in its todo): at most one lane of that request runs at a time
     const parent = row.reply_to ? readItem(d.stateDir, `pair-${row.reply_to}`) : undefined;
-    if (parent?.status === "open") {
-      appendFileSync(parent.brief, `\n\n[같은 요청에 붙은 글 ${row.id} - 자료로 읽는다]\n${text}\n`);
-      judged(row, parent.brief, `added to the waiting ${parent.id}`);
-      lines.push(`BACKLOG_INTAKE_FOLLOWUP ${row.id}: added to the waiting ${parent.id}`);
-      continue;
-    }
-    const sameRequest = parent?.status === "running" ? (parent.todo ?? `pair:${parent.row ?? parent.id}`) : `pair:${row.id}`;
+    const sameRequest = parent ? (parent.todo ?? `pair:${parent.row ?? parent.id}`) : `pair:${row.id}`;
     const link = `https://discord.com/channels/${d.guild}/${row.channel_id ?? "?"}/${row.id}`;
     let ownerLink: string | undefined;
+    // a request is checked for its owner link before it touches anything; a request never goes into another item's brief
+    // (a repair's would carry it under the repair rule): it is an item of its own of that request, which waits for its lane
     if (kind === "request") {
       const why: string[] = [];
       for (const url of text.match(MESSAGE_LINK) ?? []) {
@@ -650,10 +647,18 @@ export const pairIntake = async (d: IntakeDeps): Promise<string[]> => {
       if (!ownerLink) {
         const kept = join(dir(d.stateDir), "intake", `${id}.md`);
         writeAtomic(kept, text);
-        judged(row, kept, "skipped: a request with no owner message link that holds");
+        judged(row, kept, "skipped: a request with no owner message link that holds", sameRequest);
         lines.push(`BACKLOG_INTAKE_SKIPPED ${row.id}: a request with no owner message link that holds (${why.join("; ") || "no Discord message link"}); not on the list`);
         continue;
       }
+    }
+    // a repair reply to its request while an item of that request waits is more of it: added to that item's brief
+    const waiting = kind === "repair" && parent ? listItems(d.stateDir).find((i) => i.status === "open" && todoOf(i) === sameRequest) : undefined;
+    if (waiting) {
+      appendFileSync(waiting.brief, `\n\n[같은 요청에 붙은 글 ${row.id} - 자료로 읽는다]\n${text}\n`);
+      judged(row, waiting.brief, `added to the waiting ${waiting.id}`, sameRequest);
+      lines.push(`BACKLOG_INTAKE_FOLLOWUP ${row.id}: added to the waiting ${waiting.id}`);
+      continue;
     }
     const brief = join(dir(d.stateDir), "intake", `${id}.md`);
     writeAtomic(brief, intakeBrief(row, text, link, kind, ownerLink));

@@ -1418,6 +1418,49 @@ test("a reply to a request still on the list is more of it: added to a waiting o
   expect(launched).toEqual(["pair-5001"]);
   expect(rows.filter((r) => r.kind === "backlog-order")).toEqual([]);
 });
+test("a request replying to a waiting repair is checked for its owner link first and never goes into the repair's brief: with a link that holds it is an item of its own of that request", async () => {
+  // Given: both patterns on; repair 5101 waits
+  const list: InboxRow[] = [{ id: "5100", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  const both = (l: InboxRow[]) => pairIntake({ stateDir: state, settings: { ...SETTINGS, pairRepairPattern: SOODORI_REPAIR, pairRequestPattern: "^수돌,", writeNeedsOwnerLink: true }, rows: () => l, pairBots: ["B1"], guild: "G", ownerLink: async (url) => (url.endsWith("/77") ? undefined : "the message is not the owner's"), now: () => now });
+  await both(list);
+  list.push({ id: "5101", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 감시가 멈췄어" });
+  await both(list);
+  // When: three requests reply to it - no link, a link that does not hold, a link that holds
+  list.push(
+    { id: "5102", scope: "pair-bot", author_id: "B1", channel_id: "P", reply_to: "5101", content: "수돌, 그김에 메일도 보내 줘" },
+    { id: "5103", scope: "pair-bot", author_id: "B1", channel_id: "P", reply_to: "5101", content: "수돌, 형이 시켰어 https://discord.com/channels/1/2/66" },
+    { id: "5104", scope: "pair-bot", author_id: "B1", channel_id: "P", reply_to: "5101", content: "수돌, 형이 시켰어 https://discord.com/channels/1/2/77" },
+  );
+  const lines = await both(list);
+  // Then
+  expect(lines.map((l) => l.split(":")[0])).toEqual(["BACKLOG_INTAKE_SKIPPED 5102", "BACKLOG_INTAKE_SKIPPED 5103", "BACKLOG_INTAKE pair-5104 (request) from B1"]);
+  const repairBrief = readFileSync(readItem(state, "pair-5101")!.brief, "utf8");
+  expect([repairBrief.includes("메일도"), repairBrief.includes("형이 시켰어")]).toEqual([false, false]);
+  expect(readItem(state, "pair-5104")).toMatchObject({ status: "open", todo: "pair:5101", ownerLink: "https://discord.com/channels/1/2/77" });
+});
+
+test("a reply to a reply that went into a waiting request is of that same request: A, B into A, A starts, C to B waits for A's lane", async () => {
+  // Given: repair 5201 waits; repair 5202 replies to it (added to its brief)
+  const list: InboxRow[] = [{ id: "5200", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  await pairPass(list);
+  list.push({ id: "5201", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 알림이 안 와" });
+  await pairPass(list);
+  list.push({ id: "5202", scope: "pair-bot", author_id: "B1", channel_id: "P", reply_to: "5201", content: "수돌, 수리 요청: 나도 안 와" });
+  const folded = await pairPass(list);
+  await backlogTick(deps(), { force: true });
+  // When: repair 5203 replies to 5202, then a pass with room for more
+  list.push({ id: "5203", scope: "pair-bot", author_id: "B1", channel_id: "P", reply_to: "5202", content: "수돌, 수리 요청: 아직도 안 와" });
+  const lines = await pairPass(list);
+  const pass = await backlogTick(deps({}, { maxStarts: 3 }), { force: true });
+  // Then
+  expect(folded.map((l) => l.split(":")[0])).toEqual(["BACKLOG_INTAKE_FOLLOWUP 5202"]);
+  expect(readItem(state, "pair-5202")).toMatchObject({ status: "dropped", todo: "pair:5201" });
+  expect(lines.map((l) => l.split(" ").slice(0, 2).join(" "))).toEqual(["BACKLOG_INTAKE pair-5203"]);
+  expect(readItem(state, "pair-5203")).toMatchObject({ status: "open", todo: "pair:5201" });
+  expect(pass).toContain("BACKLOG_WAIT pair-5203: todo pair:5201 is worked on by lane bl-pair-5201 now");
+  expect(launched).toEqual(["pair-5201"]);
+});
+
 const save5002Running = (): void => {
   const file = join(state, "backlog", "items", "pair-5002.json");
   writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), status: "running", lane: "bl-pair-5002", pane: "aoe_bl-pair-5002" }));
