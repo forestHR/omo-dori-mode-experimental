@@ -389,6 +389,9 @@ export type BacklogSettings = {
   readonly maxStarts: number;
   readonly hostMaxLanes: number;
   readonly hostDir: string;
+  // the other Doris' #dori-pair posts that start a repair request (empty: off), a lane each at once: the owner's standing rule
+  // fix-to-soodori is its approval; a reply is not taken
+  readonly pairRepairPattern: string;
   // the Done line of an item the backlog made itself (a feed entry): {id} and {stateDir} are filled in
   readonly intakeDone: string;
   readonly writeNeedsOwnerLink: boolean;
@@ -585,7 +588,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
     proposalText: "Move {who} to a new session? {signals}. The handover note it would get: {note}{blockers}" },
   stateGit: { dirs: [], everyMin: 10, maxFileKb: 512, timeoutSec: 60, timeZone: "", backup: BACKUP_DEFAULTS },
   mergeGate: { repos: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
-  backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" },
+  backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", pairRepairPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" },
   instances: [],
 });
 
@@ -753,6 +756,7 @@ export const loadConfig = async (path = configPath(), home = homedir(), warn: (l
   for (const w of migrated.warnings) warn(`${w} (${path})`);
   const raw = migrated.raw as Partial<DoriConfig>;
   const merged: DoriConfig = { ...base, ...raw, update: { ...base.update, ...raw.update }, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, discord: { ...base.discord, ...raw.discord }, stuck: { ...base.stuck, ...raw.stuck }, reviewers: { ...base.reviewers, ...raw.reviewers }, mergeGate: { ...base.mergeGate, ...raw.mergeGate }, scorecard: { ...base.scorecard, ...raw.scorecard }, signals: { ...base.signals, ...raw.signals }, explore: { ...base.explore, ...raw.explore }, autoSignals: { ...base.autoSignals, ...raw.autoSignals, intentCheck: { ...base.autoSignals.intentCheck, ...raw.autoSignals?.intentCheck } }, handover: { ...base.handover, ...raw.handover }, related: { ...base.related, ...raw.related }, stateGit: { ...base.stateGit, ...raw.stateGit, backup: { ...base.stateGit.backup, ...raw.stateGit?.backup } }, heavyQueue: { ...base.heavyQueue, ...raw.heavyQueue }, backlog: { ...base.backlog, ...raw.backlog } };
+  if (merged.backlog.pairRepairPattern && merged.backlog.writeNeedsOwnerLink) warn(`CONFIG_BACKLOG_REPAIR_EXEMPT backlog.pairRepairPattern and backlog.writeNeedsOwnerLink are both on: #dori-pair repair requests start without an owner message link, because the owner's standing rule that faults of the Dori base go to the maintenance Dori is their approval (${path})`);
   const heavyProblem = heavyQueueProblem(merged.heavyQueue);
   if (heavyProblem) throw new ConfigError(`${path}: ${heavyProblem}`);
   if (!OWNER_SPEECHES.includes(merged.discord.ownerSpeech)) throw new ConfigError(`${path}: discord.ownerSpeech must be "" (follow discord.locale), "casual" or "polite", not ${JSON.stringify(merged.discord.ownerSpeech)}`);

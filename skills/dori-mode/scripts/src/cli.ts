@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
-import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
@@ -815,9 +815,13 @@ const backlogDeps = (): TickDeps => ({
   },
   host: { dir: config.backlog.hostDir, user: userInfo().username, instance: instanceOf(config.stateDir), max: config.backlog.hostMaxLanes },
   intake: async (sweep) => {
-    // the owner's orders every tick, from where the last pass stopped reading the inbox (kept once they are taken)
+    // the #dori-pair posts and the owner's orders every tick, from where the last pass stopped reading the inbox (kept once
+    // both took them)
     const inbox = inboxReader(config.stateDir, auditInbox());
-    const orders = orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows: inbox.rows, now: realClock.now });
+    const orders = [
+      ...pairIntake({ stateDir: config.stateDir, settings: config.backlog, rows: inbox.rows, now: realClock.now, pairBots: idList(process.env.DORI_DISCORD_PAIR_BOT), guild: process.env.DORI_DISCORD_GUILD?.trim() ?? "" }),
+      ...orderIntake({ stateDir: config.stateDir, settings: config.backlog, rows: inbox.rows, now: realClock.now }),
+    ];
     inbox.commit();
     if (!sweep || !config.backlog.feedCommand.length) return orders;
     const feed = async (): Promise<{ readonly todos: readonly FeedTodo[] } | { readonly why: string }> => {

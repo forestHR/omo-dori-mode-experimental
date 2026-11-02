@@ -3,14 +3,14 @@ import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, inboxReader, type InboxRow, orderIntake, readLines, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
+import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, inboxReader, type InboxRow, orderIntake, readLines, pairIntake, isPairItem, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, rowItemId, readItem, StartRefused, todoOf, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 import { briefGaps, COMMON_LEDGER, loadLedger } from "../src/directives.ts";
 import { asStartFailure, eightSteps, LaunchError, LaunchFailed, launchLane, uiSteps, validateLaunch } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld } from "./fakes.ts";
 
-const SETTINGS: BacklogSettings = { enabled: true, everyMin: 60, maxLanes: 3, maxStarts: 1, hostMaxLanes: 2, hostDir: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" };
+const SETTINGS: BacklogSettings = { enabled: true, everyMin: 60, maxLanes: 3, maxStarts: 1, hostMaxLanes: 2, hostDir: "", pairRepairPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" };
 const T0 = Date.parse("2026-11-02T15:00:00Z");
 
 let root: string;
@@ -222,7 +222,7 @@ test("the backlog is off unless a Dori's config turns it on", async () => {
   // Then
   expect(off.backlog.enabled).toBe(false);
   expect(on.backlog).toMatchObject({ enabled: true, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, writeNeedsOwnerLink: false });
-  expect(Object.keys(on.backlog).sort()).toEqual(["dayReportAt", "enabled", "everyMin", "feedCommand", "hostDir", "hostMaxLanes", "intakeDone", "maxLanes", "maxStarts", "orderKinds", "timeZone", "writeNeedsOwnerLink"]);
+  expect(Object.keys(on.backlog).sort()).toEqual(["dayReportAt", "enabled", "everyMin", "feedCommand", "hostDir", "hostMaxLanes", "intakeDone", "maxLanes", "maxStarts", "orderKinds", "pairRepairPattern", "timeZone", "writeNeedsOwnerLink"]);
 });
 
 test("two Doris of one account keep their own host slots: one Dori's pass never removes the other's", async () => {
@@ -1089,14 +1089,32 @@ test("model: random orders, feed sweeps, passes, lane closes, replacements and d
     const steps: string[] = [];
     const list: InboxRow[] = [];
     const handed = new Set<string>();
+    // #dori-pair repair posts: some reach the inbox after a later one (a lower id), some reply to an earlier post, some reply
+    // to a parent that reaches the inbox only later (a reply's id is always above its parent's, as in Discord)
+    const pairList: InboxRow[] = [{ id: "9000", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+    const owed: string[] = [];
     let n = 0;
+    let p = 0;
     const fail = (why: string): never => {
       throw new Error(`seed ${seed}: ${why}\nsteps: ${steps.join(" ; ")}`);
     };
     const pass = async (busy: boolean, maxStarts: number) => {
       const before = rows.length;
       const startedBefore = launched.length;
-      await backlogTick(deps({ busy: async () => (busy ? ["busy"] : []), intake: async () => orderPass(list) }, { maxStarts }), { force: true });
+      await backlogTick(deps({ busy: async () => (busy ? ["busy"] : []), intake: async () => [...orderPass(list), ...(await pairPass(pairList))] }, { maxStarts }), { force: true });
+      // I8: every #dori-pair post past the start has an item after a pass (its own, or a dropped one when it went into a waiting request)
+      for (const r of pairList.filter((x) => Number(x.id) > 9000)) if (!readItem(state, `pair-${r.id}`)) fail(`pair post ${r.id} has no item after a pass`);
+      // I10: at most one running lane per #dori-pair request (the first post of a reply chain), whatever order the posts came in
+      const up = new Map(pairList.map((x) => [x.id, x.reply_to] as const));
+      const root = (id: string): string => {
+        let x = id;
+        for (let i = 0; i < 100 && up.get(x); i++) x = up.get(x) as string;
+        return x;
+      };
+      const roots = listItems(state).filter((i) => i.status === "running" && isPairItem(i) && i.row !== undefined).map((i) => root(i.row as string));
+      if (roots.length !== new Set(roots).size) fail(`two running lanes of one #dori-pair request: ${roots.join(",")}`);
+      // I9: a #dori-pair request is the backlog's alone: never handed to the lead
+      for (const r of rows.slice(before)) if (r.kind === "backlog-held" && /pair-\d/.test(r.content)) fail(`a pair item went to the lead: ${r.content}`);
       for (const r of rows.slice(before).filter((x) => x.content.startsWith("BACKLOG_ORDER_TO_LEAD"))) {
         const [, row, , , , , , lane0] = r.content.split(" ");
         if (handed.has(row ?? "")) fail(`${row} handed to the lead twice`);
@@ -1118,16 +1136,28 @@ test("model: random orders, feed sweeps, passes, lane closes, replacements and d
       }
       // I6: after a pass no open order waits while its todo's lane runs (the lead's rule: it went to the lead for that lane)
       const runningTodos = new Set(listItems(state).filter((i) => i.status === "running").map(todoOf).filter((k): k is string => k !== undefined));
-      for (const o of listItems(state).filter((i) => i.status === "open" && i.row !== undefined && !i.by.startsWith("pair:"))) {
+      for (const o of listItems(state).filter((i) => i.status === "open" && i.row !== undefined && !isPairItem(i))) {
         const k = todoOf(o);
         if (k !== undefined && runningTodos.has(k)) fail(`order ${o.id} waits while its todo ${k} has a running lane`);
       }
     };
     orderPass(list);
+    await pairPass(pairList);
     for (let step = 0; step < 40; step++) {
       now += 60_000;
-      const op = pick(["order", "order", "feed", "pass", "pass", "pass", "close", "replace", "drop"] as const);
-      if (op === "order") {
+      const op = pick(["order", "order", "pair", "pair", "feed", "pass", "pass", "pass", "close", "replace", "drop"] as const);
+      if (op === "pair") {
+        p++;
+        const late = owed.length && rnd() < 0.5 ? owed.shift() : undefined;
+        // ids: 9000 + 4p (or 6 lower: delivered after a later one); a parent owed is 9000 + 4p - 1, never another post's id
+        const id = late ?? String(9000 + 4 * p + pick([0, 0, -6]));
+        const earlier = pairList.filter((x) => x.id !== "9000" && Number(x.id) < Number(id));
+        const ahead = !late && rnd() < 0.15 ? String(9000 + 4 * p - 1) : undefined;
+        if (ahead) owed.push(ahead);
+        const reply = late ? undefined : (ahead ?? (earlier.length && rnd() < 0.4 ? pick(earlier).id : undefined));
+        pairList.push({ id, scope: "pair-bot", author_id: "B1", channel_id: "P", content: `수돌, 수리 요청: m${p}`, ...(reply ? { reply_to: reply } : {}) });
+        steps.push(`pair ${id}${reply ? `>${reply}` : ""}${late ? " (parent, late)" : ""}`);
+      } else if (op === "order") {
         n++;
         const ts = new Date(T0 + pick([n, n, n - 1, 0]) * 60_000 + 1).toISOString();
         list.push(orderRow(100 + n, ts, pick(["pb-0123456789ab-1", "pb-0123456789ab-2", "pb-0123456789ab-3"])));
@@ -1207,3 +1237,179 @@ test("an order handed to the lead whose row could not be written stays on the li
   expect(readItem(state, "dashboard-order-60")?.status).toBe("dropped");
   expect(rows.filter((r) => r.content.startsWith("BACKLOG_ORDER_TO_LEAD dashboard-order-60")).length).toBe(1);
 });
+
+test("#dori-pair intake: only the other Doris' posts that start a repair request", async () => {
+  // Given
+  const inbox: InboxRow[] = [{ id: "1000", scope: "pair-bot", author_id: "B1", content: "도리야, 수리 요청: 옛 글" }];
+  const intake = (extra: InboxRow[]) => {
+    inbox.push(...extra);
+    return pairIntake({ stateDir: state, settings: { ...SETTINGS, pairRepairPattern: "^도리야, 수리 요청" }, rows: () => inbox, pairBots: ["B1", "B2"], guild: "G", now: () => now });
+  };
+  // When
+  const first = await intake([]);
+  const next = await intake([
+    { id: "1001", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "도리야, 수리 요청: 파일 배달이 하위 폴더를 지워" },
+    { id: "1002", scope: "pair-bot", author_id: "X9", channel_id: "P", content: "도리야, 수리 요청: 모르는 봇" },
+    { id: "1003", scope: "pair", author_id: "H1", channel_id: "P", content: "도리야, 수리 요청: 사람 글" },
+    { id: "1004", scope: "pair-bot", author_id: "B2", channel_id: "P", content: "도리야, 메일 하나 보내 줘 https://discord.com/channels/1/2/66" },
+    { id: "1006", scope: "pair-bot", author_id: "B2", channel_id: "P", content: "고마워, 받았어" },
+  ]);
+  const again = await intake([]);
+  // Then
+  expect(first).toEqual(["BACKLOG_INTAKE_FROM 1000: #dori-pair posts after this one are read"]);
+  expect(next).toEqual(["BACKLOG_INTAKE pair-1001 (repair) from B1: 수리: 파일 배달이 하위 폴더를 지워"]);
+  expect(again).toEqual([]);
+  expect(["pair-1000", "pair-1002", "pair-1003", "pair-1004", "pair-1006"].map((id) => readItem(state, id))).toEqual([undefined, undefined, undefined, undefined, undefined]);
+  expect(readItem(state, "pair-1001")).toMatchObject({ noThread: "#dori-pair 수리 요청 https://discord.com/channels/G/P/1001", by: "pair:B1", done: `file ${state}/backlog/reports/pair-1001.md` });
+  expect(readFileSync(readItem(state, "pair-1001")?.brief ?? "", "utf8")).toContain("파일 배달이 하위 폴더를 지워");
+});
+
+test("a pair repair starts without an owner link even where writes need one (the owner's standing repair rule), and config loading says so once", async () => {
+  // Given
+  const file = join(root, "both.json");
+  writeFileSync(file, JSON.stringify({ backlog: { pairRepairPattern: "^도리야, 수리 요청", writeNeedsOwnerLink: true } }));
+  const warned: string[] = [];
+  const settings = { ...SETTINGS, pairRepairPattern: "^도리야, 수리 요청", writeNeedsOwnerLink: true };
+  const inbox: InboxRow[] = [{ id: "2000", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  const intake = () => pairIntake({ stateDir: state, settings, rows: () => inbox, pairBots: ["B1"], guild: "1", now: () => now });
+  // When
+  await loadConfig(file, root, (line) => warned.push(line));
+  await intake();
+  inbox.push({ id: "2001", scope: "pair-bot", author_id: "B1", channel_id: "3", content: "도리야, 수리 요청: 감시가 멈췄어" });
+  await intake();
+  // Then
+  expect(warned.filter((w) => w.startsWith("CONFIG_BACKLOG_REPAIR_EXEMPT")).length).toBe(1);
+  expect(readItem(state, "pair-2001")?.ask).toBeUndefined();
+});
+
+// SooDori's repair pattern (its config): a relay head and the old name in brackets may come first; plain chatter does not match
+const SOODORI_REPAIR = "^(?:\\[.*?\\]\\s*)?(?:수돌|고돌)(?:\\([^)]*\\))?\\s*[,，]\\s*수리\\s*요청";
+const pairPass = (list: InboxRow[], settings: Partial<BacklogSettings> = {}) => pairIntake({ stateDir: state, settings: { ...SETTINGS, pairRepairPattern: SOODORI_REPAIR, ...settings }, rows: () => list, pairBots: ["B1"], guild: "G", now: () => now });
+
+test("a #dori-pair post written between the first pass's start and its commit is the next pass's", async () => {
+  // Given: the first pass reads the inbox and sets its start; a repair post lands before it commits
+  const pairFile = async () => {
+    const inbox = inboxReader(state, inboxFile());
+    const lines = await pairIntake({ stateDir: state, settings: { ...SETTINGS, pairRepairPattern: SOODORI_REPAIR }, rows: inbox.rows, pairBots: ["B1"], guild: "G", now: () => now });
+    return { lines, commit: inbox.commit };
+  };
+  writeFileSync(inboxFile(), `${JSON.stringify({ id: "8000", scope: "pair-bot", author_id: "B1", content: "옛 글" })}\n`);
+  const first = await pairFile();
+  appendFileSync(inboxFile(), `${JSON.stringify({ id: "8001", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 사이에 온 글" })}\n`);
+  first.commit();
+  // When
+  const next = await pairFile();
+  next.commit();
+  // Then
+  expect(first.lines).toEqual(["BACKLOG_INTAKE_FROM 8000: #dori-pair posts after this one are read"]);
+  expect(next.lines.map((l) => l.split(" ").slice(0, 3).join(" "))).toEqual(["BACKLOG_INTAKE pair-8001 (repair)"]);
+});
+
+test("a #dori-pair repair post the backlog has not read is taken behind more than 2 MB of other inbox rows, and read once", async () => {
+  // Given: the start is set; then a repair post comes in, and 3 MB of other rows after it before the next pass
+  const pairFile = async () => {
+    const inbox = inboxReader(state, inboxFile());
+    const lines = await pairIntake({ stateDir: state, settings: { ...SETTINGS, pairRepairPattern: SOODORI_REPAIR }, rows: inbox.rows, pairBots: ["B1"], guild: "G", now: () => now });
+    inbox.commit();
+    return lines;
+  };
+  writeFileSync(inboxFile(), `${JSON.stringify({ id: "7000", scope: "pair-bot", author_id: "B1", content: "옛 글" })}\n`);
+  await pairFile();
+  appendFileSync(inboxFile(), `${JSON.stringify({ id: "7001", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 감시가 멈췄어" })}\n`);
+  appendFileSync(inboxFile(), otherRows(3 * 1024 * 1024));
+  // When
+  const lines = await pairFile();
+  const again = await pairFile();
+  // Then
+  expect(lines.map((l) => l.split(" ").slice(0, 3).join(" "))).toEqual(["BACKLOG_INTAKE pair-7001 (repair)"]);
+  expect(again).toEqual([]);
+});
+
+
+test("SooDori takes the other Doris' '수돌, 수리 요청' posts, with a relay head or its old name too, and leaves their other words to its lead", async () => {
+  // Given
+  const list: InboxRow[] = [{ id: "3000", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  await pairPass(list);
+  list.push(
+    { id: "3001", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 유돌 감시가 멈췄어" },
+    { id: "3002", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "[도리 대리 · 소유자 요청 https://discord.com/channels/1/2/3] 수돌(고돌), 수리 요청: 파일 배달이 안 돼" },
+    { id: "3003", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 이름 바뀐 거 확인했어" },
+    { id: "3004", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "공돌, 수리 요청: 남의 일" },
+  );
+  // When
+  const lines = await pairPass(list);
+  // Then
+  expect(lines.map((l) => l.split(" ").slice(0, 3).join(" "))).toEqual(["BACKLOG_INTAKE pair-3001 (repair)", "BACKLOG_INTAKE pair-3002 (repair)"]);
+  expect(readItem(state, "pair-3003")).toBeUndefined();
+  expect(readItem(state, "pair-3004")).toBeUndefined();
+  expect(readItem(state, "pair-3001")).toMatchObject({ by: "pair:B1", row: "3001", priority: 5 });
+});
+
+test("a repair's launch copy carries the four fields, and a repair that cannot start waits on the list, never handed back to the lead", async () => {
+  // Given
+  const list: InboxRow[] = [{ id: "4000", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  await pairPass(list);
+  list.push({ id: "4001", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 감시가 멈췄어" }, { id: "4002", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 알림이 안 와" });
+  await pairPass(list);
+  // When: one starts, the host is then busy for the other for an hour
+  await backlogTick(deps(), { force: true });
+  now = T0 + 60 * 60_000;
+  await backlogTick(deps({ busy: async () => ["load"] }), { force: true });
+  // Then
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
+  const gaps = briefGaps({ key: laneKeyOf("pair-4001") }, sentBrief("pair-4001"), ledger, "", { "eight-steps": await eightSteps(), "ui-steps": await uiSteps() }).map((g) => g.id);
+  expect(launched).toEqual(["pair-4001"]);
+  expect(gaps).not.toContain("four-fields");
+  expect(readItem(state, "pair-4002")?.status).toBe("open");
+  expect(rows.filter((r) => r.kind === "backlog-held")).toEqual([]);
+});
+
+test("a #dori-pair post is taken once by its id from a start that never moves: one reaching the inbox after a later one is not lost", async () => {
+  // Given: the start is set at 6000, then post 6002 is taken
+  const list: InboxRow[] = [{ id: "6000", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  await pairPass(list);
+  list.push({ id: "6002", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 두 번째" });
+  await pairPass(list);
+  // When: post 6001 (earlier id) arrives late; then two passes
+  list.push({ id: "6001", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 첫 번째" });
+  const late = await pairPass(list);
+  const again = await pairPass(list);
+  // Then
+  expect(late.map((l) => l.split(":")[0])).toEqual(["BACKLOG_INTAKE pair-6001 (repair) from B1"]);
+  expect(again).toEqual([]);
+  expect(readItem(state, "pair-6000")).toBeUndefined();
+});
+
+// the openings of the six repair requests the other Doris really posted in #dori-pair (2026-10-30..11-02, addressed then to
+// ZzangDori), now addressed to SooDori; a relay head with a link inside its brackets, as relayed posts have it
+const REAL_REPAIRS: readonly string[] = ["수돌, 수리 요청 + 형 지시 전달(형 원문","수돌, 수리 요청: node-read mai","수돌, 수리 요청: 옥돌 카톡 2.40.0 ","수돌, 수리 요청: 형 아이폰 단축어 웹훅(","수돌, 수리 요청: 드라이브 PARA 단계 ","수돌, 수리 요청(형 지침: 도리 기반 문제"];
+const RELAY_HEAD = "[도리 대리 · 소유자 요청 [원본 코드 적용](<https://discord.com/channels/1/2/3>)] ";
+
+test("the Doris' real repair posts all match SooDori's pattern, behind a relay head with a link in it too; a handover and chatter do not", () => {
+  const re = new RegExp(SOODORI_REPAIR, "u");
+  expect(REAL_REPAIRS.map((p) => re.test(p))).toEqual(REAL_REPAIRS.map(() => true));
+  expect([re.test(`${RELAY_HEAD}수돌, 수리 요청: QA`), re.test(`${RELAY_HEAD}고돌(수돌), 수리 요청: QA`)]).toEqual([true, true]);
+  expect([re.test(`${RELAY_HEAD}고돌, 할 일 목록 루프 2단계 맡아 줘`), re.test("이제부터 도리 기반 고장 수리 요청은 짱돌 말고 고돌에게 여기서 해 줘"), re.test("짱돌, 수리 요청: 옛 이름"), re.test("수돌, 고마워")]).toEqual([false, false, false, false]);
+});
+
+test("a reply to a #dori-pair repair post is not taken: one BACKLOG_INTAKE_SKIPPED reply line, kept once, never a lane of its own", async () => {
+  // Given: repair 5001 waits; repair 5002 runs
+  const list: InboxRow[] = [{ id: "5000", scope: "pair-bot", author_id: "B1", content: "옛 글" }];
+  await pairPass(list);
+  list.push({ id: "5001", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 배달 하위 폴더가 지워져" }, { id: "5002", scope: "pair-bot", author_id: "B1", channel_id: "P", content: "수돌, 수리 요청: 감시가 멈췄어" });
+  await pairPass(list);
+  // When: a repair post replies to each (one before its parent reaches the list too), then two intakes and a pass
+  list.push({ id: "5004", scope: "pair-bot", author_id: "B1", channel_id: "P", reply_to: "5002", content: "수돌, 수리 요청: 지금도 멈춰 있어" }, { id: "5003", scope: "pair-bot", author_id: "B1", channel_id: "P", reply_to: "5001", content: "수돌, 수리 요청: 나도 같은 일 겪었어" }, { id: "5006", scope: "pair-bot", author_id: "B1", channel_id: "P", reply_to: "5005", content: "수돌, 수리 요청: 부모보다 먼저 온 답글" });
+  const lines = await pairPass(list);
+  const again = await pairPass(list);
+  const pass = await backlogTick(deps({}, { maxStarts: 3 }), { force: true });
+  // Then
+  expect(lines.map((l) => l.split(":")[0])).toEqual(["BACKLOG_INTAKE_SKIPPED reply 5004", "BACKLOG_INTAKE_SKIPPED reply 5003", "BACKLOG_INTAKE_SKIPPED reply 5006"]);
+  expect(again).toEqual([]);
+  expect(readItem(state, "pair-5003")).toMatchObject({ status: "dropped", row: "5003" });
+  expect(readFileSync(readItem(state, "pair-5001")!.brief, "utf8")).not.toContain("나도 같은 일 겪었어");
+  expect(launched.sort()).toEqual(["pair-5001", "pair-5002"]);
+  expect(pass).not.toContain("pair-5003");
+  expect(rows.filter((r) => r.kind === "backlog-held")).toEqual([]);
+});
+
