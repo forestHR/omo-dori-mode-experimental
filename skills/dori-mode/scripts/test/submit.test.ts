@@ -170,6 +170,21 @@ test("a text the Enters did not submit is cleared from a box that was empty befo
   expect(pane.inBox()).toBe("");
 });
 
+test("a four-line text is cleared the way omo's ctrl+u works: one press empties a line, the next joins the line above", async () => {
+  const lines: string[] = [""];
+  let clears = 0;
+  const keys: PaneKeys = {
+    type: async (text) => { const [first = "", ...rest] = text.split("\n"); lines[lines.length - 1] += first; lines.push(...rest); return undefined; },
+    enter: async () => {},
+    read: async () => box(...lines.map((l, i) => (i === 0 ? `❯ ${l}` : `  ${l}`))),
+    clear: async () => { clears++; if (lines.at(-1)) lines[lines.length - 1] = ""; else if (lines.length > 1) lines.pop(); },
+  };
+  const r = await submitText(keys, fakeClock(0), "[REPORT] demo | milestone | one\ntwo\nthree\nfour");
+  expect(r.reason).toEndWith("; cleared from the box");
+  expect(lines).toEqual([""]);
+  expect(clears).toBe(7);
+});
+
 test("a box that already held other text is not cleared, so text that is not ours stays", async () => {
   const pane = strandingPane("owner draft ");
   const r = await submitText(pane.keys, fakeClock(0), "[REPORT] demo | milestone | done");

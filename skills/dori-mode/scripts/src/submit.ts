@@ -90,7 +90,8 @@ export const turnRunning = (screen: string): boolean => {
 const clearOwn = async (keys: PaneKeys, clock: Clock, timing: SubmitTiming, text: string, emptyBefore: boolean): Promise<string> => {
   if (!keys.clear) return "left in the box";
   if (!emptyBefore) return "left in the box: it held other text before this one";
-  for (let i = 0; i < text.split("\n").length + 2; i++) {
+  // a line takes one press to empty and one more to join the line above: 2 per line, and 2 spare
+  for (let i = 0; i < 2 * text.split("\n").length + 2; i++) {
     await keys.clear();
     await clock.sleep(timing.pollMs);
     if (!editorText(await keys.read())) return "cleared from the box";
