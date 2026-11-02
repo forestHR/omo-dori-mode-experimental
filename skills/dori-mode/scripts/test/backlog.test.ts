@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, feedItemId, DRAFT_ONLY_RULE, APPROVED_RULE, READ_ONLY_RULE, laneKeyOf, writeLimit, type FeedTodo, flockDir, followUpId, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
-import { asStartFailure, LaunchError, LaunchFailed, validateLaunch } from "../src/launch.ts";
+import { asStartFailure, LaunchError, LaunchFailed, launchLane, validateLaunch } from "../src/launch.ts";
+import { depsFor, fakeClock, fakeRunner, newWorld } from "./fakes.ts";
 
 const SETTINGS: BacklogSettings = { enabled: true, everyMin: 60, maxLanes: 3, maxStarts: 1, hostMaxLanes: 2, hostDir: "", pairRepairPattern: "", pairRequestPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, orderKinds: [], feedCommand: [], dayReportAt: "", timeZone: "UTC" };
 const T0 = Date.parse("2026-11-02T15:00:00Z");
@@ -405,7 +406,7 @@ test("an approved follow-up has its own Done line, is dropped when the source fi
   const entry = (status: string, approved: boolean) => ({ todo_id: ref, title: "긴 할 일", status, ...(approved ? { approved_at: "2026-11-02T15:00:00Z", auto_applied: false } : {}) });
   const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
   await sweep([entry("진행", false)]);
-  writeFileSync(join(state, "backlog", "items", `${draftId}.json`), JSON.stringify({ ...readItem(state, draftId)!, status: "done" }));
+  writeFileSync(join(state, "backlog", "items", `${draftId}.json`), JSON.stringify({ ...readItem(state, draftId)!, status: "done", ranAs: "draft" }));
   // When
   const approved = await sweep([entry("진행", true)]);
   const follow = readItem(state, followUpId(draftId));
@@ -465,7 +466,7 @@ test("a follow-up the lead replaces (the fix of a held one) still belongs to its
   const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
   const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
   await sweep([{ todo_id: "pb-dddddddddddd-1", title: "d", status: "진행" }]);
-  writeFileSync(join(state, "backlog", "items", "todo-pb-dddddddddddd-1.json"), JSON.stringify({ ...readItem(state, "todo-pb-dddddddddddd-1")!, status: "done" }));
+  writeFileSync(join(state, "backlog", "items", "todo-pb-dddddddddddd-1.json"), JSON.stringify({ ...readItem(state, "todo-pb-dddddddddddd-1")!, status: "done", ranAs: "draft" }));
   await sweep([{ todo_id: "pb-dddddddddddd-1", title: "d", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
   // When: the lead replaces it, then the source finishes
   addItem(state, { id: "appr-pb-dddddddddddd-1", title: "d (고침)", brief, done: "file /tmp/x" }, { registered: false, at: "2026-11-02T16:00:00Z" });
@@ -612,7 +613,7 @@ test("dori launch refuses a bl- key unless the backlog starts it", async () => {
 test("an entry the owner approves after its draft lane finished gets one approved follow-up", async () => {
   // Given: a draft whose lane finished
   await feedSweep([{ todo_id: "pb-bbbbbbbbbbbb-1", title: "b", status: "진행" }]);
-  writeFileSync(join(state, "backlog", "items", "todo-pb-bbbbbbbbbbbb-1.json"), JSON.stringify({ ...readItem(state, "todo-pb-bbbbbbbbbbbb-1")!, status: "done" }));
+  writeFileSync(join(state, "backlog", "items", "todo-pb-bbbbbbbbbbbb-1.json"), JSON.stringify({ ...readItem(state, "todo-pb-bbbbbbbbbbbb-1")!, status: "done", ranAs: "draft" }));
   // When
   const lines = await feedSweep([{ todo_id: "pb-bbbbbbbbbbbb-1", title: "b", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
   const again = await feedSweep([{ todo_id: "pb-bbbbbbbbbbbb-1", title: "b", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
@@ -735,4 +736,50 @@ test("a backend failure of a launch is tried again; a refusal of the launch inpu
   const lines = await backlogTick(d);
   // Then
   expect(lines).toEqual(["BACKLOG_START_FAILED op1 (1/2): aoe add failed: exit 1", "BACKLOG_HELD bad1: dori launch refused it: Done line is not checkable: x"]);
+});
+
+test("an approval seen while the draft ran, then a content change: the follow-up asks again instead of taking the old card", async () => {
+  // Given: draft A runs; the owner's card for A arrives while it runs; the content changes to B; the draft finishes
+  const entry = (title: string, approved: boolean) => ({ todo_id: "pb-454545454545-1", title, status: "진행", ...(approved ? { approved_at: "2026-11-02T15:00:00Z", auto_applied: false } : {}) });
+  await feedSweep([entry("A", false)]);
+  await backlogTick(deps(), { force: true });
+  await feedSweep([entry("A", true)]);
+  await feedSweep([entry("B", true)]);
+  lanes = [lane(laneKeyOf("todo-pb-454545454545-1"), true)];
+  await backlogTick(deps(), { force: true });
+  // When
+  const lines = await feedSweep([entry("B", true)]);
+  const follow = readItem(state, "appr-pb-454545454545-1")!;
+  // Then
+  expect(readItem(state, "todo-pb-454545454545-1")?.ranAs).toBe("draft");
+  expect(lines).toEqual(["BACKLOG_INTAKE appr-pb-454545454545-1 (feed, asks again: approved content changed, after draft todo-pb-454545454545-1): B"]);
+  expect([writeLimit(follow), follow.approvalAsk?.hash === follow.feedHash]).toEqual(["draft", true]);
+});
+
+test("a launch whose session failed after it opened the work thread is tried again in that same thread (real launchLane)", async () => {
+  // Given: the real launch with fakes: the first aoe add fails, the second works; threads opened are counted
+  const world = newWorld();
+  const base = depsFor(world, fakeClock(T0), join(root, "launch-state"), { backend: "aoe", leadPane: "aoe_Dori_0a1b2c3d", watchLog: join(root, "watch.log") });
+  let adds = 0;
+  const opened: string[] = [];
+  const run: typeof base.run = async (argv, o) => (argv[0] === "aoe" && argv[1] === "add" && adds++ === 0 ? { code: 1, out: "", err: "aoe: tmux server busy" } : fakeRunner(world)(argv, o));
+  const ld = { ...base, run, openThread: async (title: string) => (opened.push(title), `discord:10000000000000010${opened.length}`) };
+  add("thr1");
+  const d = deps({ launch: async (item, b, key) => {
+    const r = await launchLane(ld, { key, backlog: true, title: item.title, brief: b, done: item.done, thread: item.thread, noThread: item.noThread, cwd: item.cwd }).catch((e: unknown) => {
+      throw asStartFailure(e);
+    });
+    lanes.push(lane(key));
+    return { pane: r.lane.pane ?? "?", startup: r.startup };
+  } });
+  // When
+  const first = await backlogTick(d);
+  const afterFirst = readItem(state, "thr1")!;
+  const second = await backlogTick(d, { force: true });
+  // Then
+  expect(first[0]).toStartWith("BACKLOG_START_FAILED thr1 (1/2):");
+  expect(afterFirst.thread).toBe("discord:100000000000000101");
+  expect(second[0]).toStartWith("BACKLOG_STARTED thr1");
+  expect(opened.length).toBe(1);
+  expect((await ld.registry.read("bl-thr1"))?.thread).toBe("discord:100000000000000101");
 });

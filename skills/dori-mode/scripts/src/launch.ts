@@ -48,7 +48,12 @@ export type LaunchInput = {
 export class LaunchError extends Error {}
 // The session could not be opened (the terminal backend failed): worth another try, unlike every other LaunchError, which
 // the launch input itself causes and which no retry changes.
-export class LaunchFailed extends LaunchError {}
+export class LaunchFailed extends LaunchError {
+  // the work thread this launch had already opened (--thread new): the next try continues there instead of opening another
+  constructor(message: string, readonly thread?: string) {
+    super(message);
+  }
+}
 
 /** A launch error as the backlog pass sees it: a refusal holds the item at once, an operational failure is tried again. */
 export const asStartFailure = (e: unknown): unknown => (e instanceof LaunchError && !(e instanceof LaunchFailed) ? new StartRefused(e.message) : e);
@@ -454,8 +459,10 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   }
   if (missing.length) throw new DirectiveMissingError(missing);
   // opened only once nothing else can stop the launch, so a refused launch leaves no empty thread behind
+  let openedThread: string | undefined;
   if (input.thread === NEW_THREAD && deps.openThread) {
     const ref = await deps.openThread(input.title);
+    openedThread = ref;
     const line = `THREAD_OPENED ${input.key} ${ref}: the lane's work thread, new in this Dori's channel (--thread ${NEW_THREAD})`;
     warn(line);
     watchLog(deps.config.watchLog, deps.clock, { source: "launch", line });
@@ -463,7 +470,9 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   }
   await Bun.write(input.brief, text);
   const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane; report as the brief's footer says.`;
-  const opened = deps.config.backend === "aoe" ? await openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : await openHerdr(deps, input.key, cwd, model, prompt);
+  const opened = await (deps.config.backend === "aoe" ? openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : openHerdr(deps, input.key, cwd, model, prompt)).catch((e: unknown) => {
+    throw e instanceof LaunchFailed && openedThread ? new LaunchFailed(e.message, openedThread) : e;
+  });
   const lane: Lane = { ...draft, pane: opened.pane, ...(opened.tab ? { tab: opened.tab } : {}) };
   await deps.registry.write(lane);
   // registered first, so the queue counts this lane as working in the thread; a thread --thread new just opened is 🔄 already

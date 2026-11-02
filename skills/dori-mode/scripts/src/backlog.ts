@@ -54,8 +54,9 @@ export type BacklogItem = {
   readonly askHash?: string;
   // the last question id given out for this item (q1, q2, ...): every new or re-asked question takes the next one
   readonly questionSeq?: number;
-  // the lane key of its last start (bl-<id>)
+  // the lane key of its last start (bl-<id>), and the write limit that start ran with
   readonly lane?: string;
+  readonly ranAs?: "none" | "draft" | "approved";
   // what to ask the owner before it may start; cleared by decide
   readonly ask?: string;
   readonly askedAt?: string;
@@ -556,10 +557,13 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     const hash = hashOf(snapshot);
     const title = String(todo.title ?? ref).slice(0, 60);
     const children = listItems(d.stateDir).filter((i) => i.followUpOf === id);
-    // open items of this entry follow its content; an approval given for other content is void and the owner is asked again
-    for (const item of [old, ...children].filter((i): i is BacklogItem => i?.status === "open")) {
+    // every item of this entry, running or done too, records the content and the card it saw, so an approval is always bound
+    // to the content of the moment it was seen; an open one whose approval or question is about older content is asked again
+    for (const item of [old, ...children].filter((i): i is BacklogItem => i !== undefined && i.status !== "dropped")) {
       let next: BacklogItem = item.feedHash === hash ? item : { ...item, feedSnapshot: snapshot, feedHash: hash };
-      if (item.feedHash !== undefined && item.feedHash !== hash && (item.approval || item.approvalAsk || item.ask)) {
+      if (item.status !== "open") {
+        if (card && !next.approval) next = { ...next, approval: { at, hash, by: "card" } };
+      } else if (item.feedHash !== undefined && item.feedHash !== hash && (item.approval || item.approvalAsk || item.ask)) {
         // the content changed, however many times: every approval and open question of the old content is void, and each
         // question is asked again under a new id about this content (told to the lead again)
         const { approval: hadApproval, approvalAsk: hadAsk, ...rest } = next;
@@ -581,8 +585,11 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
       }
       if (next !== item) save(d.stateDir, logged(next, at, next.feedHash !== item.feedHash ? "content changed on the source" : "approval changed"));
     }
-    // approved after its draft lane already ran: one approved follow-up that starts from that lane's report
-    const followUp = card && old?.status === "done" && old.approval === undefined ? followUpId(id) : undefined;
+    // approved after its draft lane already ran: one follow-up that starts from that lane's report, approved only when the
+    // approval it rests on was given for the content as it is now, else asking the owner about this content first
+    const afterDraft = old ? (readItem(d.stateDir, old.id) ?? old) : undefined;
+    const followUp = card && afterDraft?.status === "done" && afterDraft.ranAs === "draft" ? followUpId(id) : undefined;
+    const followApproved = followUp !== undefined && afterDraft?.approval?.hash === hash;
     const taken = followUp ? readItem(d.stateDir, followUp) : undefined;
     if (taken && taken.followUpOf !== id) {
       lines.push(`BACKLOG_FEED_CLASH ${followUp}: an item not made for ${id} has this id; the approved work of ${id} is not queued`);
@@ -592,8 +599,16 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     const itemId = followUp ?? id;
     const brief = join(dir(d.stateDir), "intake", `${itemId}.md`);
     writeAtomic(brief, feedBrief(todo, itemId) + (followUp ? `\n[앞 단계] 승인 전 초안 레인 ${id}이 이미 끝났다. 그 보고서(${old?.done ?? "?"})의 초안을 먼저 읽고 이어서 한다.\n` : ""));
-    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: card ? "4" : "6", by: "feed", source: ref, feedSnapshot: snapshot, feedHash: hash, ...(card ? { approval: { at, hash, by: "card" as const } } : {}), ...(followUp ? { followUpOf: id } : {}), noThread: "대시보드에서 온 할 일(진행은 대시보드에서 봄)" }, { registered: false, at });
-    lines.push(`BACKLOG_INTAKE ${itemId} (feed, ${card ? "owner-approved" : "draft only"}${followUp ? `, after draft ${id}` : ""}): ${title}`);
+    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: card ? "4" : "6", by: "feed", source: ref, feedSnapshot: snapshot, feedHash: hash, ...(card && (!followUp || followApproved) ? { approval: { at, hash, by: "card" as const } } : {}), ...(followUp ? { followUpOf: id } : {}), noThread: "대시보드에서 온 할 일(진행은 대시보드에서 봄)" }, { registered: false, at });
+    if (followUp && !followApproved) {
+      // the card was given for content that has changed since: the follow-up asks him about the content as it is now
+      const made = readItem(d.stateDir, itemId);
+      if (made) {
+        const q = nextQuestion(made);
+        save(d.stateDir, logged({ ...q.item, approvalAsk: { id: q.id, hash } }, at, "approval was for other content: asking again"));
+      }
+    }
+    lines.push(`BACKLOG_INTAKE ${itemId} (feed, ${card && (!followUp || followApproved) ? "owner-approved" : followUp ? "asks again: approved content changed" : "draft only"}${followUp ? `, after draft ${id}` : ""}): ${title}`);
   }
   return lines;
 };
@@ -764,10 +779,10 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
       const rules = launchRules(item);
       if (rules) appendFileSync(copy, `\n\n${rules}\n`);
       const key = laneKeyOf(item.id);
-      save(d.stateDir, logged(item, at, "starting", { status: "running", pane: "starting", lane: key }));
+      save(d.stateDir, logged(item, at, "starting", { status: "running", pane: "starting", lane: key, ranAs: writeLimit(item) }));
       try {
         const r = await d.launch(item, copy, key);
-        save(d.stateDir, logged(item, at, `started: ${r.startup}`, { status: "running", pane: r.pane, lane: key }));
+        save(d.stateDir, logged(item, at, `started: ${r.startup}`, { status: "running", pane: r.pane, lane: key, ranAs: writeLimit(item) }));
         d.inbox("backlog-start", `backlog-start-${item.id}-${at}`, `BACKLOG_STARTED ${item.id} (${item.title}, p${item.priority}) in ${r.pane}: ${r.startup}`);
         lines.push(`BACKLOG_STARTED ${item.id} p${item.priority} ${r.pane}: ${r.startup}`);
       } catch (e) {
@@ -777,7 +792,7 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
         // attempt's own launch copy
         const lane = e instanceof StartRefused ? undefined : (await d.lanes()).find((l) => l.key === key);
         if (lane && isOpenLane(lane) && resolve(lane.brief) === resolve(copy)) {
-          save(d.stateDir, logged(item, at, `started with an error: ${why}`, { status: "running", pane: lane.pane ?? "?", lane: key }));
+          save(d.stateDir, logged(item, at, `started with an error: ${why}`, { status: "running", pane: lane.pane ?? "?", lane: key, ranAs: writeLimit(item) }));
           d.inbox("backlog-start", `backlog-start-${item.id}-${at}`, `BACKLOG_STARTED ${item.id} (${item.title}) in ${lane.pane ?? "?"} with an error: ${why}`);
           lines.push(`BACKLOG_STARTED ${item.id} p${item.priority} ${lane.pane ?? "?"} with an error: ${why}`);
           continue;
@@ -785,7 +800,10 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
         rmSync(slotFile(d.host, item.id), { force: true });
         const failures = (item.startFailures ?? 0) + 1;
         const heldWhy = e instanceof StartRefused ? `dori launch refused it: ${why}` : failures >= MAX_FAILED_STARTS ? `start failed ${failures} times, last: ${why}` : undefined;
-        save(d.stateDir, logged(item, at, `start failed: ${why}`, { status: "open", pane: undefined, startFailures: failures, ...(heldWhy ? { held: heldWhy } : {}) }));
+        // a launch that opened its work thread before the session failed: the next try continues in that thread
+        const opened = (e as { thread?: unknown }).thread;
+        const keep = typeof opened === "string" ? { thread: opened, whyNew: undefined } : {};
+        save(d.stateDir, logged(item, at, `start failed: ${why}`, { status: "open", pane: undefined, startFailures: failures, ...keep, ...(heldWhy ? { held: heldWhy } : {}) }));
         if (heldWhy) d.inbox("backlog-held", `backlog-held-${item.id}-${at}`, `BACKLOG_HELD ${item.id} (${item.title}): ${heldWhy} -> fix it with dori backlog add ${item.id} ... (replaces it), or dori backlog drop ${item.id}`);
         lines.push(heldWhy ? `BACKLOG_HELD ${item.id}: ${heldWhy}` : `BACKLOG_START_FAILED ${item.id} (${failures}/${MAX_FAILED_STARTS}): ${why}`);
       }
