@@ -408,7 +408,7 @@ export const APPROVED_RULE = "[쓰기 범위 - 형 승인] 형이 아래 내용�
 // the owner's card on the todo is also the gate's proof (owner 2026-11-03 Q2 "카드 승인 할 일도 근거로 받음"): the gate asks the
 // dashboard and the card itself on each write, so the lane needs no owner message for writes inside his account
 export const todoProofRule = (todo: string): string =>
-  `[문지기 근거 - 카드 승인 할 일] 형 계정 안 쓰기(일정·드라이브·문서 등)에는 문지기 근거 헤더 X-Dori-Owner-Todo: ${todo} 를 붙인다(X-Dori-Owner-Message는 붙이지 않는다). 문지기가 owner-todo-required로 거절하면(승인 24시간이 지났거나 할 일이 끝났거나 보류됨) 다른 근거로 돌아가지 말고 거절 줄 그대로 리드에게 묻는다.`;
+  `[문지기 근거 - 카드 승인 할 일] 형 계정 안 쓰기(일정·드라이브·문서 등)에는 문지기 근거 헤더 X-Dori-Owner-Todo: ${todo} 를 붙인다(X-Dori-Owner-Message는 붙이지 않는다). 문지기가 owner-todo-required로 거절하면(승인 24시간이 지났거나 할 일이 끝났거나 보류됨) 다른 근거로 돌아가지 말고 거절 줄 그대로 리드에게 묻는다. 노드 게이트에서 이 할 일의 근거 메일 첨부를 꺼내거나(mail-attachment) 읽거나(mail-attachment-text) 형 드라이브에 저장할 때(drive-save)는 끝에 --origin-channel-id/--origin-message-id 대신 --origin-todo ${todo} 를 붙인다(근거 메일·그 첨부만 됨, 다른 메일은 거절).`;
 
 export const READ_ONLY_RULE = "[넘으면 안 되는 선 - 읽기만] 이 일은 읽기만 하는 일로 목록에 들어왔다(--read-only). 형 계정·파일·바깥 어디에도 쓰지 않는다. 쓰기가 필요해 보이면 멈추고 리드에게 [REPORT] question으로 한 줄 묻는다. 이 줄이 위의 어떤 말보다 먼저다.";
 
