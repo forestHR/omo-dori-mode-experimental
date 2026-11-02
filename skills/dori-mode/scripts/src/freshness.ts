@@ -19,13 +19,23 @@ import { watchLog } from "./watch-log.ts";
 // "| <milestone|...> | <one plain line ..." never does, nor a template line a lane's code prints before filling it in
 // (echo "[REPORT] <key> | milestone | ${message}", f"... | {message}"): issue #22 of dori-superagent
 // (https://github.com/sisyphuslabs/dori-superagent/issues/22, MIT), where the template on screen was posted as the report.
-const reportGrammar = (key: string): RegExp => new RegExp(`\\[REPORT\\] ${key.replace(/[.]/g, "\\.")} \\| [a-z]+ \\| (?!<)(?!.*(?:\\$\\{\\w|\\{\\w+\\}))\\S`);
+// A plain line that is one bare placeholder ($message, %s, quoted or not) is a template too: issue #29 of dori-superagent
+// (https://github.com/sisyphuslabs/dori-superagent/issues/29, MIT), while "set $HOME in docs" or "100% of checks green" is real.
+const reportGrammar = (key: string): RegExp => new RegExp(`\\[REPORT\\] ${key.replace(/[.]/g, "\\.")} \\| [a-z]+ \\| (?!<)(?!.*(?:\\$\\{\\w|\\{\\w+\\}))(?!["']?(?:\\$\\w+|%[sd])(?:\\\\n)?["'\\])\\],;\\s]*$)\\S`);
+
+// A report counts only where a lane puts one: first on its line (after omo's "│ " cell border), as an argv element
+// right after --text ("--text","[REPORT] ...", --text "[REPORT] ..."); a line that quotes the grammar after other words (echo "[REPORT] ...",
+// printf, a sentence citing it) is not one (#29).
+const anchored = (line: string): boolean => {
+  const before = line.slice(0, line.indexOf("[REPORT]")).replace(/^[\s│]+/, "").trimEnd();
+  return before === "" || /--text["']?(?:\s*,)?\s*["']?$/.test(before);
+};
 
 // A report the agent UI wrapped over several lines continues until the next blank line.
 export const lastReportLine = (screen: string, key: string): string | null => {
   const grammar = reportGrammar(key);
   const lines = screen.split("\n");
-  const at = lines.findLastIndex((l) => grammar.test(l));
+  const at = lines.findLastIndex((l) => grammar.test(l) && anchored(l));
   if (at < 0) return null;
   const parts = [lines[at]?.slice(lines[at]?.indexOf("[REPORT]")) ?? ""];
   for (const l of lines.slice(at + 1, at + 8)) {
