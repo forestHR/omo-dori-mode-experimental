@@ -83,6 +83,10 @@ export type InboxMessage = {
   readonly open_cards?: readonly string[];
   readonly note?: string;
   readonly link?: string;
+  // the owner's message: the directive ledger's entries it is about, one line each (tag and text), so the lead reads them
+  // with the message even when no lane brief carries them; directives_error when the ledger could not be read
+  readonly directives?: readonly string[];
+  readonly directives_error?: string;
 };
 
 export type InboxAnswer = {
@@ -127,6 +131,8 @@ export type ListenerDeps = {
   readonly log: (line: string) => void;
   readonly fatal: (closeCode: number) => void;
   readonly transcribe?: (url: string, filename: string) => Promise<string>;
+  // the ledger lines an owner message is about (dori inbound discord: textDirectives, at most HINT_LIMIT); it may throw
+  readonly hints?: (text: string) => readonly string[];
 };
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 200);
@@ -292,6 +298,9 @@ export class DiscordListener {
     const audio = audioAttachment(m.attachments);
     if (audio && this.d.transcribe) transcript = await this.d.transcribe(audio.url, audio.filename).catch((e: unknown) => (this.d.log(`DISCORD_TRANSCRIBE_FAIL ${m.id} ${errText(e)}`), null));
     const open = scope === "thread" ? openCardIds(this.d.cards.store, m.channel_id) : [];
+    // the owner's own words only: another Dori's post, an alert or an unregistered webhook's recording is not his request
+    const said = (transcript ?? m.content ?? "").trim();
+    const hints = this.d.hints && said && scope !== "pair-bot" && scope !== "watch" && !unknownRecording ? this.hintsFor(m.id, said) : {};
     const note = open.length ? `card ${open.join(", ")} still open, owner replied in text: resolve it with dori resolve ${open[0]} --answer "<the answer, short>" so the card folds` : "";
     this.append({
       ts: m.timestamp,
@@ -308,11 +317,23 @@ export class DiscordListener {
       ...(open.length ? { open_cards: open, note } : {}),
       ...(scope === "mention" ? { note: MENTION_NOTE, link: `https://discord.com/channels/${this.d.guild}/${m.channel_id}/${m.id}` } : {}),
       ...(scope === "watch" ? { note: WATCH_NOTE, link: `https://discord.com/channels/${this.d.guild}/${m.channel_id}/${m.id}` } : {}),
+      ...hints,
     });
     if (newer(m.id, this.cursor)) this.cursor = m.id;
     this.d.log(`INBOUND discord-${scope} ${m.channel_id} ${m.id} ${viaWebhook ? `${this.d.owner} via=owner-webhook` : m.author.id} ${JSON.stringify((transcript ?? m.content).slice(0, 200))}`);
     if (open.length) this.d.log(`CARD_STILL_OPEN ${open.join(",")} thread=${m.channel_id} ${note}`);
     if (scope === "thread" && !this.d.shadow) await this.recheckThread(m.channel_id, open).catch((e: unknown) => this.d.log(`DISCORD_REOPEN_FAIL ${m.channel_id} ${errText(e)}`));
+  }
+
+  // a ledger that cannot be read never holds the message back: the row says so and the log has the line
+  private hintsFor(id: string, text: string): { directives?: readonly string[]; directives_error?: string } {
+    try {
+      const lines = this.d.hints?.(text) ?? [];
+      return lines.length ? { directives: lines } : {};
+    } catch (e) {
+      this.d.log(`DISCORD_DIRECTIVES_FAIL ${id} ${errText(e)}`);
+      return { directives_error: `${errText(e)}; read the ledger with dori directives` };
+    }
   }
 
   // the owner mentioned this Dori's bot or one of its roles (another Dori's bot or role is not this one)

@@ -452,6 +452,37 @@ export const coveredBy = (brief: string, e: Directive, ledger: Pick<Ledger, "ent
 };
 export const requireMissing = (brief: string, e: Directive): string[] => (e.require ?? []).filter((re) => !new RegExp(re, "m").test(leadText(brief)));
 
+// --- the owner's message and a thread the lead opens: the work the lead does without a lane brief ---
+
+// How many directives an owner message carries in the inbox row (dori inbound discord): the lead reads them in every
+// monitor event, so only the ones his message is about, never more than this.
+export const HINT_LIMIT = 5;
+
+// The directives a text (an owner message, a thread's title and first message) is about, as a brief of that text would
+// get them, except that one hit of a kind's words counts (a message is short; a brief needs minHits). all: the entries for
+// every lane too (a thread the lead opens gets what a lane's brief gets); without it only those its words call: a keyword,
+// a kind of work, UI work. Lead rules count (the lead is the one reading them); a require entry or a built-in block is a
+// brief's, not a text to read. An entry with a pointer comes as its pointer, once. Order: the host's own entries first,
+// then a keyword before a kind (the narrower match), then the ledger's order.
+export const textDirectives = (text: string, ledger: Ledger, opts: { readonly all?: boolean } = {}): { readonly e: Directive; readonly why: string }[] => {
+  const ctx = scopeContext(text, { ...ledger, minHits: 1 }, { repo: "" });
+  const out: { e: Directive; why: string; rank: number }[] = [];
+  for (const [i, e] of ledger.entries.entries()) {
+    if (e.mode === "require" || e.block || e.retired || (e.scope.all && !opts.all)) continue;
+    const why = appliesWhy(e, ctx);
+    if (!why) continue;
+    const shown = e.mode === "inject" ? (pointerOf(e, ledger) ?? e) : e;
+    if (out.some((x) => x.e.id === shown.id)) continue;
+    const rank = (shown.layer === "local" ? 0 : 4) + (why.startsWith("keyword ") ? 0 : why === "all lanes" ? 2 : 1);
+    out.push({ e: shown, why: shown === e ? why : `${why}, for ${e.id}`, rank: rank * 10_000 + i });
+  }
+  return out.sort((a, b) => a.rank - b.rank).map(({ e, why }) => ({ e, why }));
+};
+
+// One line per directive: its tag and the text a brief gets (his prompt, or the lead's rule), on one line.
+export const directiveLine = (e: Directive): string => squashLine(directiveText(e));
+const squashLine = (s: string): string => s.replace(/\s+/g, " ").trim();
+
 export type Waiver = { readonly id: string; readonly reason: string; readonly at: string };
 
 export type DirectivePlan = {

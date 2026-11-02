@@ -41,7 +41,7 @@ const fakeTimers = () => {
 let state: ReturnType<typeof withState>;
 afterEach(() => state?.done());
 
-const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?: string; transcribe?: (url: string) => Promise<string>; respond?: (req: HttpRequest) => HttpResponse | undefined; autoUnEye?: boolean; ownerWebhook?: string; pairChannel?: string; pairBots?: readonly string[]; watchChannels?: string[]; watchBots?: string[]; watchMatch?: RegExp; shadow?: boolean; mentionRoleIds?: string[]; gate?: (req: HttpRequest) => Promise<void> | undefined } = {}) => {
+const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?: string; transcribe?: (url: string) => Promise<string>; respond?: (req: HttpRequest) => HttpResponse | undefined; autoUnEye?: boolean; ownerWebhook?: string; pairChannel?: string; pairBots?: readonly string[]; watchChannels?: string[]; watchBots?: string[]; watchMatch?: RegExp; shadow?: boolean; mentionRoleIds?: string[]; gate?: (req: HttpRequest) => Promise<void> | undefined; hints?: (text: string) => readonly string[] } = {}) => {
   state = withState();
   const seen: HttpRequest[] = [];
   const http: Http = async (req) => {
@@ -69,7 +69,7 @@ const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?
   const t = fakeTimers();
   const logs: string[] = [];
   const fatal: number[] = [];
-  const deps: ListenerDeps = { dc, cards, open: () => gw.conn, token: "BOT", guild: GUILD, channel: CHANNEL, owner: OWNER, ...(opts.ownerWebhook !== undefined ? { ownerWebhook: opts.ownerWebhook } : {}), ...(opts.pairChannel ? { pairChannel: opts.pairChannel, pairBots: opts.pairBots ?? [] } : {}), ...(opts.watchChannels ? { watchChannels: opts.watchChannels, watchBots: opts.watchBots ?? [] } : {}), ...(opts.watchMatch ? { watchMatch: opts.watchMatch } : {}), ...(opts.shadow ? { shadow: true } : {}), words, inboxFile, timers: t.timers, now: () => Date.parse("2026-01-02T03:04:00Z"), log: (l) => logs.push(l), fatal: (c) => fatal.push(c), ...(opts.transcribe ? { transcribe: opts.transcribe } : {}) };
+  const deps: ListenerDeps = { dc, cards, open: () => gw.conn, token: "BOT", guild: GUILD, channel: CHANNEL, owner: OWNER, ...(opts.ownerWebhook !== undefined ? { ownerWebhook: opts.ownerWebhook } : {}), ...(opts.pairChannel ? { pairChannel: opts.pairChannel, pairBots: opts.pairBots ?? [] } : {}), ...(opts.watchChannels ? { watchChannels: opts.watchChannels, watchBots: opts.watchBots ?? [] } : {}), ...(opts.watchMatch ? { watchMatch: opts.watchMatch } : {}), ...(opts.shadow ? { shadow: true } : {}), words, inboxFile, timers: t.timers, now: () => Date.parse("2026-01-02T03:04:00Z"), log: (l) => logs.push(l), fatal: (c) => fatal.push(c), ...(opts.transcribe ? { transcribe: opts.transcribe } : {}), ...(opts.hints ? { hints: opts.hints } : {}) };
   const listener = new DiscordListener(deps);
   const inbox = () => (existsSync(inboxFile) ? readFileSync(inboxFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
   const calls = () => seen.map((r) => `${r.method} ${r.url.replace("https://discord.com/api/v10", "")}`);
@@ -192,6 +192,28 @@ test("an owner message in the channel gets the eyes reaction and an inbox row; o
   expect(calls()).toEqual([`PUT /channels/${CHANNEL}/messages/1001/reactions/%F0%9F%91%80/@me`]);
   expect(inbox()).toEqual([{ ts: "2026-01-02T03:00:00Z", id: "1001", channel_id: CHANNEL, scope: "channel", author_id: OWNER, content: "hello 1001", transcript: null, attachments: [], reply_to: null }]);
   expect(logs).toContain(`INBOUND discord-channel ${CHANNEL} 1001 ${OWNER} "hello 1001"`);
+});
+
+// 2026-11-02: an owner message reached MooDori's lead as a bare inbox line, with none of the directives it was about
+test("the owner's message carries the directives its words call; a pair-bot post does not; a ledger that cannot be read still writes the row", async () => {
+  let broken = false;
+  const hints = (text: string) => {
+    if (broken) throw new Error("ledger.json is not readable JSON");
+    return text.includes("카드") ? ["[형 지침 card-docs, 2026-10-19] 카드 미결재 항목이 올라오면 서류를 준비한다."] : [];
+  };
+  const { listener, inbox, logs } = setup(() => ({}), { pairChannel: "900000000000000009", pairBots: [OTHER_BOT], hints });
+  await listener.onMessage(msg("1001", { content: "그리고 카드처리해 서류 준비하고 있어" }));
+  await listener.onMessage(msg("1002", { content: "점심 먹자" }));
+  await listener.onMessage(msg("1003", { channel_id: "900000000000000009", author: { id: OTHER_BOT, bot: true }, content: "카드 건 넘겨" }));
+  broken = true;
+  await listener.onMessage(msg("1004", { content: "카드 다시" }));
+  expect(inbox().map((r) => [r.id, r.directives ?? null, r.directives_error ?? null])).toEqual([
+    ["1001", ["[형 지침 card-docs, 2026-10-19] 카드 미결재 항목이 올라오면 서류를 준비한다."], null],
+    ["1002", null, null],
+    ["1003", null, null],
+    ["1004", null, "ledger.json is not readable JSON; read the ledger with dori directives"],
+  ]);
+  expect(logs).toContain("DISCORD_DIRECTIVES_FAIL 1004 ledger.json is not readable JSON");
 });
 
 test("a message in a thread under the channel counts, one under another channel does not, and DMs count", async () => {

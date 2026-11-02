@@ -2,10 +2,10 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditSince, linkRows, meaningCachePath, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
+import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
-import { APPLIED_HEADING, briefGaps, COMMON_LEDGER, DirectiveError, directiveText, ledgerProblems, loadLedger, requireMissing, scopeContext, trimProblem } from "../src/directives.ts";
+import { APPLIED_HEADING, briefGaps, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, requireMissing, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
 import type { Runner } from "../src/run.ts";
 import { DirectiveMissingError, eightSteps, launchLane, renderBrief, uiSteps } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -525,4 +525,38 @@ test("a lane's brief is stored as an absolute path, and one stored relative (old
   } finally {
     process.chdir(here);
   }
+});
+
+// 2026-11-02: MooDori's lead got the owner's "그리고 카드처리해 서류 준비하고 있어" as a bare inbox line and answered as if he
+// prepared the papers; the 10-19 directive (MooDori prepares them) was in no brief because no lane was launched
+test("an owner message carries the directives its words call, the host's own first, never the ones for every lane; a thread gets those too", async () => {
+  const card = { id: "card-docs", name: "카드 서류 준비", by: "owner", basis: "fixture basis line", words: "카드 미결재 항목 올라올때 서류 준비해줘", prompt: "카드 미결재 항목이 올라오면 서류를 준비한다.", date: "2026-10-19", source: "https://discord.com/channels/1/2/6", scope: { keywords: ["카드|결재"] }, mode: "inject" };
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: await write("card.json", JSON.stringify({ entries: [card] })) } });
+  expect(ledgerProblems(ledger)).toEqual([]);
+  const said = textDirectives("그리고 카드처리해 서류 준비하고 있어", ledger);
+  expect(said.map(({ e, why }) => `${e.id} (${why})`)).toEqual(["card-docs (keyword 카드)", "request-thread (keyword 카드)"]);
+  expect(directiveLine(said[0]!.e)).toBe("[형 지침 card-docs, 2026-10-19] 카드 미결재 항목이 올라오면 서류를 준비한다.");
+  // a message that calls nothing gets nothing (not the every-lane entries), and a kind needs one hit in a message
+  expect(textDirectives("오늘 점심 뭐 먹지", ledger)).toEqual([]);
+  expect(textDirectives("이 PC에서 강화학습 돌려", ledger).map(({ e }) => e.id)).toEqual(["report-table", "gate-deferred", "approval-table", "redefined"]);
+  // a thread the lead opens gets what a lane would: the every-lane entries after the ones its words call; no block or require
+  const thread = textDirectives("Claude 10/29 카드 처리", ledger, { all: true }).map(({ e }) => e.id);
+  expect(thread.slice(0, 2)).toEqual(["card-docs", "request-thread"]);
+  expect(thread).toEqual(expect.arrayContaining(["docs-same-pr", "pair-route", "lane-thread"]));
+  expect(thread.filter((id) => ["eight-steps", "four-fields", "ui-steps"].includes(id))).toEqual([]);
+});
+
+test("directive-audit: a thread the lead opened without reading the ledger and no lane works in is DIRECTIVE_LEAD; a checked one, a lane's and an older one are not", () => {
+  const since = "2026-11-02T00:00:00.000Z";
+  // a snowflake made 2026-11-02T05:09:08Z (MooDori's card thread, opened from the owner's message) and one from October
+  const fresh = String((BigInt(Date.parse("2026-11-02T05:09:08Z")) - 1420070400000n) << 22n);
+  const old = String((BigInt(Date.parse("2026-10-20T00:00:00Z")) - 1420070400000n) << 22n);
+  const map = {
+    [fresh]: { session: null, title: "Claude 10/29 카드 처리" },
+    "300000000000000003": { session: null, title: "checked", directives: [], openedAt: "2026-11-02T06:00:00Z" },
+    "300000000000000004": { session: null, title: "lane work", openedAt: "2026-11-02T06:00:00Z" },
+    [old]: { session: null, title: "old" },
+  };
+  const gaps = leadThreadGaps(map, [{ thread: "discord:300000000000000004" }], since);
+  expect(gaps.map((g) => g.line)).toEqual([`DIRECTIVE_LEAD thread:${fresh} -: the lead's thread "Claude 10/29 카드 처리" (2026-11-02T05:09:08.000Z) was opened without reading the directive ledger and no lane works in it; dori thread open reads it now, or open such work as a lane`]);
 });
