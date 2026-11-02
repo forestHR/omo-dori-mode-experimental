@@ -1,6 +1,8 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { liveMonitors, manifestPath, type MonitorSpec, readManifest } from "./handover.ts";
 import type { Runner } from "./run.ts";
 import { type Proc, procTable, resolveSession, sessionDirFor } from "./session-id.ts";
 
@@ -197,9 +199,30 @@ export const sessionFile = async (run: Runner, sessionsDir: string, pane: string
   return name ? { path: join(dir, name), pid: hit.pid } : undefined;
 };
 
+// A persistent monitor omo restored after a same-session restart has its start record before the new agent, so the start
+// cutoff misses it; it counts while the session's monitor manifest says it runs (handover.ts liveMonitors: its recorded
+// process lives), as restored:<description>.
+export const pidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// The monitors a restart restored: live in the session's monitor manifest (handover.ts liveMonitors) and registered
+// before the current agent started. A monitor the current agent armed is judged from the transcript like any job, with
+// the caller's age window (notBefore).
+export const restoredMonitors = (sessionsDir: string, cwd: string, session: string, agentStart: number, now = Date.now()): MonitorSpec[] =>
+  liveMonitors(readManifest(manifestPath(sessionsDir, cwd, session)).filter((e) => (e as { createdAt?: number }).createdAt !== undefined && (e as { createdAt: number }).createdAt < agentStart), now, pidAlive, homedir());
+
 export const laneBackground = async (run: Runner, sessionsDir: string, pane: string, cwd: string, until = Number.POSITIVE_INFINITY, notBefore = 0): Promise<BackgroundJob[] | undefined> => {
   const file = await sessionFile(run, sessionsDir, pane, cwd);
   if (!file) return undefined;
   const started = Date.parse((await run(["ps", "-o", "lstart=", "-p", String(file.pid)])).out.trim());
-  return pendingBackground(readFileSync(file.path, "utf8"), Math.max(Number.isNaN(started) ? 0 : started, notBefore), until);
+  const jobs = pendingBackground(readFileSync(file.path, "utf8"), Math.max(Number.isNaN(started) ? 0 : started, notBefore), until);
+  const id = /_([^_]+)\.jsonl$/.exec(file.path)?.[1];
+  const restored = id && !Number.isNaN(started) ? restoredMonitors(sessionsDir, cwd, id, started) : [];
+  return [...jobs, ...restored.map((m) => ({ kind: "monitor" as const, id: `restored:${m.description}`, at: 0 }))];
 };

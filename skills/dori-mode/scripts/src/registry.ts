@@ -81,6 +81,9 @@ export type Lane = {
   // dori pause paused the omo goal of the lane's session (read back), so dori resume resumes it
   readonly pausedGoal?: boolean;
   readonly claim?: Claim;
+  // dori launch left the lane's goal pending (STARTUP_PENDING_GOAL: its first turn was still on with no goal); dori watch
+  // reads it on (pending-goal.ts): its goal clears the mark, three idle reads in a row (counted in idle) say LANE_NO_GOAL
+  readonly pendingGoal?: { readonly idle: number; readonly at?: number };
   // the newest posts its own session made in its work thread, oldest first (at most 5, text cut to 120 characters)
   readonly threadPosts?: readonly ThreadPost[];
   readonly objection?: Objection;

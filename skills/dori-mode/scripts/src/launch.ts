@@ -3,7 +3,7 @@ import { basename, resolve } from "node:path";
 import { AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
 import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
-import { type GoalRead, laneGoal } from "./goal.ts";
+import { agentGone, firstTurnRuns, GOAL_WAIT, goalReader, lastLines, noGoalWhy } from "./pending-goal.ts";
 import { AGENT, argvSessionId, descendants, ended, hasSessionSelector, procTable, shellPidOf } from "./session-id.ts";
 import { readScreen, sendVerified } from "./panes.ts";
 import { hasThread, LANE_KEY, type Lane, NO_THREAD, threadRefProblem } from "./registry.ts";
@@ -496,45 +496,32 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
 // found the quiet lane long after a STARTUP_OK (dori-superagent issue #50 reproduced here (MIT):
 // https://github.com/sisyphuslabs/dori-superagent/issues/50; upstream PR #51 reads herdr's screen, this reads omo's
 // goal store, the file `dori pause`/`dori resume` confirm with, of the session id the lane's agent runs under, read from
-// its command line: aoe's own --session-id, or the one launch gave a herdr omo; goal.ts laneGoal). Read right after the 20 s check, then
-// every 10 s for up to 60 s more, so a goal set a little late is still a start; an agent that ends or shows a startup failure meanwhile is STARTUP_ERROR, and no goal by
-// then is STARTUP_NO_GOAL with the last lines (exit 3, like the other non-OK results).
-export const GOAL_WAIT = { checks: 6, everyMs: 10_000 } as const;
-
-const agentGone = async (deps: FlowDeps, pane: string): Promise<string | undefined> => {
-  if (deps.config.backend === "aoe") {
-    const life = await paneLife(deps.run, pane);
-    return life.live ? undefined : life.how === "gone" ? "the tmux session is gone" : `the agent exited (status ${life.status})`;
-  }
-  // whether any agent still runs under the pane's shell, which is not the same question as which session it is:
-  // resolveSession skips a command holding the word mcp (an MCP server of the agent), and a herdr lane carries its own
-  // prompt in the agent's command line, so a lane keyed mcp-fix or briefed /tmp/mcp.md would read as dead
-  const shell = await shellPidOf(pane, { run: deps.run, sessionsDir: deps.config.sessionsDir, backend: deps.config.backend });
-  const table = shell ? await procTable(deps.run) : [];
-  const live = [...table.filter((p) => p.pid === shell), ...descendants(table, shell)].some((p) => AGENT.test(p.cmd) && !ended(p));
-  return live ? undefined : "no agent runs in the pane any more";
-};
-
+// its command line: aoe's own --session-id, or the one launch gave a herdr omo; goal.ts laneGoal). Launch reads it
+// briefly and never waits out a first turn (pending-goal.ts has the measurement): right after the 20 s check a goal is
+// STARTUP_OK; a first turn still on (its turn running, or the agent waiting on a background job of its own) is
+// STARTUP_PENDING_GOAL (exit 0; the lane is marked and dori watch finishes the judgement); three idle reads 10 s apart
+// with no goal are STARTUP_NO_GOAL (exit 3); an agent that ends or shows a startup failure is STARTUP_ERROR.
 const startupGoal = async (deps: FlowDeps, key: string, pane: string, cwd: string, session: string): Promise<string | undefined> => {
   // no session id in the agent's command line (aoe did not pin one, or an agentCommand that is not omo): which session is
   // the lane's is not known, and guessing it could read another session's goal
   if (!deps.readGoal && !session) return `STARTUP_UNCONFIRMED ${key} ${pane}: the agent runs but its command line names no session id, so its goal cannot be read; last lines: ${lastLines(await readScreen(deps.run, deps.config.backend, pane, 40))}`;
-  const read = deps.readGoal ?? (async () => laneGoal(deps.config.sessionsDir, cwd, session));
-  let goal: GoalRead = "unknown";
-  for (let check = 0; ; check++) {
+  const read = goalReader(deps, cwd, session);
+  for (let idle = 1; ; idle++) {
     // a goal is no good news from an agent that already ended, so the agent is read before its goal, every time
     const gone = await agentGone(deps, pane);
     if (gone) return `STARTUP_ERROR ${key} ${pane}: ${gone}`;
-    goal = await read(pane);
+    const goal = await read(pane);
     if (typeof goal === "object") return undefined;
-    if (check === GOAL_WAIT.checks) break;
-    await deps.clock.sleep(GOAL_WAIT.everyMs);
-    const bad = STARTUP_FAILURE.exec(await readScreen(deps.run, deps.config.backend, pane, 40));
+    const screen = await readScreen(deps.run, deps.config.backend, pane, 40);
+    const bad = STARTUP_FAILURE.exec(screen);
     if (bad) return `STARTUP_ERROR ${key} ${pane}: ${bad[0]}`;
+    if (await firstTurnRuns(deps, pane, cwd, session, screen)) {
+      await deps.registry.patch(key, { pendingGoal: { idle: 0, at: deps.clock.now() } });
+      return `STARTUP_PENDING_GOAL ${key} ${pane}: its first turn is still on and has set no goal yet; dori watch says LANE_NO_GOAL if it ends without one`;
+    }
+    if (idle >= GOAL_WAIT.idleChecks) return `STARTUP_NO_GOAL ${key} ${pane}: the agent runs but ${noGoalWhy(goal)}: its first turn ended ${20 + ((idle - 1) * GOAL_WAIT.everyMs) / 1_000} s after its prompt; last lines: ${lastLines(screen)}`;
+    await deps.clock.sleep(GOAL_WAIT.everyMs);
   }
-  const screen = await readScreen(deps.run, deps.config.backend, pane, 40);
-  const why = goal === "none" ? "no goal in its session" : "no goal found for its session";
-  return `STARTUP_NO_GOAL ${key} ${pane}: the agent runs but ${why} ${20 + (GOAL_WAIT.checks * GOAL_WAIT.everyMs) / 1_000} s after its prompt; last lines: ${lastLines(screen)}`;
 };
 
 // No failure word on screen is not a start (ported from dori-superagent 40034ad, #7, MIT,
@@ -550,8 +537,6 @@ export const aoeStartup = async (deps: FlowDeps, key: string, pane: string, scre
   return shows ? `STARTUP_OK ${key} ${pane}` : `STARTUP_UNCONFIRMED ${key} ${pane}: no running turn and no ❯ prompt on screen; last lines: ${lastLines(full || screen)}`;
 };
 
-const lastLines = (screen: string): string =>
-  screen.split("\n").map((s) => s.trim()).filter(Boolean).slice(-3).join(" / ").replace(/\/(Users|home|Volumes|private|tmp)\/\S+/g, "(local path)").slice(0, 240) || "(blank)";
 
 // session: the id the lane's agent runs under, from its command line ("" or absent when it names none)
 type Opened = { readonly pane: string; readonly tab?: string; readonly failure?: string; readonly session?: string };

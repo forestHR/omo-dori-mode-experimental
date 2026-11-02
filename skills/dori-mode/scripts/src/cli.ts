@@ -955,7 +955,7 @@ try {
         }
       }
       console.log(r.startup);
-      process.exit(r.startup.startsWith("STARTUP_OK") ? 0 : 3);
+      process.exit(/^STARTUP_(OK|PENDING_GOAL) /.test(r.startup) ? 0 : 3);
     }
     case "adopt": {
       const l = await adoptLane(deps, { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: threadOpt(), pane: need("pane"), tags: tags(), goal: opt("goal"), challengeBefore: many("challenge-before"), useGpu: Boolean(flags.values["use-gpu"]) });
