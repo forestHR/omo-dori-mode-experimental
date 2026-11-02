@@ -33,6 +33,10 @@ export type UpdateConfig = {
   readonly readyTimeoutSec: number;
   readonly alertPane: string;
   readonly announce: string;
+  // the maintenance Dori: its [UPDATE] from dori update ends with maintainerAnnounce instead of announce (owner 2026-11-03,
+  // ledger update-notice-once: only it reports an update, once, after every Dori applied it)
+  readonly maintainer: boolean;
+  readonly maintainerAnnounce: string;
 };
 
 export type ArgvTemplate = readonly string[];
@@ -471,7 +475,10 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   backend: "herdr",
   stateDir: join(home, ".dori", "state"),
   watchLog: join(home, ".dori", "state", "lanes.log"),
-  update: { repo: resolve(import.meta.dir, "../../../.."), branch: "main", services: [], readyTimeoutSec: 60, alertPane: "", announce: "Tell the owner in your own channel, briefly, what changed and how your behaviour changes because of it." },
+  update: { repo: resolve(import.meta.dir, "../../../.."), branch: "main", services: [], readyTimeoutSec: 60, alertPane: "",
+    announce: "For you only: do not tell the owner or post this update in any channel; note how your behaviour changes because of it. The maintenance Dori checks that every Dori applied it and tells the owner once. If you watch the maintenance Dori and its lead is down and does not come back, do that check and the one report yourself, in your own channel.",
+    maintainer: false,
+    maintainerAnnounce: "You are the maintenance Dori: the other Dori do not tell the owner about updates, you tell him once. Wait until no new [UPDATE] has come for 15 minutes, so updates close together become one report. Then check on every Dori that the update it applied (update.json applied in its state) is this HEAD and the services it restarted are active; fix a Dori that is behind first. Then tell the owner once in your own channel, briefly, what changed and how the Dori behave differently, and that every Dori runs it." },
   laneWorkspace: "",
   workspaces: [],
   ignorePanes: [],
@@ -737,6 +744,7 @@ export const loadConfig = async (path = configPath(), home = homedir(), warn: (l
   const heavyProblem = heavyQueueProblem(merged.heavyQueue);
   if (heavyProblem) throw new ConfigError(`${path}: ${heavyProblem}`);
   if (!OWNER_SPEECHES.includes(merged.discord.ownerSpeech)) throw new ConfigError(`${path}: discord.ownerSpeech must be "" (follow discord.locale), "casual" or "polite", not ${JSON.stringify(merged.discord.ownerSpeech)}`);
+  if (typeof merged.update.maintainer !== "boolean") throw new ConfigError(`${path}: update.maintainer must be true or false, not ${JSON.stringify(merged.update.maintainer)}`);
   const researchProblem = researchTextProblem(merged.explore.researchText);
   if (researchProblem) throw new ConfigError(`${path}: ${researchProblem}`);
   const env: unknown = merged.launchEnv;

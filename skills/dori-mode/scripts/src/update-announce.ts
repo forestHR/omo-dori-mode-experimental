@@ -13,6 +13,9 @@ export type ChangeNotice = {
   readonly files: readonly string[];
   readonly keys?: readonly string[];
   readonly restarts?: readonly string[];
+  // an update every Dori applies (dori update), not one Dori's own guidance (notify-change): the maintenance Dori gets
+  // update.maintainerAnnounce for it, every other Dori update.announce
+  readonly shared?: boolean;
 };
 
 export const announceChange = async (deps: AnnounceDeps, notice: ChangeNotice): Promise<boolean> => {
@@ -22,7 +25,7 @@ export const announceChange = async (deps: AnnounceDeps, notice: ChangeNotice): 
     ...(notice.files.length ? [`Changed guidance:\n${notice.files.join("\n")}`] : []),
     ...(notice.keys?.length ? [`CONFIG_NEW_KEY: ${notice.keys.join(", ")}`] : []),
     ...(notice.restarts?.length ? [`Restarts:\n${notice.restarts.join("\n")}`] : []),
-    deps.config.update.announce,
+    notice.shared && deps.config.update.maintainer ? deps.config.update.maintainerAnnounce : deps.config.update.announce,
   ].join("\n\n")
     // a commit or PR title with a backtick or $( would make the pane send refuse the whole notice (ANNOUNCE_FAIL, 2026-10-22 #170)
     .replace(/`/g, "'").replaceAll("$(", "$ (");

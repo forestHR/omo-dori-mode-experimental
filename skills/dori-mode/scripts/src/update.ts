@@ -151,7 +151,7 @@ const applyLocked = async (deps: UpdateDeps, options: UpdateOptions, waited: boo
     }
     await save();
     emit(`UPDATED ${state.applied.slice(0, 7)}..${head.slice(0, 7)} changed=${changed.length} restarted=${restarted.join(",") || "-"}`);
-    if (!options.dryRun) await announceChange(deps, { summary: summary || `${state.applied.slice(0, 7)}..${head.slice(0, 7)}`, files: guidanceFiles(changed), keys: newKeys, restarts: results.length ? results : ["No configured services matched changed paths."] });
+    if (!options.dryRun) await announceChange(deps, { summary: summary || `${state.applied.slice(0, 7)}..${head.slice(0, 7)}`, files: guidanceFiles(changed), keys: newKeys, restarts: results.length ? results : ["No configured services matched changed paths."], shared: true });
     if (failures.length && config.update.alertPane) {
       const text = `[ALERT] dori update: ${[...failures, ...notices].join("; ")}`;
       if (!(await deps.send(config.update.alertPane, text))) emit(`UPDATE_FAIL alert did not reach ${config.update.alertPane}`);

@@ -50,7 +50,7 @@ const lane = (): Lane => ({ key: "demo", title: "Demo", thread: "discord:1234567
 
 const setup = async (): Promise<HandoverDeps> => {
   const clock = fakeClock(Date.parse("2026-10-11T16:35:00Z"));
-  const base = depsFor(w, { ...clock, sleep: async () => simulate() }, state.dir, { backend: "aoe", leadPane: OLD, sessionsDir: join(state.dir, "sessions"), update: { repo: "/repo", branch: "main", services: [{ unit: "dori-lanes", paths: [], log: "", ready: "" }], readyTimeoutSec: 5, alertPane: OLD, announce: "" } });
+  const base = depsFor(w, { ...clock, sleep: async () => simulate() }, state.dir, { backend: "aoe", leadPane: OLD, sessionsDir: join(state.dir, "sessions"), update: { repo: "/repo", branch: "main", services: [{ unit: "dori-lanes", paths: [], log: "", ready: "" }], readyTimeoutSec: 5, alertPane: OLD, announce: "", maintainer: false, maintainerAnnounce: "" } });
   w.aoe = [{ id: OLD_ID, title: "lead", path: CWD, tool: "omo", profile: "main" }];
   w.tmux = [OLD];
   writeManifest("old-sid", [
