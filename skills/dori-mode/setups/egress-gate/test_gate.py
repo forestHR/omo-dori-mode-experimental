@@ -54,6 +54,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.file_owned = True
         self.file_public = False
         self.shared_drive = False
+        self.foreign_files = set()  # Drive ids the fake answers as not the owner's
         self.file_mime = "application/vnd.google-apps.document"
         self.file_parents = []
         self.move_lands = True  # a Drive move PATCH changes file_parents
@@ -249,7 +250,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 elif "/permissions/" in path:
                     data = {"type": "user", "emailAddress": "other@example.com"}
                 elif "/drive/v3/files/" in path:
-                    data = {"id": "rootid" if path.endswith("/files/root") else "f", "ownedByMe": self.file_owned, "mimeType": self.file_mime,
+                    data = {"id": "rootid" if path.endswith("/files/root") else "f", "ownedByMe": self.file_owned and not any(path.endswith("/files/" + i) for i in self.foreign_files), "mimeType": self.file_mime,
                             "trashed": False, "name": "Before", "description": "old", "parents": self.file_parents}
                     if self.shared_drive:
                         data["driveId"] = "shared"
@@ -825,37 +826,70 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.shared_drive = True
         self.assertEqual((await self.request("PATCH", "/www.googleapis.com/drive/v3/files/f"))[0], 202)
 
-    async def test_drive_comments_need_card(self):
+    async def test_a_comment_needs_card_only_with_a_mention_or_on_a_file_that_is_not_the_owners(self):
+        # Lead ruling on Q447: a plain comment on the owner's own file goes straight; a mention mails someone.
         self.approval()
-        self.assertEqual((await self.request(path="/www.googleapis.com/drive/v3/files/f/comments", data={"content": "text"}))[0], 202)
+        comments = "/www.googleapis.com/drive/v3/files/f/comments"
+        self.assertEqual((await self.request(path=comments, data={"content": "시간 확인 a+b"}))[0], 200)
+        for content in ("+kim@example.net 봐 줘", "확인 +홍길동", "@lee 확인", "kim@example.net"):
+            with self.subTest(content=content):
+                self.assertEqual((await self.request(path=comments, data={"content": content}))[0], 202)
+        self.assertEqual((await self.request(path=comments + "/c/replies", data={"content": "+kim@example.net"}))[0], 202)
+        self.file_owned = False
+        self.assertEqual((await self.request(path=comments, data={"content": "text"}))[0], 202)
+        self.assertEqual((await self.request("DELETE", comments + "/c"))[0], 202)
+        self.assertEqual(len(self.writes()), 1)
 
-    async def test_spreadsheet_conversion_needs_card(self):
+    async def test_in_account_writes_go_straight_without_a_card(self):
+        # Owner 2026-11-02 21:35 KST Q447 "바깥 사람에게 가는 것만: 메일·바깥 초대·바깥 공유": spreadsheets, conversions,
+        # images by URL in an own document, many writes and many deletes in the owner's account need no card.
         self.approval()
-        self.assertEqual((await self.request(path="/www.googleapis.com/drive/v3/files", data={"mimeType": gate.SHEET}))[0], 202)
-        self.assertFalse(self.writes())
-
-    async def test_multipart_spreadsheet_conversion_needs_card(self):
-        self.approval()
-        raw = (b'--b\r\nContent-Type: application/json\r\n\r\n{"mimeType":"' + gate.SHEET.encode() +
+        sheet = "application/vnd.google-apps.spreadsheet"
+        raw = (b'--b\r\nContent-Type: application/json\r\n\r\n{"mimeType":"' + sheet.encode() +
                b'"}\r\n--b\r\nContent-Type: text/csv\r\n\r\nx,y\r\n--b--\r\n')
-        status, _ = await self.request(path="/www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-                                       raw=raw, headers={"content-type": "multipart/related; boundary=b"})
+        writes = [dict(path="/www.googleapis.com/drive/v3/files", data={"mimeType": sheet}),
+                  dict(path="/www.googleapis.com/upload/drive/v3/files?uploadType=multipart&convert=true", raw=raw,
+                       headers={"content-type": "multipart/related; boundary=b"}),
+                  dict(path="/sheets.googleapis.com/v4/spreadsheets/s:batchUpdate", data={"requests": []}),
+                  dict(path="/sheets.googleapis.com/v4/spreadsheets", data={})]
+        writes += [dict(path="/docs.googleapis.com/v1/documents/d:batchUpdate",
+                        data={"requests": [{"nested": {key: "https://outside.example/image"}}]})
+                   for key in ("uri", "insertInlineImage", "replaceImage")]
+        writes += [dict(method="DELETE", path="/tasks.googleapis.com/tasks/v1/lists/l/tasks/t")] * 11
+        writes += [dict(path="/tasks.googleapis.com/tasks/v1/lists/l/tasks")] * 31
+        for number, write in enumerate(writes):
+            with self.subTest(number=number, path=write["path"]):
+                write = dict(write)
+                self.assertEqual((await self.request(write.pop("method", "POST"), **write))[0], 200)
+        cards = [m for m in self.cards.values() if "승인 필요" in m]
+        self.assertEqual((len(self.writes()), self.service.pending(), cards), (len(writes), [], []))
+        self.assertEqual(len(self.changes()), len(writes))
+
+    async def test_a_sheet_that_is_not_the_owners_or_is_public_needs_card(self):
+        self.approval()
+        for flag in ("file_owned", "file_public"):
+            with self.subTest(flag=flag):
+                self.file_owned, self.file_public = flag != "file_owned", flag == "file_public"
+                self.assertEqual((await self.request(path="/sheets.googleapis.com/v4/spreadsheets/s/values/A1:append",
+                                                    data={"values": [[1]]}))[0], 202)
+        self.assertFalse(self.writes())
+
+    async def test_a_sheet_copied_into_a_sheet_that_is_not_the_owners_needs_card(self):
+        # Review of #243 (HIGH): copyTo writes into destinationSpreadsheetId, so that sheet is checked too.
+        self.approval()
+        self.foreign_files = {"theirs"}
+        path = "/sheets.googleapis.com/v4/spreadsheets/s/sheets/0:copyTo"
+        self.assertEqual((await self.request(path=path, data={"destinationSpreadsheetId": "mine"}))[0], 200)
+        self.assertEqual((await self.request(path=path, data={"destinationSpreadsheetId": "theirs"}))[0], 202)
+        self.assertEqual((await self.request(path=path, data={}))[0], 400)
+        self.assertEqual(len(self.writes()), 1)
+
+    async def test_an_image_in_a_document_that_is_not_the_owners_needs_card(self):
+        self.approval()
+        self.file_owned = False
+        status, _ = await self.request(path="/docs.googleapis.com/v1/documents/d:batchUpdate",
+                                       data={"requests": [{"insertInlineImage": {"uri": "https://outside.example/i"}}]})
         self.assertEqual(status, 202)
-        self.assertFalse(self.writes())
-
-    async def test_sheets_writes_need_card(self):
-        self.approval()
-        self.assertEqual((await self.request(path="/sheets.googleapis.com/v4/spreadsheets/s:batchUpdate",
-                                            data={"requests": []}))[0], 202)
-        self.assertFalse(self.writes())
-
-    async def test_docs_dangerous_nested_keys_need_card(self):
-        self.approval()
-        for key in ("uri", "insertInlineImage", "replaceImage"):
-            with self.subTest(key=key):
-                status, _ = await self.request(path="/docs.googleapis.com/v1/documents/d:batchUpdate",
-                                              data={"requests": [{"nested": {key: "https://outside.example/image"}}]})
-                self.assertEqual(status, 202)
         self.assertFalse(self.writes())
 
     async def test_docs_owned_update_records_revision_and_refuses_restore(self):
@@ -971,8 +1005,9 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(secret=secret):
                 self.assertNotIn(secret, logs)
 
-    async def test_eleventh_delete_is_parked(self):
+    async def test_a_configured_delete_limit_still_parks(self):
         self.approval()
+        self.config["limits"] = {"deletes_per_hour": 10}
         for _ in range(10):
             self.assertEqual((await self.request("DELETE", "/tasks.googleapis.com/tasks/v1/lists/l/tasks/t"))[0], 200)
         self.assertEqual((await self.request("DELETE", "/tasks.googleapis.com/tasks/v1/lists/l/tasks/t"))[0], 202)
@@ -984,8 +1019,9 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         await self.request("PATCH", "/www.googleapis.com/drive/v3/files/f", data={"trashed": True})
         self.assertEqual((await self.request("PATCH", "/www.googleapis.com/drive/v3/files/f", data={"trashed": True}))[0], 202)
 
-    async def test_thirty_first_owner_message_write_is_card(self):
+    async def test_a_configured_owner_message_write_limit_still_parks(self):
         self.approval()
+        self.config["limits"] = {"writes_per_owner_message": 30}
         for _ in range(30):
             self.assertEqual((await self.request(path="/tasks.googleapis.com/tasks/v1/lists/l/tasks"))[0], 200)
         self.assertEqual((await self.request(path="/tasks.googleapis.com/tasks/v1/lists/l/tasks"))[0], 202)

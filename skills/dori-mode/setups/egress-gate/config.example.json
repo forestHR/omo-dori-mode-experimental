@@ -35,7 +35,6 @@
     "timeout_seconds": 5
   },
   "approval": {"channel_id": "REPLACE_WITH_APPROVAL_CHANNEL_ID", "poll_seconds": 20},
-  "limits": {"deletes_per_hour": 10, "writes_per_owner_message": 30},
   "google_scopes": [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
