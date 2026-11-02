@@ -522,7 +522,9 @@ test("directive-audit: a line of the lead's memory that keeps a ledger directive
     // the channel of his message is not his message
     "채널 https://discord.com/channels/100000000000000001/200000000000000002 에서 본다",
   ]);
-  // the lead's journal about itself (reference/self/) is not where his directives were kept
+  // the lead's journal about itself (reference/self/) is not where his directives were kept, and boundaries.md keeps his
+  // "do not" in his own words by design
+  await Bun.write(join(repo, "system", "boundaries.md"), `- [2026-10-10] "세션에서 작업 시 문서를 업데이트 하게 해당 프로젝트 지침에 추가해" ${msg}`);
   await Bun.write(join(repo, "reference", "self", "observations.md"), `문서 갱신 ${msg}`);
   const opts = { since: "2026-10-15T06:00:00.000Z", inbox: await write("inbox.jsonl", ""), owner: "7", dryRun: true };
   const dup = (await runDirectiveAudit(deps, { ...opts, memory: repo })).lines.filter((l) => l.startsWith("DIRECTIVE_DUPLICATE"));
