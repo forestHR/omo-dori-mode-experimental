@@ -1,9 +1,10 @@
-import { readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { captureTmux, paneLife } from "./aoe.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { paneTranscript, typeLine } from "./panes.ts";
+import { sessionDirFor } from "./session-id.ts";
 
 // A paused lane must not keep working through its omo goal: between turns omo starts the next one on its own while the
 // goal is active, so a lane the lead paused kept spending turns (ported from dori-superagent 0057f49, #12, MIT,
@@ -48,6 +49,60 @@ export const sessionGoal = async (deps: FlowDeps, pane: string): Promise<GoalRea
   const path = await paneTranscript(deps.run, deps.config.sessionsDir, pane).catch(() => undefined);
   const file = path ? goalFileOf(path) : undefined;
   return file ? readGoalFile(file) : "unknown";
+};
+
+// Every user message of a transcript, what was typed into that session (a lane's launch prompt is one), with when.
+// A pane one agent captured and quoted to another is a tool result (role toolResult), never a user message.
+const userMessages = (transcript: string): { readonly text: string; readonly at: number }[] =>
+  transcript.split("\n").flatMap((line) => {
+    if (!line.includes('"user"')) return [];
+    let entry: { type?: unknown; timestamp?: unknown; message?: { role?: unknown; content?: unknown } };
+    try {
+      entry = JSON.parse(line) as typeof entry;
+    } catch {
+      return [];
+    }
+    if (entry.type !== "message" || entry.message?.role !== "user") return [];
+    const content = entry.message.content;
+    const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => (p as { text?: unknown }).text).filter((t): t is string => typeof t === "string").join("\n") : "";
+    return [{ text, at: typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN }];
+  });
+
+// The goal of the one session a launch typed its prompt into: a transcript written since `since` holding a user
+// message with `marker` (the lane's key and that launch's own token) typed since then. Every user message counts, not
+// only the first: with an `agentCommand` that resumes a session the prompt follows its earlier messages. A lead or
+// sibling that captured the lane's pane holds the prompt in a tool result, which is not one; and when several sessions
+// hold the token (a prompt sent again by hand) none of them is known to be this lane's, so no goal is read from any.
+// Both the cwd and its real path are searched: omo may keep a symlinked cwd's sessions under either. Reading the pane's
+// own session instead would pick a sibling lane opened seconds apart in the same directory, since omo's child processes
+// carry no PI_SESSION_ID and the session is then found by start time.
+export const laneGoal = (sessionsDir: string, cwd: string, marker: string, since: number): GoalRead => {
+  const at = resolve(cwd);
+  let real = at;
+  try {
+    real = realpathSync(at);
+  } catch {}
+  const goals = new Map<string, GoalRead>();
+  for (const dir of new Set([sessionDirFor(sessionsDir, at), sessionDirFor(sessionsDir, real)])) {
+    let names: string[];
+    try {
+      names = readdirSync(dir).filter((n) => n.endsWith(".jsonl"));
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const path = join(dir, name);
+      try {
+        if (statSync(path).mtimeMs < since) continue;
+        if (!userMessages(readFileSync(path, "utf8")).some((m) => m.text.includes(marker) && m.at >= since)) continue;
+      } catch {
+        continue;
+      }
+      const file = goalFileOf(path);
+      goals.set(name, file ? readGoalFile(file) : "unknown");
+    }
+  }
+  return goals.size === 1 ? ([...goals.values()][0] as GoalRead) : "unknown";
 };
 
 const count = (screen: string, re: RegExp): number => screen.split("\n").filter((l) => re.test(l)).length;

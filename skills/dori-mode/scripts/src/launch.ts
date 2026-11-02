@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import { AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
 import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
+import { type GoalRead, laneGoal } from "./goal.ts";
+import { AGENT, descendants, ended, procTable, shellPidOf } from "./session-id.ts";
 import { readScreen, sendVerified } from "./panes.ts";
 import { hasThread, LANE_KEY, type Lane, NO_THREAD, threadRefProblem } from "./registry.ts";
 import { areaLabel, type AreaQuery, areaSignals, pastSignalsSection, tagsOf } from "./lane-signals.ts";
@@ -469,7 +471,10 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
     ({ draft, text } = await renderBrief(deps, { ...input, thread: ref }));
   }
   await Bun.write(input.brief, text);
-  const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane; report as the brief's footer says.`;
+  const promptAt = deps.clock.now();
+  // the token names this launch, so launch finds the goal of the session it typed into and no other (startupGoal)
+  const token = crypto.randomUUID().slice(0, 8);
+  const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane (launch ${token}); report as the brief's footer says.`;
   const opened = await (deps.config.backend === "aoe" ? openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : openHerdr(deps, input.key, cwd, model, prompt)).catch((e: unknown) => {
     throw e instanceof LaunchFailed && openedThread ? new LaunchFailed(e.message, openedThread) : e;
   });
@@ -485,8 +490,52 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   const screen = await readScreen(deps.run, deps.config.backend, opened.pane, 40);
   const bad = STARTUP_FAILURE.exec(screen);
   if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${bad[0]}` };
-  if (deps.config.backend !== "aoe") return { lane, startup: `STARTUP_OK ${input.key} ${opened.pane}` };
-  return { lane, startup: await aoeStartup(deps, input.key, opened.pane, screen) };
+  const started = deps.config.backend === "aoe" ? await aoeStartup(deps, input.key, opened.pane, screen) : `STARTUP_OK ${input.key} ${opened.pane}`;
+  if (!started.startsWith("STARTUP_OK")) return { lane, startup: started };
+  return { lane, startup: (await startupGoal(deps, input.key, opened.pane, cwd, promptAt, token)) ?? started };
+};
+
+// A running agent is not yet a good start: a lane that never sets its goal does its first turn and stops, and the lead
+// found the quiet lane long after a STARTUP_OK (dori-superagent issue #50 reproduced here (MIT):
+// https://github.com/sisyphuslabs/dori-superagent/issues/50; upstream PR #51 reads herdr's screen, this reads omo's
+// goal store, the file `dori pause`/`dori resume` confirm with, of the one session this launch typed its prompt into,
+// told apart by its per-launch token, goal.ts laneGoal). Read right after the 20 s check, then
+// every 10 s for up to 60 s more, so a goal set a little late is still a start; an agent that ends or shows a startup failure meanwhile is STARTUP_ERROR, and no goal by
+// then is STARTUP_NO_GOAL with the last lines (exit 3, like the other non-OK results).
+export const GOAL_WAIT = { checks: 6, everyMs: 10_000 } as const;
+
+const agentGone = async (deps: FlowDeps, pane: string): Promise<string | undefined> => {
+  if (deps.config.backend === "aoe") {
+    const life = await paneLife(deps.run, pane);
+    return life.live ? undefined : life.how === "gone" ? "the tmux session is gone" : `the agent exited (status ${life.status})`;
+  }
+  // whether any agent still runs under the pane's shell, which is not the same question as which session it is:
+  // resolveSession skips a command holding the word mcp (an MCP server of the agent), and a herdr lane carries its own
+  // prompt in the agent's command line, so a lane keyed mcp-fix or briefed /tmp/mcp.md would read as dead
+  const shell = await shellPidOf(pane, { run: deps.run, sessionsDir: deps.config.sessionsDir, backend: deps.config.backend });
+  const table = shell ? await procTable(deps.run) : [];
+  const live = [...table.filter((p) => p.pid === shell), ...descendants(table, shell)].some((p) => AGENT.test(p.cmd) && !ended(p));
+  return live ? undefined : "no agent runs in the pane any more";
+};
+
+const startupGoal = async (deps: FlowDeps, key: string, pane: string, cwd: string, since: number, token: string): Promise<string | undefined> => {
+  const marker = `You are the ${key} lane (launch ${token});`;
+  const read = deps.readGoal ?? (async () => laneGoal(deps.config.sessionsDir, cwd, marker, since - 2_000));
+  let goal: GoalRead = "unknown";
+  for (let check = 0; ; check++) {
+    // a goal is no good news from an agent that already ended, so the agent is read before its goal, every time
+    const gone = await agentGone(deps, pane);
+    if (gone) return `STARTUP_ERROR ${key} ${pane}: ${gone}`;
+    goal = await read(pane);
+    if (typeof goal === "object") return undefined;
+    if (check === GOAL_WAIT.checks) break;
+    await deps.clock.sleep(GOAL_WAIT.everyMs);
+    const bad = STARTUP_FAILURE.exec(await readScreen(deps.run, deps.config.backend, pane, 40));
+    if (bad) return `STARTUP_ERROR ${key} ${pane}: ${bad[0]}`;
+  }
+  const screen = await readScreen(deps.run, deps.config.backend, pane, 40);
+  const why = goal === "none" ? "no goal in its session" : "no goal found for its session";
+  return `STARTUP_NO_GOAL ${key} ${pane}: the agent runs but ${why} ${20 + (GOAL_WAIT.checks * GOAL_WAIT.everyMs) / 1_000} s after its prompt; last lines: ${lastLines(screen)}`;
 };
 
 // No failure word on screen is not a start (ported from dori-superagent 40034ad, #7, MIT,

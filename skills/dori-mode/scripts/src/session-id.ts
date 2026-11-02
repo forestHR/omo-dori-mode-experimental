@@ -39,7 +39,7 @@ export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(
 
 export type SessionDeps = { readonly run: Runner; readonly sessionsDir: string; readonly backend?: Backend; readonly listDir?: (dir: string) => readonly string[] };
 
-const shellPidOf = async (pane: string, deps: SessionDeps): Promise<number> => {
+export const shellPidOf = async (pane: string, deps: SessionDeps): Promise<number> => {
   if (deps.backend === "aoe") return tmuxPanePid(deps.run, pane);
   const info = await deps.run(["herdr", "pane", "process-info", "--pane", pane]);
   return info.code === 0 ? Number((JSON.parse(info.out) as { result?: { process_info?: { shell_pid?: number } } }).result?.process_info?.shell_pid ?? 0) : 0;
