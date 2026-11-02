@@ -22,6 +22,10 @@ The key is in your brief's lane footer. If you leave it out, the lane registered
 
 If the lead has paused your lane (`dori pause`, e.g. while it waits on the owner), your claim is recorded but nothing closes on a timer; you get a `[LEAD]` line saying so, and the lead closes the lane or objects.
 
+## What you learned
+
+Before you claim, put each thing where it belongs, once: a standing instruction of the owner that the lane met goes to the lead in a `[REPORT]` for the directive ledger (not only into memory); a lesson, a fact or how the work went goes into your omo memory with the report's path; the report itself stays in `~/.dori/qa` as the record.
+
 ## Reporting honestly
 
 - A blocker, an impossible task or an ambiguous request is a fine report: `[REPORT] <key> | blocker | <one plain line: what blocks and what you need>`, with what you tried and the evidence on the lines below. Say it plainly instead of retrying or claiming done.

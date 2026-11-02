@@ -274,3 +274,13 @@ Owner 2026-10-21 07:19 KST "지금 왜 두번씩 답변하는지 별도로 이 �
 - **The lane's own post counts.** `dori send` and `dori thread reply|wait|done` run in a lane's pane record a post in that lane's work thread (`threadPosts` in its record). A claim made within 30 minutes of the newest one says `RESULT_ALREADY_POSTED <key> <id>`, and the close (by the lead or the watcher) then posts no summary, `CLOSE_SUMMARY_SKIPPED`, and still marks the thread done when nothing else uses it.
 - **Saying which post it is.** `dori claim-done --posted <id|link>` names an older post; `--post-summary` says the last post was a progress line, so the summary goes out. `dori close --posted <id|link>` is for a result the lead relayed itself; `dori close --summary` always posts.
 - **For the lead.** In a brief, either ask the lane for its line in the thread or leave the result to `--summary`, not both; do not relay a lane's result in its thread yourself unless you close with `--posted`; and do not answer the owner twice in one thread (one `dori send` and one `dori thread reply` with the same news).
+
+## 33. Each kind of knowledge has one place
+
+On 2026-11-02 a review found what a long-running Dori builds up in five places: the fork's ledger, the host's ledger, these lessons, the lead's memory and the lane reports, with the same owner message in more than one. In one lead's memory, 28 of the 59 owner instructions that carried a message link quoted a message the ledger already cites. Two copies drift: one gets corrected and the other is the one read. The places are now fixed by kind:
+
+- the owner's standing instructions: the directive ledger (common in the fork, the rest local), the only place his words are kept; launch injects them, so they cannot fall out;
+- lessons, facts, people, how a piece of work went: the Dori's own omo memory (notes/, people/, a repeated procedure as a skill); a lesson every Dori shares is summed up here as well, a lesson of one Dori or one host stays in its memory;
+- lane reports: the record in ~/.dori/qa; memory keeps their gist and path.
+
+Memory keeps a ledger directive as a pointer `장부:<id>`. A directive that reaches the lead in no owner row (the ones for every lane and the lead's own rules: an owner row carries only what his words call) keeps the ledger's directive sentence beside the pointer, because the lead needs it every turn; his words stay in the ledger. `dori directive-audit` reads the lead's memory (system/, reference/) and lists a line that holds a message the ledger cites without the pointer, or that quotes his words again, as `DIRECTIVE_DUPLICATE`.

@@ -509,6 +509,34 @@ test("directive links live in one place: the local ledger's links of fork ids ar
   expect(await Bun.file(COMMON_LEDGER).text()).not.toMatch(/discord(?:app)?\.com/);
 });
 
+test("directive-audit: a line of the lead's memory that keeps a ledger directive a second time, not as a pointer 장부:<id>, is DIRECTIVE_DUPLICATE", async () => {
+  const msg = "1560000000000000005";
+  const deps = await ledgerDeps({ directives: { common: COMMON_LEDGER, local: await write("dup-local.json", JSON.stringify({ entries: [{ id: "docs-same-pr", source: `https://discord.com/channels/100000000000000001/200000000000000002/${msg}` }] })) } });
+  const repo = join(state.dir, "memory-repo");
+  const human = (lines: string[]) => Bun.write(join(repo, "system", "human.md"), lines.join("\n"));
+  await human([
+    `INSTRUCTION: 문서 갱신은 같은 PR (${msg}).`,
+    `INSTRUCTION: 장부:docs-same-pr (${msg})`,
+    `INSTRUCTION: 장부:docs-same-pr "세션에서 작업 시 문서를 업데이트 하게 해당 프로젝트 지침에 추가해" ${msg}`,
+    "INSTRUCTION: 말투는 반말 1560000000000000099",
+    // the channel of his message is not his message
+    "채널 https://discord.com/channels/100000000000000001/200000000000000002 에서 본다",
+  ]);
+  // the lead's journal about itself (reference/self/) is not where his directives were kept
+  await Bun.write(join(repo, "reference", "self", "observations.md"), `문서 갱신 ${msg}`);
+  const opts = { since: "2026-10-15T06:00:00.000Z", inbox: await write("inbox.jsonl", ""), owner: "7", dryRun: true };
+  const dup = (await runDirectiveAudit(deps, { ...opts, memory: repo })).lines.filter((l) => l.startsWith("DIRECTIVE_DUPLICATE"));
+  expect(dup.map((l) => l.split(":").slice(0, 2).join(":"))).toEqual(["DIRECTIVE_DUPLICATE system/human.md:1 docs-same-pr", "DIRECTIVE_DUPLICATE system/human.md:3 docs-same-pr"]);
+  expect(dup[1]).toContain("still quotes his words");
+  // pointers only: no duplicate, the audit is clean
+  await human([`INSTRUCTION: 장부:docs-same-pr (${msg})`, "INSTRUCTION: 말투는 반말 1560000000000000099"]);
+  const clean = await runDirectiveAudit(deps, { ...opts, memory: repo });
+  expect(clean.lines.at(-1)).toStartWith("DIRECTIVE_AUDIT_OK");
+  // no memory given, or "off": no check; a repo that is not there is said, not skipped silently
+  expect((await runDirectiveAudit(deps, { ...opts, memory: "off" })).lines.some((l) => l.includes("DIRECTIVES_MEMORY_SKIP"))).toBe(false);
+  expect((await runDirectiveAudit(deps, { ...opts, memory: join(state.dir, "no-repo") })).lines[0]).toStartWith("DIRECTIVES_MEMORY_SKIP");
+});
+
 test("a lane's brief is stored as an absolute path, and one stored relative (older lanes) is read from the lane's cwd, not from wherever the audit runs", async () => {
   const deps = await ledgerDeps();
   const full = (await renderBrief(deps, input(await write("full.md", fields)))).text;

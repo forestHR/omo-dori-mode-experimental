@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
 import { laneSessionFiles, readLeadRelays, type ReportLine } from "./auto-signals.ts";
 import { checkReviewers, ChallengeError, reviewers } from "./challenge.ts";
 import { fill } from "./config.ts";
-import { APPLIED_HEADING, appliesWhy, briefGaps, checkedLedger, coveredBy, type Directive, type DirectiveBlock, DirectiveError, directiveText, type Gap, headingAt, type Ledger, leadGaps, LINK_SOURCE, loadLedger, scopeContext, unledgered } from "./directives.ts";
+import { APPLIED_HEADING, appliesWhy, briefGaps, checkedLedger, coveredBy, type Directive, type DirectiveBlock, DirectiveError, directiveText, duplicated, type Gap, headingAt, type Ledger, leadGaps, LINK_SOURCE, loadLedger, scopeContext, unledgered } from "./directives.ts";
 import type { DoriConfig } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { eightSteps, laneRepo, launchLedger, uiSteps } from "./launch.ts";
@@ -343,9 +343,27 @@ export const leadThreadGaps = (map: ThreadMap, lanes: readonly Pick<Lane, "threa
   return out;
 };
 
-export const runDirectiveAudit = async (deps: FlowDeps, opts: { readonly since: string; readonly inbox: string; readonly owner: string; readonly dryRun?: boolean; readonly threads?: ThreadMap }): Promise<AuditResult> => {
+// The lead memory files where his standing directives were kept before the ledger: system/*.md and reference/*.md, not
+// the lead's journal about itself (reference/self/, and system/self-aware.md, which reflection writes from it: his words
+// there are what he said about the lead's behaviour, quoted as evidence). A repo that is not there leaves the check out,
+// with a line.
+export const memoryFiles = (repo: string, skipped: string[]): { readonly path: string; readonly text: string }[] => {
+  if (!existsSync(repo)) {
+    skipped.push(`DIRECTIVES_MEMORY_SKIP ${repo}: the lead's memory repo is not there; no check for directives kept twice`);
+    return [];
+  }
+  return ["system", "reference"].flatMap((dir) => {
+    const d = join(repo, dir);
+    if (!existsSync(d)) return [];
+    return readdirSync(d).filter((n) => n.endsWith(".md") && `${dir}/${n}` !== "system/self-aware.md").sort().map((n) => ({ path: `${dir}/${n}`, text: readFileSync(join(d, n), "utf8") }));
+  });
+};
+
+// memory: the lead's omo memory repo (dori directive-audit passes it; "off" or absent: no check for directives kept twice)
+export const runDirectiveAudit = async (deps: FlowDeps, opts: { readonly since: string; readonly inbox: string; readonly owner: string; readonly dryRun?: boolean; readonly threads?: ThreadMap; readonly memory?: string }): Promise<AuditResult> => {
   const ledger = auditLedger(deps);
   const skipped = ledger.skipped ?? [];
+  const memoryNotes: string[] = [];
   const lanes = (await deps.registry.list()).filter((l) => l.openedAt >= opts.since).sort((a, b) => a.openedAt.localeCompare(b.openedAt));
   const blocks = await blockTexts();
   const entered = await enteredAt(deps, ledger);
@@ -360,9 +378,10 @@ export const runDirectiveAudit = async (deps: FlowDeps, opts: { readonly since: 
   const excusedLines = opts.dryRun ? excused.map((x) => x.line) : [];
   gaps.push(...unledgered(await readBrief(opts.inbox), ledger, opts.owner, opts.since, process.env.DORI_DISCORD_GUILD?.trim() ?? ""));
   if (opts.threads) gaps.push(...leadThreadGaps(opts.threads, await deps.registry.list(), opts.since));
+  if (opts.memory && opts.memory !== "off") gaps.push(...duplicated(memoryFiles(opts.memory, memoryNotes), ledger));
   if (!opts.dryRun) writeStamp(deps, opts.since, true);
-  if (!gaps.length && !skipped.length) return { gaps, lanes: lanes.length, lines: [...excusedLines, `DIRECTIVE_AUDIT_OK since ${opts.since}: ${lanes.length} lanes and the owner's messages read against ${ledger.entries.length} directives, no gap${notCounted}`] };
-  const lines = [...skipped, ...gaps.map((g) => g.line), `DIRECTIVE_AUDIT_DONE since ${opts.since}: ${lanes.length} lanes and the owner's messages read against ${ledger.entries.length} directives, ${gaps.length} gaps${notCounted}, ${skipped.length} local ledger lines left out`];
+  if (!gaps.length && !skipped.length) return { gaps, lanes: lanes.length, lines: [...excusedLines, ...memoryNotes, `DIRECTIVE_AUDIT_OK since ${opts.since}: ${lanes.length} lanes and the owner's messages read against ${ledger.entries.length} directives, no gap${notCounted}`] };
+  const lines = [...skipped, ...memoryNotes, ...gaps.map((g) => g.line), `DIRECTIVE_AUDIT_DONE since ${opts.since}: ${lanes.length} lanes and the owner's messages read against ${ledger.entries.length} directives, ${gaps.length} gaps${notCounted}, ${skipped.length} local ledger lines left out`];
   if (opts.dryRun) return { gaps, lanes: lanes.length, lines: [...excusedLines, ...lines] };
   const short = gaps.slice(0, 4).map((g) => (g.lane === "-" ? `unledgered ${g.id}` : `${g.lane} ${g.id}`)).join(", ");
   const left = skipped.length ? `${skipped.length} local ledger lines left out (DIRECTIVES_LOCAL_SKIP; fix them in ${deps.config.directives.local || "directives.local"}), ` : "";
