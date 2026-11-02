@@ -400,7 +400,9 @@ export type DoriConfig = {
   // the host's own file with its directives and links (empty: none); links a file of { id, source } rows another Dori
   // pushed, which only sets the source of fork entries (empty: none); linkPeers "<user>:<absolute path>" the Dori this one
   // pushes the links of its local ledger to (dori directives links --push, and freshness when the local ledger changed)
-  readonly directives: { readonly common: string; readonly local: string; readonly links?: string; readonly linkPeers?: readonly string[] };
+  // memory: the lead's omo memory repo an owner message's inbox row recalls notes from (empty: the repo of a session in
+  // handover.cwd, else defaultCwd; "off": no recall)
+  readonly directives: { readonly common: string; readonly local: string; readonly links?: string; readonly linkPeers?: readonly string[]; readonly memory?: string };
   readonly sessionsDir: string;
   readonly nudgeAfterMin: number;
   // dori watch: an idle lane waiting on background work it started (BG_WAITING) is LANE_BLOCKED idle after this long
@@ -465,7 +467,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   defaultModel: "anthropic/claude-opus-5-5",
   launchKeywords: "ulw set goal and work",
   launchEnv: {},
-  directives: { common: join(import.meta.dir, "../../references/directives.json"), local: "", links: "", linkPeers: [] },
+  directives: { common: join(import.meta.dir, "../../references/directives.json"), local: "", links: "", linkPeers: [], memory: "" },
   sessionsDir: join(home, ".omo", "agent", "sessions"),
   nudgeAfterMin: 15,
   blockedWaitMin: 60,
@@ -724,7 +726,7 @@ export const loadConfig = async (path = configPath(), home = homedir(), warn: (l
     watchLog: expandHome(raw.watchLog ?? join(stateDir, "lanes.log"), home),
     update: { ...merged.update, repo, alertPane: raw.update?.alertPane ?? leadPane, services: merged.update.services.map((s) => ({ ...s, paths: s.paths ?? ["skills/dori-mode/scripts/src/"], log: expandHome(s.log ?? "", home), ready: s.ready ?? "" })) },
     defaultCwd: expandHome(merged.defaultCwd, home),
-    directives: { common: expandHome(raw.directives?.common ?? base.directives.common, home), local: expandHome(raw.directives?.local ?? "", home), links: expandHome(raw.directives?.links ?? "", home), linkPeers: raw.directives?.linkPeers ?? [] },
+    directives: { common: expandHome(raw.directives?.common ?? base.directives.common, home), local: expandHome(raw.directives?.local ?? "", home), links: expandHome(raw.directives?.links ?? "", home), linkPeers: raw.directives?.linkPeers ?? [], memory: expandHome(raw.directives?.memory ?? "", home) },
     sessionsDir: expandHome(merged.sessionsDir, home),
     scorecard: { ...merged.scorecard, sessions: expandHome(merged.scorecard.sessions || merged.sessionsDir, home), lanesLog: expandHome(merged.scorecard.lanesLog || (raw.watchLog ?? join(stateDir, "lanes.log")), home), leadSessions: expandHome(merged.scorecard.leadSessions, home), inbox: expandHome(merged.scorecard.inbox, home) },
     handover: { ...merged.handover, inbox: expandHome(merged.handover.inbox, home), cwd: expandHome(merged.handover.cwd, home) },

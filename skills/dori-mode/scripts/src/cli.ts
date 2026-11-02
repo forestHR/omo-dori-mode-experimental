@@ -37,6 +37,7 @@ import { heavySpread, isKind, spreadPlan, type SpreadJob } from "./heavy-spread.
 import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
 import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, reopenLaneThread, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
+import { memoryRepoFor, MemoryRecallError, recallNotes } from "./memory-recall.ts";
 import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, ledgerProblems, ledgerTable, loadLedger, promptTable, textDirectives } from "./directives.ts";
 import { applyDirectives, auditOrReport, checkMeaning, linkRows, pushLinks, sinceIso } from "./directive-audit.ts";
 import { addNode, formatIntent, formatTree, gateFix, intentView, laneArea, loadTree, NODE_KINDS, type NodeKind, recordBranch, recordOverride, recordRefusal, requiredMessage, researchCheck, researchFacts, researchHint, sendResearch, setStatus, stuckTop, stuckView, type TreeArea, TreeError, updateTree } from "./explore.ts";
@@ -118,6 +119,10 @@ const USAGE = `dori <command> [options]
                                        message, and adds them to its brief under "## 추가 지침(리드, launch 뒤)"
                                        (DIRECTIVES_APPLIED; none missing: DIRECTIVES_APPLY_NONE; not submitted:
                                        DIRECTIVES_APPLY_NOT_SENT, exit 1, brief unchanged)
+  recall <text>                        the lead's own memory notes (directives.memory, else the omo memory repo of
+                                       handover.cwd or defaultCwd under this account's home: notes/, reference/, people/*/card.md) the text points at, at most 3,
+                                       as path and description with secrets blanked (MEMORY_RECALL lines); the inbound
+                                       listener puts the same into an owner message's row as memory
   directive-audit [--since 24h|Nd|ISO] [--dry-run]
                                        the lanes opened since then against the ledger (directives in scope missing from
                                        the brief, a lane without a thread) and the owner's messages that read like a
@@ -711,6 +716,9 @@ const hintLedger = (): Ledger => {
   if (!config.directives.common && !config.directives.local) throw new DirectiveError("no directive ledger is configured (config directives.common and directives.local are empty)");
   return checkedLedger(config, { tolerant: true });
 };
+// The omo memory repo of this Dori's lead: directives.memory, else the repo omo keeps for its cwd (handover.cwd, else
+// defaultCwd) under this account's home.
+const leadMemoryRepo = (): string => config.directives.memory || memoryRepoFor(config.handover.cwd || config.defaultCwd, homedir());
 // the owner's message a thread starts from, as the inbox has it (text or voice transcript); empty when it is not there
 const inboxText = (id: string): string => {
   const file = process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl");
@@ -1544,6 +1552,8 @@ try {
           ...(config.hooks.transcribe?.length ? { transcribe: transcribeUrl } : {}),
           // read per message, so a ledger edited while the listener runs is what the next message gets
           hints: (text) => textDirectives(text, hintLedger()).slice(0, HINT_LIMIT).map(({ e }) => directiveLine(e)),
+          // this Dori's own lead memory only (its account's home, its lead's cwd), read per message like the ledger
+          recall: (text) => recallNotes(text, leadMemoryRepo()).map((n) => n.line),
         });
         listener.start();
         await new Promise(() => {});
@@ -1871,6 +1881,14 @@ try {
       console.log(ledgerTable(ledger));
       break;
     }
+    case "recall": {
+      const text = flags.positionals.slice(1).join(" ").trim() || die("usage: dori recall <text>");
+      const repo = leadMemoryRepo();
+      const found = recallNotes(text, repo);
+      for (const n of found) console.log(`MEMORY_RECALL ${n.line}`);
+      if (!found.length) console.log(`MEMORY_RECALL_NONE: no note in ${repo} that the text points at`);
+      break;
+    }
     case "directive-audit": {
       const since = sinceIso(opt("since") ?? "24h", Date.now());
       const r = await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), dryRun: Boolean(flags.values["dry-run"]) });
@@ -1886,6 +1904,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError) die(e.message);
+  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof MemoryRecallError) die(e.message);
   throw e;
 }
