@@ -54,6 +54,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.file_owned = True
         self.file_public = False
         self.shared_drive = False
+        self.foreign_files = set()  # Drive ids the fake answers as not the owner's
         self.file_mime = "application/vnd.google-apps.document"
         self.file_parents = []
         self.move_lands = True  # a Drive move PATCH changes file_parents
@@ -249,7 +250,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 elif "/permissions/" in path:
                     data = {"type": "user", "emailAddress": "other@example.com"}
                 elif "/drive/v3/files/" in path:
-                    data = {"id": "rootid" if path.endswith("/files/root") else "f", "ownedByMe": self.file_owned, "mimeType": self.file_mime,
+                    data = {"id": "rootid" if path.endswith("/files/root") else "f", "ownedByMe": self.file_owned and not any(path.endswith("/files/" + i) for i in self.foreign_files), "mimeType": self.file_mime,
                             "trashed": False, "name": "Before", "description": "old", "parents": self.file_parents}
                     if self.shared_drive:
                         data["driveId"] = "shared"
@@ -862,6 +863,16 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await self.request(path="/sheets.googleapis.com/v4/spreadsheets/s/values/A1:append",
                                                     data={"values": [[1]]}))[0], 202)
         self.assertFalse(self.writes())
+
+    async def test_a_sheet_copied_into_a_sheet_that_is_not_the_owners_needs_card(self):
+        # Review of #243 (HIGH): copyTo writes into destinationSpreadsheetId, so that sheet is checked too.
+        self.approval()
+        self.foreign_files = {"theirs"}
+        path = "/sheets.googleapis.com/v4/spreadsheets/s/sheets/0:copyTo"
+        self.assertEqual((await self.request(path=path, data={"destinationSpreadsheetId": "mine"}))[0], 200)
+        self.assertEqual((await self.request(path=path, data={"destinationSpreadsheetId": "theirs"}))[0], 202)
+        self.assertEqual((await self.request(path=path, data={}))[0], 400)
+        self.assertEqual(len(self.writes()), 1)
 
     async def test_an_image_in_a_document_that_is_not_the_owners_needs_card(self):
         self.approval()

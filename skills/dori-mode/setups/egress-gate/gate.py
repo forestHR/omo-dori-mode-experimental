@@ -1091,6 +1091,12 @@ class Gate:
                 raise Refused("write-not-allowed")
             if sheet[1]:
                 await self.drive_owned(sheet[1], reasons)
+            if route.endswith(":copyTo"):
+                # copyTo writes into another spreadsheet; that one must be the owner's and private too.
+                target = self.metadata(headers, body, False).get("destinationSpreadsheetId")
+                if not isinstance(target, str) or not DRIVE_ID.fullmatch(target):
+                    raise Refused("invalid-destination", 400)
+                await self.drive_owned(target, reasons)
             return "sheets", "spreadsheets.write", None
         data = self.metadata(headers, body, route.startswith("/upload/drive/v3/"))
         if host == "www.googleapis.com" and route.startswith("/calendar/v3/"):

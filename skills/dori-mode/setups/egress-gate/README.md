@@ -82,7 +82,7 @@ unless the config sets `limits`.
 | Tasks | Tasklist create/update; task create/update/delete/move | Configured limits only | clear, tasklist deletion |
 | Drive | Own/private files create/update/copy/trash, spreadsheets and conversions, owner permission, permission removal | Public/shared/non-owned targets/parents, external permission, comments/replies | Permanent file deletion, emptyTrash, watch, shared-drive management |
 | Docs | Create and owned/private batchUpdate, images and links by URL included | Public/non-owned documents | Other writes |
-| Sheets | Create and writes on owned/private spreadsheets | Public/shared/non-owned spreadsheets | Non-API routes |
+| Sheets | Create and writes on owned/private spreadsheets | Public/shared/non-owned spreadsheets, also as a `copyTo` destination | Non-API routes, `copyTo` without a valid destination |
 | Gmail | Reads | Never | Every write; send-capable OAuth scopes |
 | Contacts (`people.googleapis.com`) | GET `people:searchContacts`, `people:batchGet`, `people/<id>`, `people/me/connections`, `otherContacts`, `otherContacts:search` | Never | Every write, contact groups, directory, other paths (`403 contacts-read-only`) |
 | Vault | Owner-initiated Markdown writes | Configured limits only | Delete API, traversal, hidden paths, symlinks |
