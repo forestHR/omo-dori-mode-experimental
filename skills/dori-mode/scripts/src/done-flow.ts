@@ -17,6 +17,7 @@ import type { Submitted } from "./submit.ts";
 import { replacementOf } from "./frozen.ts";
 import { watchLog } from "./watch-log.ts";
 import { checkDone, type SignalIo } from "./done-signals.ts";
+import { gateMissing } from "./merge-gate.ts";
 import { ownerSummary } from "./close-summary.ts";
 
 export type FlowDeps = {
@@ -260,6 +261,8 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
   const checks = await checkDone(lane.done, deps.run, signalIo(deps, lane));
   const lines = checks.map((c) => `SIGNAL ${c.ok ? "OK " : "NOT"} ${c.signal} -> ${c.detail}`);
   if (checks.some((c) => !c.ok)) return { closed: false, lines: [...lines, `REFUSED ${lane.key}: a Done signal is not live`] };
+  const ungated = await gateMissing(deps, lane.done);
+  if (ungated.length) return { closed: false, lines: [...lines, ...ungated, `REFUSED ${lane.key}: a PR of a gated repo was not merged through dori merge`] };
   let threadText = "";
   const already = summary?.trim() || !hasThread(lane) ? undefined : (posted ?? lane.claim?.posted);
   if (already) lines.push(`CLOSE_SUMMARY_SKIPPED ${lane.key}: its result is already in the thread (${already}); no second post`);

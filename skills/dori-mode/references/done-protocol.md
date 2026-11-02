@@ -4,6 +4,8 @@ Give this file to every lane you launch.
 
 When your lane's `Done =` signals are live and every change is pushed, claim done from your own session. The signals might be a PR merged, an issue closed or a version published. For local or QA-only work they can also be a command that passes, a file with the expected content, or a URL that answers (see `sessions.md`). Run them yourself first: the watcher re-runs every one and never takes your word for it.
 
+A PR in a repo your Dori gates (`mergeGate.repos`; your lane footer names it) merges only through the review gate, never with plain `gh pr merge`. Push, then in a clean checkout of the PR's head run `dori review <owner/repo>#<N>`: it runs the tests there first (the gate is for repos without CI: a PR with GitHub checks or auto-merge is refused as unsupported), then a reviewer of another model family reads the diff and must end with `VERDICT: CLEAR`. Then `dori merge <owner/repo>#<N>` merges exactly that head (`--match-head-commit`). Any commit pushed after the review gets `MERGE_REFUSED` until you review again at the new head; a `BLOCK` means fix the findings, push, review again. A gated PR merged without `dori merge` makes `claim-done` refuse with `MERGE_GATE_MISSING`.
+
 ```sh
 dori claim-done <your-lane-key> --evidence "<merge SHA, closed issue, version, links>" \
   --summary "<2 to 5 plain lines for the owner, in his language: what changed, what is left, when it reaches where it is used>"

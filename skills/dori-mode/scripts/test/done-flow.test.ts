@@ -96,6 +96,15 @@ test("closing directly refuses while a signal is not live and leaves the pane al
   expect(closedVia()).toHaveLength(0);
 });
 
+test("the close refuses a PR of a gated repo merged without dori merge, even after an earlier claim", async () => {
+  const gated = depsFor(world, fakeClock(T0), state.dir, { hooks: { threadDone: ["notify", "{thread}", "{text}"] }, mergeGate: { ...at(T0).config.mergeGate, repos: { "acme/app": "2026-01-01T10:00:00Z" } } });
+  const r = await closeLane(gated, lane, "manual");
+  expect(r.closed).toBe(false);
+  expect(r.lines).toContainEqual(expect.stringMatching(/^MERGE_GATE_MISSING acme\/app#1: merged at 2026-01-01T11:00:00Z without dori merge/));
+  expect(r.lines.at(-1)).toStartWith("REFUSED demo-lane");
+  expect(closedVia()).toHaveLength(0);
+});
+
 test("text still sitting in the pane input after a poll window gets one more Enter", async () => {
   world.stuckReads = SUBMIT_TIMING.clearPolls;
   expect(await sendVerified(at(T0).run, at(T0).clock, { ...at(T0).config, backend: "herdr" }, "w:p1", "[LEAD] stuck text still here")).toBe(true);

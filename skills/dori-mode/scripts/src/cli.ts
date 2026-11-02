@@ -42,6 +42,7 @@ import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, 
 import { applyDirectives, auditOrReport, checkMeaning, linkRows, pushLinks, sinceIso } from "./directive-audit.ts";
 import { addNode, formatIntent, formatTree, gateFix, intentView, laneArea, loadTree, NODE_KINDS, type NodeKind, recordBranch, recordOverride, recordRefusal, requiredMessage, researchCheck, researchFacts, researchHint, sendResearch, setStatus, stuckTop, stuckView, type TreeArea, TreeError, updateTree } from "./explore.ts";
 import { challengeMissing, ChallengeError, checkReviewers, familyOf, reviewers, runChallenge } from "./challenge.ts";
+import { gateMissing, GateRefusal, mergePr, parsePr, reviewPr } from "./merge-gate.ts";
 import { canonical, evidenceLines, inferredLine, inferRepeats, laneEvents, type MetricRepeat, suspects } from "./auto-signals.ts";
 import { runOwnerCheck, sendReread } from "./owner-check.ts";
 import { branchesFrom, ForkError, forkExplore, type Mode } from "./fork-explore.ts";
@@ -187,6 +188,18 @@ const USAGE = `dori <command> [options]
                                        order (best GPT, Claude, Grok); the first that writes a review wins, --all asks one
                                        of each family in turn. Ids this host cannot call are skipped before any call
   challenge --check [<key>]            each reviewer id: REVIEWER_OK (and the id it is called as) or REVIEWER_SKIP and why
+  review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K]
+                                       a review receipt pinned to the PR's head commit: CHECKOUT (default: here) must be
+                                       that head with no changes; mergeGate.testCommand runs there first (TESTS_OK, or
+                                       REVIEW_TESTS_FAILED and no review); then a fresh reviewer of another family than
+                                       the lane's model reads the diff and the code and ends with VERDICT: CLEAR|BLOCK
+                                       (exit 1 on BLOCK). For repos without CI: a PR with GitHub checks or auto-merge is
+                                       refused (unsupported). Receipts: <stateDir>/receipts/<repo>_<N>@<sha>.<kind>.json
+  merge <owner/repo#N> [--dry-run] [--delete-branch]
+                                       MERGE_REFUSED <reason> unless the head has a CLEAR review receipt and a passing
+                                       local test receipt; then gh pr merge --squash --match-head-commit <head>, read back
+                                       as MERGED ... merge=<sha>. A commit pushed after the review has no receipt, so it is
+                                       refused until reviewed again
   fork-explore <key> --metric M --hypotheses H1 --test T1 --hypotheses H2 --test T2 ... [--gpu N ...|--gpu-all]
                [--mode agent|cmd] [--minutes N] [--model M]
                                        one time-boxed task per hypothesis, in parallel, all on metric M; GPU branches
@@ -491,6 +504,7 @@ const flags = parseArgs({
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
+    "delete-branch": { type: "boolean" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -898,6 +912,8 @@ try {
       const l = await lane(key);
       const missing = challengeMissing(l);
       if (missing) die(missing, 5);
+      const ungated = await gateMissing(deps, l.done);
+      if (ungated.length) die(ungated.join("\n"), 5);
       const summary = opt("summary");
       if (summary !== undefined) postable(summary, `claim-done --summary ${l.key}`);
       const bad = summary === undefined ? undefined : plainSummaryProblem(summary, config.discord.locale, config.discord.ownerSpeech);
@@ -994,6 +1010,21 @@ try {
         console.log(v.text);
         console.log(`CHALLENGE_SAVED ${v.record.file} reviewer=${v.record.model}`);
       }
+      break;
+    }
+    case "review": {
+      const pr = parsePr(key ?? die("usage: dori review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K]"));
+      const laneKey = opt("lane");
+      const here = laneKey ? "" : config.backend === "aoe" ? await currentTmuxSession(run).catch(() => "") : (process.env.HERDR_PANE_ID ?? "");
+      const owner = laneKey ? await lane(laneKey) : here ? await deps.registry.byPane(here) : null;
+      const out = await reviewPr(deps, pr, { dir: resolve(many("dir")[0] ?? process.cwd()), model: opt("model"), lane: owner });
+      for (const line of out) console.log(line);
+      if (/ verdict=BLOCK /.test(out.at(-1) ?? "")) process.exit(1);
+      break;
+    }
+    case "merge": {
+      const pr = parsePr(key ?? die("usage: dori merge <owner/repo#N> [--dry-run] [--delete-branch]"));
+      console.log(await mergePr(deps, pr, { dryRun: Boolean(flags.values["dry-run"]), deleteBranch: Boolean(flags.values["delete-branch"]) }));
       break;
     }
     case "fork-explore": {
@@ -1912,6 +1943,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof MemoryRecallError) die(e.message);
+  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof MemoryRecallError) die(e.message);
   throw e;
 }

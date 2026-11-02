@@ -211,7 +211,7 @@ export const uiWarning = (input: LaunchInput, brief: string, ledger: Pick<Ledger
     : `LAUNCH_UI_HINT ${input.key}: the brief reads like UI work (${words}) but has no --ui, so the owner's seven UI steps (references/ui-work.md) are not in it. Launched as is; for UI work, launch with --ui.`;
 };
 
-export const footer = (lane: Lane, leadPane: string, backend: Backend = "herdr"): string => [
+export const footer = (lane: Lane, leadPane: string, backend: Backend = "herdr", gated: readonly string[] = []): string => [
   "",
   "## Lane footer (written by dori launch)",
   `- Key: ${lane.key}. Work thread: ${lane.thread}.`,
@@ -224,6 +224,7 @@ export const footer = (lane: Lane, leadPane: string, backend: Backend = "herdr")
   ...(lane.goal ? [`- Goal (owner words): "${lane.goal}". At each stage change (a new phase, a pivot, before a big step) run dori intent-check ${lane.key} --direction "<what you do now>" --next "<next step>" (a reviewer model reads it against the owner's words) and say in your report how the step serves this goal.`] : []),
   ...(lane.challengeBefore?.length ? [`- Before ${lane.challengeBefore.map((s) => `"${s}"`).join(" or ")}: write the plan to a file and run dori challenge ${lane.key} --plan <file> (a model of another family reviews it); answer its reasons in your next report. A done claim is refused until a challenge is on record.`] : []),
   `- What you learn goes to one place: a standing instruction of the owner to the lead in a [REPORT] for the directive ledger, a lesson, fact or how the work went into your omo memory, and the report stays the record (references/done-protocol.md).`,
+  ...(gated.length ? [`- A PR in ${gated.join(", ")} merges only through the review gate: in a clean checkout of the PR's head run dori review <repo>#<N> (it runs the tests there first, then a reviewer of another model family; VERDICT: CLEAR is needed; a PR with GitHub checks or auto-merge is refused as unsupported), then dori merge <repo>#<N>, which merges only that exact head (--match-head-commit). A commit pushed after the review needs dori review again; a PR merged with plain gh pr merge makes claim-done refuse (MERGE_GATE_MISSING).`] : []),
   `- When done: dori claim-done ${lane.key} --evidence "<merge SHA, closed issue, version>"${hasThread(lane) ? ` --summary "<2 to 5 plain lines for the owner, in his language: what changed, what is left, when it reaches where it is used; no paths, hashes or codes>" (your one result post: the close posts it in the work thread; if you already posted your result there yourself in the last 30 minutes, the close posts nothing more, so never post it twice; without --summary and a post the close has a model write one from your last report and REPORT.md)` : ""}. See references/done-protocol.md.`,
   "",
 ].join("\n");
@@ -394,7 +395,7 @@ export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<R
   const hint = uiWarning(input, raw, ledger, ui);
   const added = addedLine(input.key, plan);
   const lines = [...(hint ? [hint] : []), ...(added ? [added] : []), ...waivedLines(input.key, plan)];
-  return { draft, ...(steps ? { steps } : {}), lines, missing: missingLines(input.key, plan), text: `${ui ? withUiSteps(lead, await uiSteps()) : lead}\n${past ? `${past}\n` : ""}${tree ? `${tree}\n` : ""}${footer(draft, deps.config.leadPane, deps.config.backend)}` };
+  return { draft, ...(steps ? { steps } : {}), lines, missing: missingLines(input.key, plan), text: `${ui ? withUiSteps(lead, await uiSteps()) : lead}\n${past ? `${past}\n` : ""}${tree ? `${tree}\n` : ""}${footer(draft, deps.config.leadPane, deps.config.backend, Object.keys(deps.config.mergeGate.repos))}` };
 };
 
 // The first lines of the lead's brief (headings and blank lines left out), for the thread's first message.
