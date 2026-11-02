@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, type FeedTodo, flockDir, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
+import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, type FeedTodo, flockDir, followUpId, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 
@@ -430,4 +430,28 @@ test("a host slot is counted and written only under the host directory's lock th
   expect(writtenWhileHeld).toBe(false);
   expect(result).toBeUndefined();
   expect(existsSync(join(hostDir, "me.i1.ay.json"))).toBe(true);
+});
+
+test("an approved follow-up has its own Done line, is dropped when the source finishes first, and gets its own id for the longest draft ids", async () => {
+  // Given: a draft whose lane finished, with an id of the longest lane-key length
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const ref = `pb-${"a".repeat(54)}`;
+  const draftId = `todo-${ref}`.slice(0, 61);
+  const entry = (status: string, approved: boolean) => ({ todo_id: ref, title: "긴 할 일", status, ...(approved ? { approved_at: "2026-11-02T15:00:00Z", auto_applied: false } : {}) });
+  const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  await sweep([entry("진행", false)]);
+  writeFileSync(join(state, "backlog", "items", `${draftId}.json`), JSON.stringify({ ...readItem(state, draftId)!, status: "done" }));
+  // When
+  const approved = await sweep([entry("진행", true)]);
+  const follow = readItem(state, followUpId(draftId));
+  const finished = await sweep([entry("완료", true)]);
+  // Then
+  expect(draftId.length).toBe(61);
+  expect(followUpId(draftId)).not.toBe(draftId);
+  expect(followUpId(draftId).length).toBeLessThanOrEqual(61);
+  expect(approved[0]).toStartWith(`BACKLOG_INTAKE ${followUpId(draftId)} (feed, owner-approved, after draft ${draftId})`);
+  expect(follow?.done).toBe(`file ${state}/backlog/reports/${followUpId(draftId)}.md`);
+  expect(follow?.done).not.toBe(readItem(state, draftId)?.done);
+  expect(finished).toEqual([`BACKLOG_FEED_DONE ${followUpId(draftId)}: done on the source, dropped from the list`]);
+  expect(readItem(state, followUpId(draftId))?.status).toBe("dropped");
 });

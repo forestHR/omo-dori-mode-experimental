@@ -384,6 +384,10 @@ export const orderIntake = (d: { readonly stateDir: string; readonly settings: B
   return lines;
 };
 
+// the approved follow-up of a feed draft: always a different lane key, cut with a hash when the draft's id is long
+export const followUpId = (id: string): string =>
+  id.length + 3 <= 61 ? `${id}-ok` : `${id.slice(0, 51).replace(/[-._]+$/, "")}-${createHash("sha256").update(id).digest("hex").slice(0, 6)}-ok`;
+
 export type FeedTodo = { readonly todo_id?: string; readonly id?: string; readonly title?: string; readonly status?: string; readonly [k: string]: unknown };
 const FEED_DONE = /^(done|완료|끝|closed)$/i;
 
@@ -419,9 +423,9 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     if (!ref || !LANE_KEY.test(id)) continue;
     const old = readItem(d.stateDir, id);
     if (FEED_DONE.test(String(todo.status ?? ""))) {
-      if (old?.status === "open") {
-        save(d.stateDir, logged(old, at, "dropped: done on the source", { status: "dropped" }));
-        lines.push(`BACKLOG_FEED_DONE ${id}: done on the source, dropped from the list`);
+      for (const open of [old, readItem(d.stateDir, followUpId(id))].filter((i): i is BacklogItem => i?.status === "open")) {
+        save(d.stateDir, logged(open, at, "dropped: done on the source", { status: "dropped" }));
+        lines.push(`BACKLOG_FEED_DONE ${open.id}: done on the source, dropped from the list`);
       }
       continue;
     }
@@ -432,12 +436,12 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     // approved after it came in as a draft: an open draft is upgraded in place; one whose draft lane already ran gets an
     // approved follow-up item once that lane closed (its draft is in the lane's report)
     const upgrade = approved && old?.draftOnly && old.status === "open";
-    const followUp = approved && old?.draftOnly && old.status === "done" ? `${id}-ok`.slice(0, 61) : undefined;
+    const followUp = approved && old?.draftOnly && old.status === "done" ? followUpId(id) : undefined;
     if (old && !upgrade && !(followUp && !readItem(d.stateDir, followUp))) continue;
     const itemId = followUp ?? id;
     const brief = join(dir(d.stateDir), "intake", `${itemId}.md`);
     writeAtomic(brief, feedBrief(todo, itemId, approved) + (followUp ? `\n[앞 단계] 승인 전 초안 레인 ${id}이 이미 끝났다. 그 보고서(${old?.done ?? "?"})의 초안을 먼저 읽고 이어서 한다.\n` : ""));
-    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", id).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
+    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
     lines.push(upgrade ? `BACKLOG_FEED_APPROVED ${id}: the owner approved it; it now works within its scope` : `BACKLOG_INTAKE ${itemId} (feed, ${approved ? "owner-approved" : "draft only"}${followUp ? `, after draft ${id}` : ""}): ${title}`);
   }
   return lines;
