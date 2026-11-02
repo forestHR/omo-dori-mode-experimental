@@ -46,6 +46,38 @@ test("sends one guidance notification when notify-change is requested", async ()
   } finally { state.done(); }
 });
 
+// owner 2026-11-03 (ledger update-notice-once): every Dori repeated each update to the owner; only the maintenance Dori
+// reports an update, once, after checking every Dori applied it
+test("an update ends with maintainerAnnounce on the maintenance Dori only, and notify-change keeps announce there", async () => {
+  // Given
+  const state = withState();
+  try {
+    const base = defaultConfig();
+    const update = { ...base.update, announce: "Do not tell the owner.", maintainerAnnounce: "Check every Dori, then tell the owner once." };
+    const run = async (maintainer: boolean): Promise<string> => {
+      const sent: string[] = [];
+      const dir = join(state.dir, String(maintainer));
+      const config = { ...base, stateDir: dir, watchLog: join(dir, "lanes.log"), leadPane: "lead", update: { ...update, maintainer } };
+      await Bun.write(join(dir, "update.json"), JSON.stringify({ applied: "old", keys: knownConfigKeys() }));
+      await applyUpdate({
+        config, configPath: join(dir, "missing.json"), clock: fakeClock(0),
+        git: async (args) => ({ code: args.includes("merge-base") ? 1 : 0, err: "", out: args.includes("symbolic-ref") ? "main" : args.includes("rev-parse") ? "new" : "" }),
+        systemctl: async () => ({ code: 0, out: "", err: "" }),
+        send: async (_pane, text) => { sent.push(text); return true; }, print: () => {},
+      }, { pull: false, dryRun: false });
+      return sent.join("\n---\n");
+    };
+    const maintainerConfig = { ...base, leadPane: "lead", watchLog: join(state.dir, "notify.log"), update: { ...update, maintainer: true } };
+    const notified: string[] = [];
+    // When
+    const [other, maintenance] = [await run(false), await run(true)];
+    await announceChange({ config: maintainerConfig, clock: fakeClock(0), print: () => {}, send: async (_pane, text) => { notified.push(text); return true; } }, { summary: "Own guidance", files: [] });
+    // Then
+    expect({ other: other.split("\n\n").at(-1), maintenance: maintenance.split("\n\n").at(-1), notify: notified[0]?.split("\n\n").at(-1) })
+      .toEqual({ other: update.announce, maintenance: update.maintainerAnnounce, notify: update.announce });
+  } finally { state.done(); }
+});
+
 test("logs ANNOUNCE_FAIL when pane delivery fails", async () => {
   // Given
   const state = withState();

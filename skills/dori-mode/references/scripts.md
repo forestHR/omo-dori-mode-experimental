@@ -92,7 +92,9 @@ The fields of `scorecard` are `scorecard.timeZone`, `scorecard.language`, `score
 | `update.services.ready` | `""` | regex for a new complete log line after restart; empty checks `systemctl --user is-active` only |
 | `update.readyTimeoutSec` | `60` | bounded restart and readiness timeout per service |
 | `update.alertPane` | `leadPane` | restart and update failure alerts, sent through the configured backend |
-| `update.announce` | `"Tell the owner in your own channel, briefly, what changed and how your behaviour changes because of it."` | instruction at the end of each change summary sent to `leadPane` |
+| `update.announce` | lead-only text: do not tell the owner; the maintenance Dori checks every Dori applied it and tells the owner once; the Dori that watches the maintenance Dori does it when that lead stays down | instruction at the end of each change summary sent to `leadPane` |
+| `update.maintainer` | `false` | `true` on the maintenance Dori only: its `dori update` notice ends with `update.maintainerAnnounce` instead of `update.announce` (owner 2026-11-03, ledger `update-notice-once`); anything but a boolean is a config error |
+| `update.maintainerAnnounce` | wait until no new `[UPDATE]` came for 15 minutes, check on every Dori that `update.json` `applied` is this HEAD and its restarted services are active, fix a Dori that is behind, then tell the owner once in its own channel | instruction at the end of the maintenance Dori's `dori update` notice |
 
 A new config key: run `dori update` on every Dori on the host (or read its CONFIG_NEW_KEY lines) and set the key in each config.json that needs it.
 
@@ -160,13 +162,13 @@ On a new HEAD it diffs the saved SHA against HEAD. Every service with a matching
 
 Keys this code knows but the saved code did not, and which are not set in the raw config file, print and log `CONFIG_NEW_KEY <key> unset in <config path> (default used)`. The known keys are saved for the next run. A restart failure sends `[ALERT] dori update: RESTART_FAIL ...` to `update.alertPane`, including new-key notices; without a restart failure the key notices do not trigger an alert. Git failures (including rejected pulls) print and log `UPDATE_FAIL` with stderr and alert the same pane, preserving the previously applied SHA.
 
-After restarts, one `[UPDATE]` summary goes to `leadPane` (`DORI_LEAD_PANE` overrides it). It contains merged PR titles from old..new (or commit subjects if there are no merges), changed `references/`, `SKILL.md`, and `setups/**/README.md` paths under this skill, new config keys, restart results, and `update.announce`. Delivery prints and logs `ANNOUNCED <pane>` only after the pane-send helper saw the text submitted (see `dori type`), else `ANNOUNCE_FAIL <pane> <reason>` next to the helper's `NOT_SUBMITTED` line. A missing lead pane logs `ANNOUNCE_FAIL` without sending anything. Alerts and announcements use the same argv pane-send helper as lanes.
+After restarts, one `[UPDATE]` summary goes to `leadPane` (`DORI_LEAD_PANE` overrides it). It contains merged PR titles from old..new (or commit subjects if there are no merges), changed `references/`, `SKILL.md`, and `setups/**/README.md` paths under this skill, new config keys, restart results, and `update.announce` (`update.maintainerAnnounce` when `update.maintainer` is true). So an update is not repeated to the owner by every Dori: the other leads only take it in, and the maintenance Dori tells the owner once after every Dori runs it (owner 2026-11-03, ledger `update-notice-once`). Delivery prints and logs `ANNOUNCED <pane>` only after the pane-send helper saw the text submitted (see `dori type`), else `ANNOUNCE_FAIL <pane> <reason>` next to the helper's `NOT_SUBMITTED` line. A missing lead pane logs `ANNOUNCE_FAIL` without sending anything. Alerts and announcements use the same argv pane-send helper as lanes.
 
 `--dry-run` prints planned local changes and restarts with a `DRY_RUN` prefix; it does not pull, restart, send, or write state/watch logs. A failed update/restart exits 1. The generic systemd path unit can run `dori update` after a pull; see the Discord + aoe setup.
 
 ### `dori notify-change --summary TEXT [--file PATH ...]`
 
-Sends one `[UPDATE]` message containing the supplied summary and changed guidance paths, followed by `update.announce`, to `leadPane`. Use it when a Dori's own memory or AGENTS guidance changes outside the script clone. Prints and logs `ANNOUNCED <pane>` or `ANNOUNCE_FAIL <pane> <reason>`; failed delivery exits 1.
+Sends one `[UPDATE]` message containing the supplied summary and changed guidance paths, followed by `update.announce` (also on the maintenance Dori: this is one Dori's own change, not a shared update), to `leadPane`. Use it when a Dori's own memory or AGENTS guidance changes outside the script clone. Prints and logs `ANNOUNCED <pane>` or `ANNOUNCE_FAIL <pane> <reason>`; failed delivery exits 1.
 
 ### `dori handover [--note FILE] [--title T] [--model M] [--keep-old] [--no-monitors] [--minutes N] [--dry-run]`
 
