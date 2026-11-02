@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { sessionPath, withPi } from "../src/aoe.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,6 +7,18 @@ import { type DoriConfig, defaultConfig } from "../src/config.ts";
 import type { FlowDeps } from "../src/done-flow.ts";
 import { Registry } from "../src/registry.ts";
 import type { Clock, Ran, Runner } from "../src/run.ts";
+
+// A launch adds nvm's node and the agent's pi to the PATH aoe add runs with when the caller's PATH lacks them (a systemd
+// unit's bare PATH, as dori watch runs a lane's Done command). A test that checks what aoe add got sets PATH to what the
+// launch would make, so the result does not hang on the PATH of the shell that runs it; the returned function restores it.
+export const launchReadyPath = (): (() => void) => {
+  const caller = process.env.PATH;
+  const p = caller ?? "";
+  process.env.PATH = withPi(sessionPath(p, process.env.NVM_DIR || join(process.env.HOME ?? "", ".nvm")) ?? p, "omo");
+  return () => {
+    process.env.PATH = caller;
+  };
+};
 
 export type World = {
   prState: string;

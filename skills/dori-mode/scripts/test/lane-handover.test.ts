@@ -16,7 +16,7 @@ import type { Lane } from "../src/registry.ts";
 import type { Proc } from "../src/session-id.ts";
 import { sessionDirFor } from "../src/session-id.ts";
 import { defaultConfig } from "../src/config.ts";
-import { depsFor, fakeClock, NEW_AOE_ID, newWorld, sent, withState, type World } from "./fakes.ts";
+import { depsFor, fakeClock, launchReadyPath, NEW_AOE_ID, newWorld, sent, withState, type World } from "./fakes.ts";
 
 const OLD_ID = "1a1a1a1a22223333";
 const OLD = "aoe_demo_1a1a1a1a";
@@ -202,7 +202,9 @@ const ready = (deps: LaneHandoverDeps, chains: number[], at = "2026-10-11T16:30:
 // a message of the old conversation, appended to its log (the log starts with one line, so this is line 2)
 const oldSays = (text: string) => appendFileSync(join(sessionDirFor(join(state.dir, "sessions"), CWD), "2026-10-11T10-00-00-000Z_old-sid.jsonl"), `\n${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } })}`);
 
+let restorePath = () => {};
 beforeEach(() => {
+  restorePath = launchReadyPath();
   state = withState();
   w = newWorld();
   sim = { arm: [{ description: "scratch events", command: EVENTS, pid: 201 }, { description: "digest", command: "until false; do sleep 60; done", pid: 202 }], thinking: "high", ackPane: NEW, ack: true, supplement: "fix", handled: [], account: "x", chainSurvives: false, doubleRun: false, restarted: false };
@@ -211,7 +213,10 @@ beforeEach(() => {
   live = new Set([14, 15, 16, 17, 40, 41, 201, 202]);
   table = baseTable();
 });
-afterEach(() => state.done());
+afterEach(() => {
+  state.done();
+  restorePath();
+});
 
 test("the status line gives model, thinking and context use in both omo formats", () => {
   expect(statusLine(HIGH, MODEL)).toEqual({ model: "claude-opus-5-5", thinking: "high", contextPct: 72, account: "x" });

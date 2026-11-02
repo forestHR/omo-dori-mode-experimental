@@ -17,7 +17,7 @@ import { listPanes, sendVerified } from "../src/panes.ts";
 import { SUBMIT_TIMING } from "../src/submit.ts";
 import type { Lane } from "../src/registry.ts";
 import { argvSessionId, resolveSession } from "../src/session-id.ts";
-import { depsFor, fakeClock, NEW_AOE_ID, newWorld, RUNNING, sent, withState, type World } from "./fakes.ts";
+import { depsFor, fakeClock, launchReadyPath, NEW_AOE_ID, newWorld, RUNNING, sent, withState, type World } from "./fakes.ts";
 
 const T0 = Date.parse("2026-01-01T12:00:00.000Z");
 const MIN = 60_000;
@@ -29,7 +29,9 @@ let world: World;
 // launches here start lanes whose goal store holds a goal; the tests of dori-superagent issue #50 below override it
 const at = (ms: number): FlowDeps => ({ ...depsFor(world, fakeClock(ms), state.dir, { backend: "aoe", leadPane: "aoe_Dori_0a1b2c3d" }), readGoal: async () => ({ status: "active" }) });
 
+let restorePath = () => {};
 beforeEach(() => {
+  restorePath = launchReadyPath();
   state = withState();
   world = newWorld();
   world.aoe = [
@@ -39,7 +41,10 @@ beforeEach(() => {
   ];
   world.tmux = [PANE, "aoe_term_fix-a_abcdef12", "aoe_Dori_0a1b2c3d", "0"];
 });
-afterEach(() => state.done());
+afterEach(() => {
+  state.done();
+  restorePath();
+});
 
 test("each running aoe session is one pane named by its tmux session; terminals and stopped sessions are not panes", async () => {
   const panes = await listPanes(at(T0).run, "aoe");
