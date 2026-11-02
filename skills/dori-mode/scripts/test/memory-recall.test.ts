@@ -59,3 +59,11 @@ test("dori recall prints the notes of the configured memory repo the text points
   const [code, out] = await Promise.all([p.exited, new Response(p.stdout).text()]);
   expect({ code, first: out.split("\n")[0] }).toEqual({ code: 0, first: "MEMORY_RECALL reference/kimm-card-ai-billing.md: 카드 미결재 중 Claude·GPT 건 결재문서 정리 절차(형 2026-10-19 지시, 기계연_결재 폴더 짜임, 로그인 경로)" });
 });
+
+// 2026-11-02 live QA on OkDori, YooDori and GongDori: the card message recalled notes that only shared 그리고 and 있어 with it
+test("words that carry no meaning (그리고, 있어, 해줘 ...) recall nothing by themselves", () => {
+  const r = repo();
+  note(r, "reference/dongdori.md", "Relayed rules from ZzangDori", "그리고 앞으로 그건 그냥 해도 돼. 지금 그 방에 글이 있어.");
+  expect(recallNotes("그리고 카드처리해 서류 준비하고 있어", r).map((n) => n.path)).toEqual(["reference/kimm-card-ai-billing.md"]);
+  expect(recallNotes("그리고 지금 있어 해줘", r)).toEqual([]);
+});

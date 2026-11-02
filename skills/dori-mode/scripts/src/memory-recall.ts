@@ -48,8 +48,14 @@ const notesOf = (repo: string): Note[] => {
 
 // The words of a message, each with the stems a Korean word ending may hide ("카드처리해" -> 카드처리, 카드처, 카드): every
 // prefix of two characters or more, longest first. Words of one character are left out.
+// Words that say nothing about the work (conjunctions, "있어", "해줘", "지금"): neither they nor a stem cut down to them count
+// (live QA 2026-11-02: OkDori's card message recalled a note that shared only 그리고 and 있어 with it).
+const FILLER = new Set(["그리고", "그래서", "그런데", "근데", "그럼", "그냥", "있어", "있는", "있고", "없어", "하고", "해줘", "해서", "하는", "했어", "지금", "이거", "그거", "저거", "이제", "다시", "같이", "이런", "그런", "어떻게", "the", "and", "for", "with", "this", "that"]);
 const stemsOf = (text: string): string[][] =>
-  [...new Set((text.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? []))].map((w) => Array.from({ length: w.length - 1 }, (_, i) => w.slice(0, w.length - i)));
+  [...new Set((text.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? []))]
+    .filter((w) => !FILLER.has(w))
+    .map((w) => Array.from({ length: w.length - 1 }, (_, i) => w.slice(0, w.length - i)).filter((s) => !FILLER.has(s)))
+    .filter((stems) => stems.length > 0);
 
 // What a note may show in the row: its path and description, never a secret. A long token-like run and a value after a
 // password or token name are blanked.
