@@ -358,9 +358,12 @@ tokens are in `dori.env`, so the monitor can be armed before the owner has insta
   it answers: the inbox rows (`scope: "slack"`) in that channel whose `reply_thread` is the answer's `--thread` (none for
   a plain DM), or whose own ts is that `--thread`. It calls `reactions.remove` with the bot token, which only ever
   removes the bot's own reaction, never a person's or another app's; with a member's `xoxp-` token it touches nothing.
-  A message done once is kept in `<stateDir>/slack-uneyed.json` and not asked again. An app without `reactions:write`
-  prints one `SLACK_UNEYE_SKIPPED` line, any other failure `SLACK_UNEYE_FAIL <channel> <ts> <error>` (tried again on the
-  next answer there); the answer itself has already gone out either way.
+  Every message done is kept in `<stateDir>/slack-uneyed.json` and never asked about again. Each removal has 3 s: a
+  stalled one is aborted (`SLACK_UNEYE_FAIL ... no answer within 3s`) and it and the rest wait for the next answer
+  there. An app without `reactions:write` prints one `SLACK_UNEYE_SKIPPED` line, any other failure
+  `SLACK_UNEYE_FAIL <channel> <ts> <error>` (tried again on the next answer); the answer itself has already gone out
+  either way. The watcher writes a message's inbox row only after its eyes call returned, and eyes that land after the
+  answer (a `reactions.add` slower than its deadline) are taken off by the watcher when they land.
 
 ### Usage screenshot
 

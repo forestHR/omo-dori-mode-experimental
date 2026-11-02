@@ -54,7 +54,7 @@ import { canLaunch } from "./routing.ts";
 import { normFix, recordFix } from "./same-fix.ts";
 import { computeScorecard, dayWindow, formatScorecard, saveScorecard, ScorecardError } from "./scorecard.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
-import { clearEyes, Slack } from "./messenger/slack.ts";
+import { clearEyes, Slack, slackUnreact } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -1504,7 +1504,7 @@ try {
           // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off
           if (posted && process.env.DORI_SLACK_TOKEN?.startsWith("xoxb-")) {
             const files = { inbox: process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"), done: join(config.stateDir, "slack-uneyed.json") };
-            for (const line of await clearEyes(slack, files, posted, thread)) console.log(line);
+            for (const line of await clearEyes(slackUnreact(process.env.DORI_SLACK_TOKEN, process.env.DORI_SLACK_API?.trim() || undefined), files, posted, thread)) console.log(line);
           }
         }
       } else if (platform === "telegram") {

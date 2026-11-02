@@ -57,17 +57,28 @@ export class Slack {
   }
 }
 
-const UNEYED_MAX = 2000;
+// Takes the bot's own eyes off one message: one request, no retry, abortable (the answer is already out, so nothing
+// may hold the command after it).
+export type Unreact = (channel: string, ts: string, signal: AbortSignal) => Promise<void>;
+export const slackUnreact = (token: string, base = "https://slack.com/api"): Unreact => async (channel, ts, signal) => {
+  const res = await fetch(`${base}/reactions.remove`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" }, body: JSON.stringify({ channel, timestamp: ts, name: "eyes" }), signal });
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (res.status !== 200 || body.ok !== true) throw new MessengerError(`slack reactions.remove: ${String(body.error ?? res.status)}`, res.status, String(body.error ?? ""));
+};
+
+export const readUneyed = (file: string): Set<string> => new Set(existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as string[]) : []);
 
 // The eyes read receipt slack-watch.ts puts on an addressed message comes off once the Dori answers it, as on Discord.
 // The watcher's inbox rows say which messages got eyes (addressed) and where their answer goes (reply_thread); a post
 // there, or in a thread under the message itself, answers every earlier one of them. reactions.remove with the bot
 // token only ever takes off the bot's own reaction, never a person's or another app's. Messages already done are kept in
-// the done file so a later answer in the same place asks Slack nothing again. Returns the lines to print: one
+// the done file (every one, so the whole inbox can be read again without asking twice) so a later answer in the same
+// place asks Slack nothing again; the watcher reads it too, for eyes that land after the answer. Each removal has ms to
+// answer: a stalled one is aborted and it and the rest stay for the next answer. Returns the lines to print: one
 // SLACK_UNEYE_SKIPPED when the app has no reactions:write, one SLACK_UNEYE_FAIL per other failure (retried next time).
-export const clearEyes = async (slack: Slack, files: { readonly inbox: string; readonly done: string }, posted: Posted, thread?: string): Promise<string[]> => {
+export const clearEyes = async (unreact: Unreact, files: { readonly inbox: string; readonly done: string }, posted: Posted, thread?: string, ms = 3000): Promise<string[]> => {
   if (!existsSync(files.inbox)) return [];
-  const done: string[] = existsSync(files.done) ? (JSON.parse(readFileSync(files.done, "utf8")) as string[]) : [];
+  const done = readUneyed(files.done);
   const targets: string[] = [];
   for (const line of readFileSync(files.inbox, "utf8").split("\n")) {
     if (!line.includes('"scope":"slack"')) continue;
@@ -79,13 +90,20 @@ export const clearEyes = async (slack: Slack, files: { readonly inbox: string; r
     }
     if (row.scope !== "slack" || !row.addressed || !row.id || row.channel_id !== posted.channel || !tsAfter(posted.ts, row.id)) continue;
     if ((row.reply_thread ?? null) !== (thread ?? null) && row.id !== thread) continue;
-    if (!done.includes(`${posted.channel}:${row.id}`) && !targets.includes(row.id)) targets.push(row.id);
+    if (!done.has(`${posted.channel}:${row.id}`) && !targets.includes(row.id)) targets.push(row.id);
   }
   const lines: string[] = [];
+  let changed = false;
   for (const ts of targets) {
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), ms);
     try {
-      await slack.call("reactions.remove", { channel: posted.channel, timestamp: ts, name: "eyes" });
+      await unreact(posted.channel, ts, stop.signal);
     } catch (e) {
+      if (stop.signal.aborted) {
+        lines.push(`SLACK_UNEYE_FAIL ${posted.channel} ${ts} slack reactions.remove: no answer within ${ms / 1000}s`);
+        break;
+      }
       const code = e instanceof MessengerError ? e.code : undefined;
       if (code === "missing_scope" || code === "not_allowed_token_type" || code === "no_permission") {
         lines.push(`SLACK_UNEYE_SKIPPED slack reactions.remove: ${code}: the app has no reactions:write, so the eyes stay until it is added and the app reinstalled`);
@@ -96,13 +114,16 @@ export const clearEyes = async (slack: Slack, files: { readonly inbox: string; r
         lines.push(`SLACK_UNEYE_FAIL ${posted.channel} ${ts} ${e instanceof Error ? e.message : String(e)}`);
         continue;
       }
+    } finally {
+      clearTimeout(timer);
     }
-    done.push(`${posted.channel}:${ts}`);
+    done.add(`${posted.channel}:${ts}`);
+    changed = true;
   }
-  if (targets.length) {
+  if (changed) {
     mkdirSync(dirname(files.done), { recursive: true });
     const tmp = `${files.done}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(done.slice(-UNEYED_MAX)), { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify([...done]), { mode: 0o600 });
     renameSync(tmp, files.done);
   }
   return lines;

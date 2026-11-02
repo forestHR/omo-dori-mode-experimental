@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ServerWebSocket } from "bun";
@@ -34,8 +34,13 @@ const fakeSlack = () => {
   let opens = 0;
   let port = 0;
   let pings = 0;
-  // unreact: the error code reactions.remove answers with ("" = ok)
-  const failing = { auth: 0, reactScope: false, reactStall: false, unreact: "" };
+  // unreact: the error code reactions.remove answers with ("" = ok, "stall" = never answers); reactHold: reactions.add
+  // answers only when the test calls release()
+  const failing = { auth: 0, reactScope: false, reactStall: false, reactHold: false, unreact: "" };
+  const held: (() => void)[] = [];
+  const release = () => {
+    for (const r of held.splice(0)) r();
+  };
   const server = Bun.serve({
     port: 0,
     fetch: async (req, srv) => {
@@ -58,6 +63,8 @@ const fakeSlack = () => {
       if (method === "users.info") return reply({ user: { profile: { display_name: `name-${String(body.user)}` } } });
       if (method === "chat.postMessage") return reply({ channel: body.channel, ts: "1700000100.000100" });
       if (method === "reactions.add" && failing.reactStall) return new Promise<Response>(() => {});
+      if (method === "reactions.add" && failing.reactHold) return new Promise<Response>((r) => held.push(() => r(reply({}))));
+      if (method === "reactions.remove" && failing.unreact === "stall") return new Promise<Response>(() => {});
       if (method === "reactions.add") return failing.reactScope ? Response.json({ ok: false, error: "missing_scope" }) : reply({});
       if (method === "reactions.remove") return failing.unreact ? Response.json({ ok: false, error: failing.unreact }) : reply({});
       return Response.json({ ok: false, error: "unknown_method" });
@@ -100,7 +107,7 @@ const fakeSlack = () => {
     sockets.at(-1)?.send(JSON.stringify({ envelope_id: envelope, type: "events_api", payload: { event } }));
     return envelope;
   };
-  return { calls, acks, sockets, opens: () => opens, pings: () => pings, failing, until, changed, event, api: `http://localhost:${port}/api`, server };
+  return { calls, acks, sockets, opens: () => opens, pings: () => pings, failing, release, until, changed, event, api: `http://localhost:${port}/api`, server };
 };
 
 const watcher = async (slack: ReturnType<typeof fakeSlack>, threads: object[] = [], pingMs = 30_000, env: Record<string, string> = {}, reactMs = 3000) => {
@@ -296,6 +303,57 @@ test("taking the eyes off: no reactions:write is one SLACK_UNEYE_SKIPPED line an
   expect([gone.code, gone.out.trim().split("\n").length, after.code]).toEqual([0, 1, 0]);
   expect(unreacted(slack)).toEqual(["D1 1700000000.000100 eyes bot", "D1 1700000000.000100 eyes bot"]);
 });
+
+test("a reactions.remove that never answers is aborted: the answer's command ends with SENT and one SLACK_UNEYE_FAIL, and the next answer takes the eyes off", async () => {
+  // Given an addressed DM and a Slack that takes the removal and never answers (the 3 s deadline is the behavior here)
+  const slack = fakeSlack();
+  const w = await watcher(slack);
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "one", ts: "1700000000.000100" });
+  await slack.until("the DM", () => w.msgs().length === 1);
+  slack.failing.unreact = "stall";
+  // When
+  const stalled = await send(w, slack, ["--to", "D1", "--text", "a"]);
+  // Then the command still ends, the answer went out, and the message is left for the next answer
+  expect(stalled.code).toBe(0);
+  expect(stalled.out.trim().split("\n").slice(1)).toEqual(["SLACK_UNEYE_FAIL D1 1700000000.000100 slack reactions.remove: no answer within 3s"]);
+  slack.failing.unreact = "";
+  const next = await send(w, slack, ["--to", "D1", "--text", "b"]);
+  expect([next.code, next.out.trim().split("\n").length]).toEqual([0, 1]);
+  expect(unreacted(slack)).toEqual(["D1 1700000000.000100 eyes bot", "D1 1700000000.000100 eyes bot"]);
+}, 15_000);
+
+test("eyes that land after the answer already cleared the message come off again in the watcher", async () => {
+  // Given a reactions.add that answers only after the watcher's deadline (200 ms here)
+  const slack = fakeSlack();
+  slack.failing.reactHold = true;
+  const w = await watcher(slack, [], 30_000, {}, 200);
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "one", ts: "1700000000.000100" });
+  await slack.until("the DM", () => w.msgs().length === 1);
+  // When the lead answers while the eyes are not on yet, and then they land
+  slack.failing.unreact = "no_reaction";
+  expect((await send(w, slack, ["--to", "D1", "--text", "a"])).code).toBe(0);
+  slack.failing.unreact = "";
+  slack.release();
+  // Then the watcher takes them off again, with the bot token
+  await slack.until("the second removal", () => unreacted(slack).length === 2);
+  expect(unreacted(slack)).toEqual(["D1 1700000000.000100 eyes bot", "D1 1700000000.000100 eyes bot"]);
+});
+
+test("more than 2,000 answered messages are each asked about once, never again", async () => {
+  // Given an inbox with 2,001 addressed DMs (as the watcher writes them) and no done file
+  const slack = fakeSlack();
+  const dir = scratch();
+  const rows = Array.from({ length: 2001 }, (_, i) => JSON.stringify({ id: `1690000000.${String(i).padStart(6, "0")}`, channel_id: "D9", thread_ts: null, reply_thread: null, scope: "slack", addressed: "dm" }));
+  mkdirSync(join(dir, "discord"));
+  writeFileSync(join(dir, "discord", "inbox.jsonl"), `${rows.join("\n")}\n`);
+  const w = { o: { threads: join(dir, "slack-threads.json") } };
+  // When the lead answers there twice
+  const first = await send(w, slack, ["--to", "D9", "--text", "a"]);
+  const second = await send(w, slack, ["--to", "D9", "--text", "b"]);
+  // Then every message was asked about exactly once
+  expect([first.code, second.code]).toEqual([0, 0]);
+  expect(unreacted(slack).length).toBe(2001);
+}, 30_000);
 
 test("a disconnect from Slack opens a fresh connection and messages keep arriving", async () => {
   // Given
