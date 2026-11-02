@@ -6,7 +6,8 @@ import { defaultDiscordWords } from "../src/config.ts";
 import type { FlowDeps } from "../src/done-flow.ts";
 import { laneStartText, launchLane, LaunchError, setThread, ThreadMissingError } from "../src/launch.ts";
 import { Discord } from "../src/messenger/discord.ts";
-import { postLaneStart } from "../src/messenger/discord-thread.ts";
+import { discordThreadId, postLaneStart } from "../src/messenger/discord-thread.ts";
+import { ThreadStatusQueue } from "../src/messenger/thread-status-queue.ts";
 import type { HttpRequest } from "../src/messenger/http.ts";
 import type { Lane } from "../src/registry.ts";
 import { depsFor, fakeClock, newWorld, withState, type World } from "./fakes.ts";
@@ -172,6 +173,28 @@ test("launch posts the lane's first message in an empty work thread: title, goal
   expect(await postLaneStart(dc, THREAD, text)).toBe(`THREAD_START_POSTED ${THREAD} message=900`);
   expect(seen.map((q) => `${q.method} ${q.url.replace(/^.*\/api\/v10/, "")}`)).toEqual(["GET /channels/100000000000000001/messages?limit=1", "POST /channels/100000000000000001/messages"]);
   expect(JSON.parse(String(seen[1]?.body ?? "{}")).content).toBe(text);
+});
+
+// owner 2026-11-02 15:43 KST "이건 고쳐": a lane launched on the thread a closed lane had left ✅ and archived kept it that way
+test("launch on a thread a closed lane left ✅ and archived opens it again as 🔄, past an open card, through the status queue", async () => {
+  const thread = { name: "✅ demo", archived: true };
+  const patches: unknown[] = [];
+  const dc = new Discord(async (req) => {
+    if (req.method === "PATCH") {
+      const body = JSON.parse(String(req.body)) as { name?: string; archived?: boolean };
+      patches.push(body);
+      Object.assign(thread, body);
+    }
+    return { status: 200, headers: {}, body: JSON.stringify(req.method === "GET" ? { name: thread.name, type: 11, thread_metadata: { archived: thread.archived } } : {}) };
+  }, fakeClock(0), "bot");
+  const base = aoeDeps();
+  // as cli wires it: an open card would keep the thread waiting, a lane registered there makes it working
+  const queue = new ThreadStatusQueue({ dc, words: { ...defaultDiscordWords, statusStyle: "emoji" }, file: join(state.dir, "thread-status.json"), openCards: () => ["Q1"], workingLanes: async (t) => (await base.registry.open()).filter((l) => l.thread === `discord:${t}`).map((l) => l.key), now: () => T0, log: () => {} });
+  const warned: string[] = [];
+  await launch(THREAD, {}, { ...base, reopenThread: async (ref) => String(await queue.request(discordThreadId(ref), "working")) }, (l) => warned.push(l));
+  expect({ thread, patches, line: warned.find((l) => l.startsWith("THREAD_REOPEN")) }).toEqual({
+    thread: { name: "🔄 demo", archived: false }, patches: [{ name: "🔄 demo", archived: false }], line: `THREAD_REOPEN new-lane ${THREAD}: working requested: applied`,
+  });
 });
 
 test("a work thread that already has a message is left as it is, and a lane without --goal has no goal line", async () => {

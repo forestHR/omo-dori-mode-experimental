@@ -247,6 +247,21 @@ test("closing the only lane with no card left marks the thread done and archives
   });
 });
 
+// owner 2026-11-02 15:43 KST "이건 고쳐": a lane put on the thread a closed lane left ✅ works there, so it is 🔄 again
+test("set-thread onto a thread a closed lane left ✅ and archived opens it again as 🔄 and maps it back", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  closable("lane-a");
+  await dori("close", "lane-a", "--summary", SUMMARY);
+  const closed = { name: http().name, archived: http().archived, map: map() };
+  openLane("lane-b", { thread: "discord:300000000000000009" });
+  const set = await dori("set-thread", "lane-b", REF);
+  expect({ closed, set, name: http().name, archived: http().archived, map: map() }).toEqual({
+    closed: { name: "✅ fix login", archived: true, map: {} },
+    set: { code: 0, out: `THREAD_SET lane-b discord:300000000000000009 -> ${REF}\nTHREAD_REOPEN lane-b ${REF}: working requested: applied`, err: `THREAD_STATUS_APPLIED ${ID} working` },
+    name: "🔄 fix login", archived: false, map: { [ID]: { session: null, title: "lane-b" } },
+  });
+});
+
 test("dori close posts the summary in the thread before it sets the done mark and archives it", async () => {
   await cli("open", "fix login", "--first", "Start");
   closable("lane-a");

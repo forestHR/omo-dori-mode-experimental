@@ -36,7 +36,7 @@ import { heavyWorker } from "./heavy-worker.ts";
 import { heavySpread, isKind, spreadPlan, type SpreadJob } from "./heavy-spread.ts";
 import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
-import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
+import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, reopenLaneThread, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
 import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, ledgerProblems, ledgerTable, loadLedger, promptTable, textDirectives } from "./directives.ts";
 import { applyDirectives, auditOrReport, checkMeaning, linkRows, pushLinks, sinceIso } from "./directive-audit.ts";
 import { addNode, formatIntent, formatTree, gateFix, intentView, laneArea, loadTree, NODE_KINDS, type NodeKind, recordBranch, recordOverride, recordRefusal, requiredMessage, researchCheck, researchFacts, researchHint, sendResearch, setStatus, stuckTop, stuckView, type TreeArea, TreeError, updateTree } from "./explore.ts";
@@ -415,6 +415,13 @@ const deps: FlowDeps = {
         },
         postInThread: async (ref: string, text: string) => postInThread(ownDiscord(discordToken), ref, text),
         requestThreadStatus: async (ref: string, status: "working" | "waiting") => String(await threadStatuses(ownDiscord(discordToken)).request(discordThreadId(ref), status)),
+        reopenThread: async (ref: string, title: string) => {
+          const id = discordThreadId(ref);
+          const outcome = String(await threadStatuses(ownDiscord(discordToken)).request(id, "working"));
+          // a done mark dropped its record (thread-status-queue.ts); a lane works in it again, mapped like --thread new
+          if (outcome !== "dropped" && !threads(cardDir())[id]) mapThread(cardDir(), id, null, title);
+          return outcome;
+        },
         postOwner: async (channel: string, text: string) => ownDiscord(discordToken).send(channel, text),
         postLeadAlert: leadAlertPoster((channel, text) => ownDiscord(discordToken).send(channel, text), {
           pair: process.env.DORI_DISCORD_PAIR_CHANNEL?.trim() ?? "",
@@ -839,6 +846,8 @@ try {
     case "adopt": {
       const l = await adoptLane(deps, { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: threadOpt(), pane: need("pane"), tags: tags(), goal: opt("goal"), challengeBefore: many("challenge-before"), useGpu: Boolean(flags.values["use-gpu"]) });
       console.log(`ADOPTED ${l.key} pane=${l.pane} thread=${l.thread}`);
+      const reopened = await reopenLaneThread(deps, l);
+      if (reopened) console.log(reopened);
       if (config.backend === "aoe" && Object.keys(config.launchEnv).length) console.log(`ADOPT_ENV ${l.key}: the running session keeps the environment it started with; ${l.useGpu ? "no launchEnv" : "launchEnv"} applies from its next handover or restart`);
       break;
     }

@@ -246,12 +246,27 @@ export const adoptLane = async (deps: FlowDeps, input: LaunchInput & { readonly 
   return lane;
 };
 
-// Points an existing lane at another work thread, e.g. one made after the lane was launched.
+// A lane put on a thread works there: one left ✅ or ⏸️, or archived (a lane closed in it before), is opened again and
+// marked 🔄, as closeLane and dori resume decide it (a working lane makes its thread working, past an open card). The
+// rename goes through the thread status queue, so Discord's rename limit parks it for the listener instead of failing.
+// A thread already 🔄 and open is only read. Without a Discord token or a discord: ref nothing is done.
+export const reopenLaneThread = async (deps: FlowDeps, lane: Lane): Promise<string | undefined> => {
+  if (!deps.reopenThread || !lane.thread.startsWith("discord:")) return undefined;
+  const line = await deps.reopenThread(lane.thread, lane.title).then(
+    (outcome) => `THREAD_REOPEN ${lane.key} ${lane.thread}: working requested: ${outcome}`,
+    (e: unknown) => `THREAD_REOPEN_WARN ${lane.key} ${lane.thread}: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`,
+  );
+  watchLog(deps.config.watchLog, deps.clock, { source: "launch", line });
+  return line;
+};
+
+// Points an existing lane at another work thread, e.g. one made after the lane was launched; the lane works there now.
 export const setThread = async (deps: FlowDeps, lane: Lane, ref: string): Promise<string> => {
   const problem = threadRefProblem(ref);
   if (problem) throw new LaunchError(problem);
   await deps.registry.patch(lane.key, { thread: ref });
-  return `THREAD_SET ${lane.key} ${lane.thread || "-"} -> ${ref}`;
+  const reopened = await reopenLaneThread(deps, { ...lane, thread: ref });
+  return [`THREAD_SET ${lane.key} ${lane.thread || "-"} -> ${ref}`, ...(reopened ? [reopened] : [])].join("\n");
 };
 
 // The lane's brief with its footer's Done line set to the new one and a line under it saying what it was and why it
@@ -438,6 +453,11 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   const opened = deps.config.backend === "aoe" ? await openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : await openHerdr(deps, input.key, cwd, model, prompt);
   const lane: Lane = { ...draft, pane: opened.pane, ...(opened.tab ? { tab: opened.tab } : {}) };
   await deps.registry.write(lane);
+  // registered first, so the queue counts this lane as working in the thread; a thread --thread new just opened is 🔄 already
+  if (input.thread !== NEW_THREAD) {
+    const reopened = await reopenLaneThread(deps, lane);
+    if (reopened) warn(reopened);
+  }
   if (opened.failure) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${opened.failure}` };
   await deps.clock.sleep(20_000);
   const bad = STARTUP_FAILURE.exec(await readScreen(deps.run, deps.config.backend, opened.pane, 40));
