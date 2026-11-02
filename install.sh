@@ -4,7 +4,7 @@
 #        curl -fsSL https://raw.githubusercontent.com/orientpine/omo-dori-mode-experimental/main/install.sh | DORI_BACKEND=aoe bash
 # Needs: git, bun 1.3+, and the lane backend: herdr, or aoe and tmux.
 # Optional env: DORI_BACKEND (herdr or aoe, default herdr), DORI_REPO (clone URL), DORI_SRC (clone dir),
-# SKILLS_DIR (where your agent loads skills).
+# SKILLS_DIR (where your agent loads skills), DORI_NO_PULL=1 (install an existing checkout as it is, without pulling).
 set -euo pipefail
 
 repo="${DORI_REPO:-https://github.com/orientpine/omo-dori-mode-experimental.git}"
@@ -31,13 +31,30 @@ have herdr || { have aoe && have tmux; } || echo "warning: no lane backend found
 have gh || echo "note: gh not found; the done checks that read PRs and issues need it" >&2
 have agent-messenger || echo "note: agent-messenger not found; it is optional for Slack, Telegram and Discord messaging" >&2
 
+# A pull that local work blocks used to end with git's bare abort and no way to install the checkout as it is
+# (dori-superagent issue #48 reproduced here (MIT): https://github.com/sisyphuslabs/dori-superagent/issues/48).
+# Now it names the checkout and its local work and gives both ways on; DORI_NO_PULL=1 installs it without pulling.
 if [ -d "$src/.git" ]; then
   origin="$(git -C "$src" remote get-url origin 2>/dev/null || true)"
-  if [ "${origin%.git}" != "${repo%.git}" ]; then
+  if [ "${DORI_NO_PULL:-}" = 1 ]; then
+    echo "DORI_NO_PULL=1: installing $src as it is, without pulling." >&2
+  elif [ "${origin%.git}" != "${repo%.git}" ]; then
     echo "warning: $src pulls from ${origin:-no origin}, not $repo; not updating it." >&2
     echo "  To follow $repo: git -C \"$src\" remote set-url origin \"$repo\" && git -C \"$src\" pull --ff-only" >&2
-  else
-    git -C "$src" pull --ff-only --quiet
+  elif ! git -C "$src" -c pull.autostash=false -c merge.autostash=false -c rebase.autostash=false -c pull.twohead=recursive pull --ff-only --quiet; then
+    # git's message above says why the pull failed; this adds the local work git status sees and both ways on, given
+    # whatever it shows: an edit can hide from status (update-index --assume-unchanged), and the failure need not be
+    # that work (a lock file, a remote that cannot be reached). The -c overrides keep a local pull/merge/rebase.autostash
+    # or pull.twohead=ours from turning the fast-forward into a stash pop or a merge (config, not --no-autostash, which git
+    # before 2.27 refuses without --rebase).
+    echo "error: could not update $src with git pull --ff-only; git's message above says why." >&2
+    changes="$(git -C "$src" status --short --untracked-files=all)"
+    ahead="$(git -C "$src" log --oneline '@{u}..HEAD' 2>/dev/null || true)"
+    [ -z "$changes" ] || { echo "  Local changes in that checkout (git status --short):"; printf '%s\n' "$changes" | sed 's/^/    /'; } >&2
+    [ -z "$ahead" ] || { echo "  Local commits upstream lacks:"; printf '%s\n' "$ahead" | sed 's/^/    /'; } >&2
+    echo "  To install the checkout as it is, without pulling: run install.sh again with DORI_NO_PULL=1 (curl ... | DORI_NO_PULL=1 bash)." >&2
+    echo "  If local work there is in the way and you want to drop it to update: git -C \"$src\" fetch && git -C \"$src\" reset --hard '@{u}', then run install.sh again." >&2
+    exit 1
   fi
 else
   git clone --quiet --depth 1 "$repo" "$src"
