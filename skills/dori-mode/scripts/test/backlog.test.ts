@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, type InboxRow, orderIntake, takeRow, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, readItem, StartRefused, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
+import { addItem, APPROVED_RULE, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, DRAFT_ONLY_RULE, dropItem, feedIntake, feedItemId, type FeedTodo, type InboxRow, orderIntake, flockDir, followUpId, hostReserve, laneKeyOf, listItems, READ_ONLY_RULE, readItem, StartRefused, type TickDeps, withBacklogLock, writeLimit } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 import { briefGaps, COMMON_LEDGER, loadLedger } from "../src/directives.ts";
@@ -890,38 +890,6 @@ test("an order and a feed entry about one todo taken in by the same sweep never 
   expect(launched).not.toContain("dashboard-order-13");
 });
 
-test("dori backlog take: a row the lead takes first never becomes a lane; one the backlog took stays its lane's; take waits for a pass that holds the list", async () => {
-  // Given: the start is set
-  orderPass([]);
-  const at = new Date(now).toISOString();
-  // When: the lead takes order 20 before any pass saw it, and the backlog has order 21 already
-  const lead = takeRow(state, "dashboard-order-20", at);
-  orderPass([orderRow(21, "2026-11-02T15:21:00.000Z", "pb-0123456789ab-9")]);
-  const lines = orderPass([orderRow(20, "2026-11-02T15:21:30.000Z", "pb-0123456789ab-8"), orderRow(21, "2026-11-02T15:21:00.000Z", "pb-0123456789ab-9"), orderRow(22, "2026-11-02T15:22:00.000Z", "pb-0123456789ab-7")]);
-  const lane21 = takeRow(state, "dashboard-order-21", at);
-  // Then
-  expect(lead.lead).toMatchObject({ id: "dashboard-order-20", status: "dropped", by: "lead" });
-  expect(lines).toEqual(["BACKLOG_INTAKE dashboard-order-22 (owner order): [대시보드 지시 #22] 이거 한거 아니야?"]);
-  expect(lane21.lane?.id).toBe("dashboard-order-21");
-  await backlogTick(deps({}, { maxStarts: 3 }), { force: true });
-  expect(launched).not.toContain("dashboard-order-20");
-  // When: a pass holds the list and is about to take order 23 in when the lead takes it
-  const holding = gated();
-  const { gate, open } = gated();
-  const pass = backlogTick(deps({ intake: async () => {
-    holding.open();
-    await gate;
-    return orderPass([orderRow(23, "2026-11-02T15:23:00.000Z", "pb-0123456789ab-6")]);
-  } }), { force: true });
-  await holding.gate;
-  const taking = withBacklogLock(state, 10, () => takeRow(state, "dashboard-order-23", at));
-  open();
-  await pass;
-  // Then: take waited for the pass, so the order is the lane's, not a second claim beside it
-  expect((await taking).lane?.id).toBe("dashboard-order-23");
-  expect(readItem(state, "dashboard-order-23")?.by).toBe("owner");
-});
-
 test("an order that cannot start within backlog.orderWaitMin goes back to the lead, never waiting unseen", async () => {
   // Given: an order while the host is busy
   orderPass([]);
@@ -965,19 +933,6 @@ test("a todo renamed on the board is listed, started and reported under its new 
   expect(rows.find((r) => r.kind === "backlog-start")?.content).toContain("(fix B, p6)");
 });
 
-test("dori backlog take on an order its lane already finished says so, never hands the work to the lead again", async () => {
-  // Given: order 30 ran and its lane closed
-  orderPass([]);
-  orderPass([orderRow(30, "2026-11-02T15:30:00.000Z", "pb-0123456789ab-5")]);
-  await backlogTick(deps(), { force: true });
-  lanes = lanes.map((l) => (l.key === "bl-dashboard-order-30" ? lane(l.key, true) : l));
-  await backlogTick(deps(), { force: true });
-  // When
-  const r = takeRow(state, "dashboard-order-30", new Date(now).toISOString());
-  // Then
-  expect([r.done?.id, r.lead, readItem(state, "dashboard-order-30")?.status]).toEqual(["dashboard-order-30", undefined, "done"]);
-});
-
 test("an order waiting on its todo's lane does not use the start of an unrelated item behind it", async () => {
   // Given: todo 1 runs; an order about it and an unrelated order wait; one start a pass
   await feedSweep([boardTodo("1")]);
@@ -991,7 +946,7 @@ test("an order waiting on its todo's lane does not use the start of an unrelated
   expect(readItem(state, "dashboard-order-31")?.status).toBe("open");
 });
 
-test("an order still waiting on its todo's running lane at the hand-back time is relayed to that lane, and take says so", async () => {
+test("an order still waiting on its todo's running lane at the hand-back time stays the backlog's and starts when that lane closes", async () => {
   // Given: todo 1 runs; an order about it waits past backlog.orderWaitMin
   await feedSweep([boardTodo("1")]);
   await backlogTick(deps(), { force: true });
@@ -999,11 +954,11 @@ test("an order still waiting on its todo's running lane at the hand-back time is
   orderPass([orderRow(33, "2026-11-02T15:33:00.000Z", "pb-0123456789ab-1")]);
   now = T0 + 10 * 60_000;
   // When
-  const lines = await backlogTick(deps(), { force: true });
-  const r = takeRow(state, "dashboard-order-33", new Date(now).toISOString());
-  // Then
-  expect(lines).toContain("BACKLOG_ORDER_TO_LANE dashboard-order-33: todo pb-0123456789ab-1 still runs in lane bl-todo-pb-0123456789ab-1; relayed to it through the lead");
-  expect(lines.some((l) => l.startsWith("BACKLOG_ORDER_TO_LEAD"))).toBe(false);
-  expect(rows.filter((x) => x.kind === "backlog-order").map((x) => x.content.split(" ")[0])).toEqual(["BACKLOG_ORDER_TO_LANE"]);
-  expect([r.relayed?.relayedTo, r.lead]).toEqual(["bl-todo-pb-0123456789ab-1", undefined]);
+  const late = await backlogTick(deps(), { force: true });
+  lanes = lanes.map((l) => (l.key === "bl-todo-pb-0123456789ab-1" ? lane(l.key, true) : l));
+  await backlogTick(deps(), { force: true });
+  // Then: never handed to the lead while its todo's lane ran; started once it closed
+  expect(late.some((l) => l.includes("TO_LEAD") || l.includes("TO_LANE"))).toBe(false);
+  expect(rows.filter((x) => x.kind === "backlog-held" || x.kind === "backlog-order")).toEqual([]);
+  expect(launched).toEqual(["todo-pb-0123456789ab-1", "dashboard-order-33"]);
 });
