@@ -209,7 +209,8 @@ const knownItem = (stateDir: string, id: string): BacklogItem => {
 export const dropItem = (stateDir: string, id: string, why: string, at: string): BacklogItem => {
   const item = knownItem(stateDir, id);
   if (item.status === "running") throw new BacklogError(`item ${id} is running as a lane (${item.pane ?? "?"}); close the lane first (dori close ${item.lane ?? laneKeyOf(id)})`);
-  const dropped = logged(item, at, `dropped: ${why}`, { status: "dropped" });
+  // an explicit drop is final: an entry the feed lists again does not bring it back
+  const dropped = logged(item, at, `dropped: ${why}`, { status: "dropped", closedOnSource: undefined });
   save(stateDir, dropped);
   return dropped;
 };
@@ -435,6 +436,9 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
   if (!d.settings.feedCommand.length) return [];
   const got = await d.feed();
   if ("why" in got) return [`BACKLOG_FEED_SKIPPED ${d.settings.feedCommand.join(" ")}: ${got.why}`];
+  // the whole list or nothing: a list with a bad entry is not read at all, since an entry left out would look finished
+  const bad = got.todos.findIndex((todo) => typeof todo !== "object" || todo === null || Array.isArray(todo) || !["string", "number"].includes(typeof (todo.todo_id ?? todo.id)) || String(todo.todo_id ?? todo.id).trim() === "");
+  if (bad >= 0) return [`BACKLOG_FEED_SKIPPED ${d.settings.feedCommand.join(" ")}: entry ${bad + 1} of ${got.todos.length} is not a todo with an id (${JSON.stringify(got.todos[bad])?.slice(0, 80)}); the list is not read`];
   const at = new Date(d.now()).toISOString();
   const lines: string[] = [];
   for (const todo of got.todos) {
@@ -639,7 +643,10 @@ export const backlogTick = async (d: TickDeps, opts: { readonly force?: boolean 
     const last = lastRun(d.stateDir);
     const at = new Date(d.now()).toISOString();
     const sweep = Boolean(opts.force) || !last || d.now() - Date.parse(last.at) >= d.settings.everyMin * 60_000;
-    const lines: string[] = [...((await d.intake?.(sweep)) ?? [])];
+    // new work in; an intake that fails is one line, never a pass that stops (the list's own work still goes on)
+    const lines: string[] = await Promise.resolve()
+      .then(async () => [...((await d.intake?.(sweep)) ?? [])])
+      .catch((e: unknown) => [`BACKLOG_INTAKE_FAILED ${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200)}`]);
     const quiet: string[] = [];
     const lanes = await d.lanes();
     const laneOf = (id: string): Lane | undefined => lanes.find((l) => l.key === id);

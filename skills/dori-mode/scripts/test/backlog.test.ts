@@ -807,3 +807,29 @@ test("a dashboard todo's launch copy carries the four fields dori launch require
   expect(launched).toEqual(["todo-pb-0123456789ab-1", "todo-pb-0123456789ab-2"]);
   expect(gaps.map((g) => g.includes("four-fields"))).toEqual([false, false]);
 });
+
+test("a todo the lead dropped stays dropped when the feed lists it again", async () => {
+  // Given: todo 1 left the list (dropped, may come back), then the lead cancels it
+  await feedSweep([boardTodo("1"), boardTodo("2")]);
+  await feedSweep([boardTodo("2")]);
+  dropItem(state, "todo-pb-0123456789ab-1", "the owner cancelled it", new Date(now).toISOString());
+  // When: the feed lists it again
+  const lines = await feedSweep([boardTodo("1"), boardTodo("2")]);
+  // Then
+  expect(lines).toEqual([]);
+  expect(readItem(state, "todo-pb-0123456789ab-1")?.status).toBe("dropped");
+});
+
+test("a feed list with a bad entry is not read at all, and a failing intake never stops the pass", async () => {
+  // Given: todo 1 waits on the list; a hand item waits too
+  await feedSweep([boardTodo("1")]);
+  add("hand1");
+  // When: the feed gives a null, a row without an id, and a non-object
+  const skipped = await Promise.all([[null], [{ title: "no id" }], ["x"]].map((todos) => feedSweep(todos as unknown as FeedTodo[])));
+  const pass = await backlogTick(deps({ intake: async () => { throw new Error("feed blew up"); } }, { maxStarts: 2 }), { force: true });
+  // Then: nothing on the list changed, the pass still started the waiting work
+  expect(skipped.map((l) => l.map((x) => x.split(":")[0]))).toEqual([["BACKLOG_FEED_SKIPPED node-read todo-list --json"], ["BACKLOG_FEED_SKIPPED node-read todo-list --json"], ["BACKLOG_FEED_SKIPPED node-read todo-list --json"]]);
+  expect(readItem(state, "todo-pb-0123456789ab-1")?.status).not.toBe("dropped");
+  expect(pass[0]).toBe("BACKLOG_INTAKE_FAILED feed blew up");
+  expect(launched.sort()).toEqual(["hand1", "todo-pb-0123456789ab-1"]);
+});
