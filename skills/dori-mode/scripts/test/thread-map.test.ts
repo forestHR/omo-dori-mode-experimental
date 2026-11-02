@@ -35,11 +35,13 @@ let discordWords: Record<string, unknown> = {};
 const rule = (id: string, scope: Record<string, unknown>, text: string) => ({ id, name: id, by: "lead", rule: text, basis: "test", date: "2026-11-02", source: "test", mode: "inject", scope });
 const LEDGER = JSON.stringify({ entries: [rule("every-lane", { all: true }, "Every lane rule."), rule("login-rule", { keywords: ["login"] }, "Login work keeps SSO."), rule("card-rule", { keywords: ["카드"] }, "Card papers are ours.")] });
 let ledgerText = LEDGER;
-beforeEach(() => { ledgerText = LEDGER; });
+let localText: string | undefined;
+beforeEach(() => { ledgerText = LEDGER; localText = undefined; });
 const dori = async (...args: string[]) => {
   const config = join(state.dir, "config.json");
   writeFileSync(join(state.dir, "ledger.json"), ledgerText);
-  writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, discord: { statusStyle: "emoji", ...discordWords }, directives: { common: join(state.dir, "ledger.json"), local: "" } }));
+  if (localText !== undefined) writeFileSync(join(state.dir, "local.json"), localText);
+  writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, discord: { statusStyle: "emoji", ...discordWords }, directives: { common: join(state.dir, "ledger.json"), local: localText === undefined ? "" : join(state.dir, "local.json") } }));
   const p = Bun.spawn(["bun", "--preload", join(import.meta.dir, "discord-cli-fake.ts"), join(import.meta.dir, "../src/cli.ts"), ...args], {
     env: { ...process.env, DORI_CONFIG: config, DORI_ENV_FILE: join(state.dir, "missing.env"), DORI_STATE_DIR: state.dir, DORI_DISCORD_STATE_DIR: join(state.dir, "cards"), DORI_DISCORD_TOKEN: "fake", DORI_DISCORD_CHANNEL: "200000000000000002", DORI_TEST_HTTP: join(state.dir, "http.json") },
     stdout: "pipe", stderr: "pipe",
@@ -85,6 +87,12 @@ test("thread open reads the owner's message it starts from in the inbox: the dir
 
 test("thread open with a ledger it cannot read opens nothing: THREAD_REFUSED before Discord is called", async () => {
   ledgerText = "{ not json";
+  const result = await cli("open", "fix login", "--first", "Start here");
+  expect({ code: result.code, refused: result.err.startsWith("THREAD_REFUSED fix login: the directive ledger could not be read"), called: existsSync(join(state.dir, "http.json")), map: map() }).toEqual({ code: 1, refused: true, called: false, map: {} });
+});
+
+test("thread open with a broken host ledger opens nothing either, though the fork ledger reads fine (the host's own directives would be missing)", async () => {
+  localText = "{ not json";
   const result = await cli("open", "fix login", "--first", "Start here");
   expect({ code: result.code, refused: result.err.startsWith("THREAD_REFUSED fix login: the directive ledger could not be read"), called: existsSync(join(state.dir, "http.json")), map: map() }).toEqual({ code: 1, refused: true, called: false, map: {} });
 });

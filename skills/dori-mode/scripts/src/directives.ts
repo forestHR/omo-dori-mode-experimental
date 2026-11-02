@@ -462,8 +462,9 @@ export const HINT_LIMIT = 5;
 // get them, except that one hit of a kind's words counts (a message is short; a brief needs minHits). all: the entries for
 // every lane too (a thread the lead opens gets what a lane's brief gets); without it only those its words call: a keyword,
 // a kind of work, UI work. Lead rules count (the lead is the one reading them); a require entry or a built-in block is a
-// brief's, not a text to read. An entry with a pointer comes as its pointer, once. Order: the host's own entries first,
-// then a keyword before a kind (the narrower match), then the ledger's order.
+// brief's, not a text to read. An entry with a pointer comes as its pointer, once. Order: the entries the text calls before
+// the every-lane ones; within each, the host's own entries first, then a keyword before a kind (the narrower match), then
+// the ledger's order.
 export const textDirectives = (text: string, ledger: Ledger, opts: { readonly all?: boolean } = {}): { readonly e: Directive; readonly why: string }[] => {
   const ctx = scopeContext(text, { ...ledger, minHits: 1 }, { repo: "" });
   const out: { e: Directive; why: string; rank: number }[] = [];
@@ -473,10 +474,20 @@ export const textDirectives = (text: string, ledger: Ledger, opts: { readonly al
     if (!why) continue;
     const shown = e.mode === "inject" ? (pointerOf(e, ledger) ?? e) : e;
     if (out.some((x) => x.e.id === shown.id)) continue;
-    const rank = (shown.layer === "local" ? 0 : 4) + (why.startsWith("keyword ") ? 0 : why === "all lanes" ? 2 : 1);
+    // what the text calls before what every lane gets, however long the host's every-lane list is
+    const rank = (why === "all lanes" ? 8 : 0) + (shown.layer === "local" ? 0 : 4) + (why.startsWith("keyword ") ? 0 : 1);
     out.push({ e: shown, why: shown === e ? why : `${why}, for ${e.id}`, rank: rank * 10_000 + i });
   }
   return out.sort((a, b) => a.rank - b.rank).map(({ e, why }) => ({ e, why }));
+};
+
+// What an owner message's inbox row carries (dori inbound discord): the lines of the directives it calls, at most
+// HINT_LIMIT, and when the tolerant load left local lines out (or the whole local layer), one last line saying so, so the
+// lead knows the host's own directives may be missing (dori thread open refuses on it instead).
+export const messageLines = (text: string, ledger: Ledger): string[] => {
+  const lines = textDirectives(text, ledger).slice(0, HINT_LIMIT).map(({ e }) => directiveLine(e));
+  const skipped = ledger.skipped ?? [];
+  return skipped.length ? [...lines, `[장부 경고] 이 도리 로컬 장부에서 ${skipped.length}줄을 못 읽어 뺐다: ${skipped[0]?.slice(0, 200)}. dori directives check로 고친다.`] : lines;
 };
 
 // One line per directive: its tag and the text a brief gets (his prompt, or the lead's rule), on one line.
