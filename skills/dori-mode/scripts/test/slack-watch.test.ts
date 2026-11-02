@@ -34,7 +34,7 @@ const fakeSlack = () => {
   let opens = 0;
   let port = 0;
   let pings = 0;
-  const failing = { auth: 0, reactScope: false };
+  const failing = { auth: 0, reactScope: false, reactStall: false };
   const server = Bun.serve({
     port: 0,
     fetch: async (req, srv) => {
@@ -56,6 +56,7 @@ const fakeSlack = () => {
       }
       if (method === "users.info") return reply({ user: { profile: { display_name: `name-${String(body.user)}` } } });
       if (method === "chat.postMessage") return reply({ channel: body.channel, ts: "1700000100.000100" });
+      if (method === "reactions.add" && failing.reactStall) return new Promise<Response>(() => {});
       if (method === "reactions.add") return failing.reactScope ? Response.json({ ok: false, error: "missing_scope" }) : reply({});
       return Response.json({ ok: false, error: "unknown_method" });
     },
@@ -100,7 +101,7 @@ const fakeSlack = () => {
   return { calls, acks, sockets, opens: () => opens, pings: () => pings, failing, until, changed, event, api: `http://localhost:${port}/api`, server };
 };
 
-const watcher = async (slack: ReturnType<typeof fakeSlack>, threads: object[] = [], pingMs = 30_000, env: Record<string, string> = {}) => {
+const watcher = async (slack: ReturnType<typeof fakeSlack>, threads: object[] = [], pingMs = 30_000, env: Record<string, string> = {}, reactMs = 3000) => {
   const dir = scratch();
   writeFileSync(join(dir, "slack-threads.json"), JSON.stringify(threads));
   const o = slackWatchOptions({ DORI_SLACK_APP_TOKEN: APP, DORI_SLACK_TOKEN: BOT, DORI_SLACK_OWNER_ID: "UOWNER", DORI_SLACK_API: slack.api, ...env }, dir);
@@ -112,7 +113,7 @@ const watcher = async (slack: ReturnType<typeof fakeSlack>, threads: object[] = 
     lines.push(l);
     eyesAt.push(slack.calls.filter((c) => c.method === "reactions.add").length);
     slack.changed();
-  }, stop, pingMs);
+  }, stop, pingMs, reactMs);
   cleanups.push(async () => {
     stop.stopped = true;
     slack.server.stop(true);
@@ -197,6 +198,24 @@ test("a channel message that calls the Dori by name (DORI_SLACK_MENTION) wakes t
   ]);
   expect(w.msgs()).toEqual(["SLACK_MSG C1 1700000000.000800 name name-UOWNER (owner): 옥돌아 들리면 대답해봐", "SLACK_MSG C1 1700000000.000830 name name-UGUEST: OkDori, 자료 있어?"]);
   expect(slack.calls.filter((c) => c.method === "reactions.add").map((c) => c.body.timestamp)).toEqual(["1700000000.000800", "1700000000.000830"]);
+});
+
+test("a reactions.add that never answers holds neither its message's SLACK_MSG nor the messages after it", async () => {
+  // Given Slack takes the reaction request and never answers (the deadline is the behavior under test: 200 ms here)
+  const slack = fakeSlack();
+  slack.failing.reactStall = true;
+  const w = await watcher(slack, [], 30_000, {}, 200);
+  // When two DMs arrive
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "one", ts: "1700000000.000900" });
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "two", ts: "1700000000.000910" });
+  // Then both still wake the lead, each after its own failed reaction
+  await slack.until("both SLACK_MSG lines", () => w.msgs().length === 2);
+  expect(w.lines.filter((l) => /^SLACK_(REACT|MSG)/.test(l))).toEqual([
+    "SLACK_REACT_FAIL D1 1700000000.000900 slack reactions.add: no answer within 0.2s",
+    "SLACK_MSG D1 - dm name-UOWNER (owner): one",
+    "SLACK_REACT_FAIL D1 1700000000.000910 slack reactions.add: no answer within 0.2s",
+    "SLACK_MSG D1 - dm name-UOWNER (owner): two",
+  ]);
 });
 
 test("an app without reactions:write logs SLACK_REACT_SKIPPED once and stops asking; every message still arrives", async () => {

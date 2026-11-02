@@ -67,6 +67,8 @@ export type WatchDeps = {
   readonly append: (row: Record<string, unknown>) => void;
   readonly log: (line: string) => void;
   readonly now: () => number;
+  // how long the eyes reaction may take before the message goes on without waiting for it
+  readonly reactMs?: number;
 };
 
 // One event in, at most one inbox row out. The same message reaches the app twice when it mentions the bot in a channel
@@ -99,8 +101,13 @@ export class SlackWatch {
   // An app without reactions:write says so once and is not asked again; a failure never holds the message back.
   private async react(channel: string, ts: string): Promise<void> {
     if (this.reactOff) return;
+    const ms = this.deps.reactMs ?? 3000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await this.deps.call("reactions.add", { channel, timestamp: ts, name: "eyes" });
+      // a stalled reactions.add must not hold this message's SLACK_MSG or the events queued behind it (review of #251)
+      const call = this.deps.call("reactions.add", { channel, timestamp: ts, name: "eyes" });
+      call.catch(() => {}); // a late failure after the deadline has nobody to tell
+      await Promise.race([call, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`slack reactions.add: no answer within ${ms / 1000}s`)), ms); })]);
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e);
       if (why.endsWith(": already_reacted")) return;
@@ -110,6 +117,8 @@ export class SlackWatch {
         return;
       }
       this.deps.log(`SLACK_REACT_FAIL ${channel} ${ts} ${why}`);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -254,7 +263,7 @@ const slackCall = (api: string, token: string) => async (method: string, params:
 
 const readThreads = (file: string) => async (): Promise<readonly LedgerThread[]> => (existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as LedgerThread[]) : []);
 
-export const startWatch = async (o: SlackWatchOptions, log: (line: string) => void, stop: { stopped: boolean } = { stopped: false }, pingMs = 30_000): Promise<void> => {
+export const startWatch = async (o: SlackWatchOptions, log: (line: string) => void, stop: { stopped: boolean } = { stopped: false }, pingMs = 30_000, reactMs = 3000): Promise<void> => {
   const bot = slackCall(o.api, o.botToken);
   // a network error or a Slack outage at start is waited out like a failed connect, never an exit the monitor misses
   let me: Record<string, unknown> | undefined;
@@ -269,7 +278,7 @@ export const startWatch = async (o: SlackWatchOptions, log: (line: string) => vo
   }
   const self = { userId: String(me.user_id ?? ""), botId: String(me.bot_id ?? "") };
   mkdirSync(dirname(o.inbox), { recursive: true, mode: 0o700 });
-  const watch = new SlackWatch(o, self, { call: bot, threads: readThreads(o.threads), append: (row) => appendFileSync(o.inbox, `${JSON.stringify(row)}\n`), log, now: Date.now });
+  const watch = new SlackWatch(o, self, { call: bot, threads: readThreads(o.threads), append: (row) => appendFileSync(o.inbox, `${JSON.stringify(row)}\n`), log, now: Date.now, reactMs });
   log(`SLACK_WATCH_START team ${String(me.team ?? "?")} bot ${String(me.user ?? self.userId)}`);
   await runSocket(
     {
