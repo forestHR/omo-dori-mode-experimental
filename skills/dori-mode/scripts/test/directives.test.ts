@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
-import { APPLIED_HEADING, briefGaps, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, requireMissing, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
+import { APPLIED_HEADING, briefGaps, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
 import type { Runner } from "../src/run.ts";
 import { DirectiveMissingError, eightSteps, launchLane, renderBrief, uiSteps } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -559,4 +559,19 @@ test("directive-audit: a thread the lead opened without reading the ledger and n
   };
   const gaps = leadThreadGaps(map, [{ thread: "discord:300000000000000004" }], since);
   expect(gaps.map((g) => g.line)).toEqual([`DIRECTIVE_LEAD thread:${fresh} -: the lead's thread "Claude 10/29 카드 처리" (2026-11-02T05:09:08.000Z) was opened without reading the directive ledger and no lane works in it; dori thread open reads it now, or open such work as a lane`]);
+});
+
+// 2026-11-02 QA on ZzangDori's real ledger: its 30 every-lane local entries came before request-thread, the one entry the
+// thread's words called, and a broken local file left the host's own directives out of a message's row without a word
+test("what the text calls comes before every-lane entries of either layer, and a message's row says when local lines were left out", async () => {
+  const everyLane = { id: "host-every-lane", name: "host every lane", by: "lead", rule: "Every lane here.", basis: "fixture basis line", date: "2026-11-02", source: "x", scope: { all: true }, mode: "inject" };
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: await write("every.json", JSON.stringify({ entries: [everyLane] })) } });
+  const ids = textDirectives("Claude 10/29 카드 처리", ledger, { all: true }).map(({ e }) => e.id);
+  expect(ids[0]).toBe("request-thread");
+  expect(ids.indexOf("host-every-lane")).toBeGreaterThan(0);
+  expect(messageLines("카드 처리", ledger)).toEqual([directiveLine(ledger.entries.find((e) => e.id === "request-thread")!)]);
+  const broken = loadLedger({ directives: { common: COMMON_LEDGER, local: await write("broken.json", "{ not json") } }, { tolerant: true });
+  const lines = messageLines("카드 처리", broken);
+  expect(lines.length).toBe(2);
+  expect(lines[1]).toStartWith("[장부 경고] 이 도리 로컬 장부에서 1줄을 못 읽어 뺐다: DIRECTIVES_LOCAL_SKIP");
 });

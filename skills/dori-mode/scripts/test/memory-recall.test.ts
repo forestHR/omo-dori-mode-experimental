@@ -50,3 +50,12 @@ test("the memory repo of a lead is its own account's: <cwd name>-<sha256(cwd) 8>
   expect(memoryRepoFor("/home/moodori/Documents/moodori", "/home/moodori")).toBe("/home/moodori/.omo/memory/agents/moodori-c8186be9/repo");
   expect(memoryRepoFor("/home/oriclaw/Documents/zzangdori", "/home/oriclaw")).toBe("/home/oriclaw/.omo/memory/agents/zzangdori-eccee897/repo");
 });
+
+// 2026-11-02 QA: dori recall "<text>" printed only its usage line, reading the text one argument too far
+test("dori recall prints the notes of the configured memory repo the text points at", async () => {
+  const r = repo();
+  writeFileSync(join(state.dir, "config.json"), JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, directives: { memory: r } }));
+  const p = Bun.spawn(["bun", join(import.meta.dir, "../src/cli.ts"), "recall", "그리고 카드처리해 서류 준비하고 있어"], { env: { ...process.env, DORI_CONFIG: join(state.dir, "config.json"), DORI_ENV_FILE: join(state.dir, "missing.env"), DORI_STATE_DIR: state.dir }, stdout: "pipe", stderr: "pipe" });
+  const [code, out] = await Promise.all([p.exited, new Response(p.stdout).text()]);
+  expect({ code, first: out.split("\n")[0] }).toEqual({ code: 0, first: "MEMORY_RECALL reference/kimm-card-ai-billing.md: 카드 미결재 중 Claude·GPT 건 결재문서 정리 절차(형 2026-10-19 지시, 기계연_결재 폴더 짜임, 로그인 경로)" });
+});

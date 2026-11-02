@@ -38,7 +38,7 @@ import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
 import { adoptLane, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, reopenLaneThread, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
 import { memoryRepoFor, MemoryRecallError, recallNotes } from "./memory-recall.ts";
-import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, ledgerProblems, ledgerTable, loadLedger, promptTable, textDirectives } from "./directives.ts";
+import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, ledgerProblems, ledgerTable, loadLedger, messageLines, promptTable, textDirectives } from "./directives.ts";
 import { applyDirectives, auditOrReport, checkMeaning, linkRows, pushLinks, sinceIso } from "./directive-audit.ts";
 import { addNode, formatIntent, formatTree, gateFix, intentView, laneArea, loadTree, NODE_KINDS, type NodeKind, recordBranch, recordOverride, recordRefusal, requiredMessage, researchCheck, researchFacts, researchHint, sendResearch, setStatus, stuckTop, stuckView, type TreeArea, TreeError, updateTree } from "./explore.ts";
 import { challengeMissing, ChallengeError, checkReviewers, familyOf, reviewers, runChallenge } from "./challenge.ts";
@@ -712,10 +712,11 @@ const ownerSpeech = async (text: string, what: string, toOwner: () => Promise<bo
 const cardDir = (): string => process.env.DORI_DISCORD_STATE_DIR?.trim() || join(config.stateDir, "discord");
 // The ledger an owner message and a lead's thread are read against: both layers, a bad local line left out (as the audit
 // reads it). No ledger configured is not "no directives": it throws, like a ledger that cannot be read.
-const hintLedger = (): Ledger => {
+const hintLedger = (opts: { readonly strict?: boolean } = {}): Ledger => {
   if (!config.directives.common && !config.directives.local) throw new DirectiveError("no directive ledger is configured (config directives.common and directives.local are empty)");
-  return checkedLedger(config, { tolerant: true });
+  return checkedLedger(config, { tolerant: !opts.strict });
 };
+
 // The omo memory repo of this Dori's lead: directives.memory, else the repo omo keeps for its cwd (handover.cwd, else
 // defaultCwd) under this account's home.
 const leadMemoryRepo = (): string => config.directives.memory || memoryRepoFor(config.handover.cwd || config.defaultCwd, homedir());
@@ -1551,7 +1552,7 @@ try {
           fatal: (code) => process.exit(code === 4014 ? 4 : 3),
           ...(config.hooks.transcribe?.length ? { transcribe: transcribeUrl } : {}),
           // read per message, so a ledger edited while the listener runs is what the next message gets
-          hints: (text) => textDirectives(text, hintLedger()).slice(0, HINT_LIMIT).map(({ e }) => directiveLine(e)),
+          hints: (text) => messageLines(text, hintLedger()),
           // this Dori's own lead memory only (its account's home, its lead's cwd), read per message like the ledger
           recall: (text) => recallNotes(text, leadMemoryRepo()).map((n) => n.line),
         });
@@ -1648,7 +1649,7 @@ try {
         // owner's message it starts from before anything is opened; a ledger that cannot be read opens nothing
         let found: ReturnType<typeof textDirectives> = [];
         try {
-          found = textDirectives([title, first ?? "", from ? inboxText(from) : ""].join("\n"), hintLedger(), { all: true });
+          found = textDirectives([title, first ?? "", from ? inboxText(from) : ""].join("\n"), hintLedger({ strict: true }), { all: true });
         } catch (e) {
           die(`THREAD_REFUSED ${title}: the directive ledger could not be read (${e instanceof Error ? e.message : String(e)}); no thread is opened without its directives. Fix the ledger (dori directives check), or open the work as a lane (dori launch --thread new)`);
         }
@@ -1872,7 +1873,9 @@ try {
       // what an owner message carries in the inbox row (the listener's hints), for a text the lead gives
       if (key === "hint") {
         const text = flags.positionals.slice(1).join(" ").trim() || die("usage: dori directives hint <text>");
-        const found = textDirectives(text, hintLedger()).slice(0, HINT_LIMIT);
+        const hl = hintLedger();
+        const found = textDirectives(text, hl).slice(0, HINT_LIMIT);
+        for (const line of hl.skipped ?? []) console.log(line);
         for (const { e, why } of found) console.log(`DIRECTIVE_HINT ${e.id} (${why}): ${directiveLine(e)}`);
         if (!found.length) console.log("DIRECTIVE_HINT_NONE: no directive's keyword, kind of work or UI words in the text");
         break;
@@ -1882,7 +1885,7 @@ try {
       break;
     }
     case "recall": {
-      const text = flags.positionals.slice(1).join(" ").trim() || die("usage: dori recall <text>");
+      const text = flags.positionals.join(" ").trim() || die("usage: dori recall <text>");
       const repo = leadMemoryRepo();
       const found = recallNotes(text, repo);
       for (const n of found) console.log(`MEMORY_RECALL ${n.line}`);
