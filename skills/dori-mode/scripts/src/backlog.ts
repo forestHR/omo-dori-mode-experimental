@@ -6,8 +6,8 @@
 // The idea is dori-superagent's hourly loop (#23, https://github.com/sisyphuslabs/dori-superagent/pull/23, MIT), rewritten
 // here for aoe and dori launch: no GitHub issue import (owner 2026-11-02 23:14 KST "github 이슈는 필요없고"), the start goes
 // through the same launch as the lead's (directives, eight steps, work thread), and it never merges, pushes or closes.
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
 import type { BacklogSettings } from "./config.ts";
@@ -33,6 +33,8 @@ export type BacklogItem = {
   readonly tags?: readonly string[];
   // who put it on the list (owner, lead, or pair:<bot id> for a #dori-pair request), for the list
   readonly by: string;
+  // the feed draft this item follows up once the owner approved it (only these are dropped with their source)
+  readonly followUpOf?: string;
   // the lead says the work only reads; the owner's message link the work rests on (checked when it was added)
   readonly readOnly?: boolean;
   readonly ownerLink?: string;
@@ -62,10 +64,11 @@ const briefFile = (stateDir: string, id: string): string => join(dir(stateDir), 
 const runFile = (stateDir: string): string => join(dir(stateDir), "last-run.json");
 const cursorFile = (stateDir: string): string => join(dir(stateDir), "intake.json");
 
+// a fresh temp file (unguessable name, created exclusively: never through a link someone planted) renamed into place
 const writeAtomic = (file: string, text: string): void => {
   mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, text);
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  writeFileSync(tmp, text, { flag: "wx", mode: 0o644 });
   renameSync(tmp, file);
 };
 
@@ -104,6 +107,7 @@ export type AddInput = {
   readonly readOnly?: boolean;
   readonly ownerLink?: string;
   readonly draftOnly?: boolean;
+  readonly followUpOf?: string;
 };
 
 // backlog.writeNeedsOwnerLink: work that may write starts on its own only with the owner's message behind it
@@ -152,6 +156,7 @@ export const addItem = (stateDir: string, input: AddInput, ctx: { readonly regis
     ...(input.readOnly ? { readOnly: true } : {}),
     ...(input.ownerLink ? { ownerLink: input.ownerLink } : {}),
     ...(input.draftOnly ? { draftOnly: true } : {}),
+    ...(input.followUpOf ? { followUpOf: input.followUpOf } : {}),
     ...(ask ? { ask } : {}),
     by,
     status: "open",
@@ -208,10 +213,24 @@ export const instanceOf = (stateDir: string): string => createHash("sha256").upd
 const mine = (h: HostSlots): string => `${h.user}.${h.instance}.`;
 const slotFile = (h: HostSlots, key: string): string => join(h.dir, `${mine(h)}${key}.json`);
 
-const hostDir = (h: HostSlots): void => {
-  if (existsSync(h.dir)) return;
-  mkdirSync(h.dir, { recursive: true });
-  chmodSync(h.dir, 0o1777);
+// why the shared directory is unsafe to write in (a link, not a directory, no sticky bit), or undefined; made when missing
+const hostDirProblem = (h: HostSlots): string | undefined => {
+  if (!existsSync(h.dir)) {
+    mkdirSync(h.dir, { recursive: true });
+    chmodSync(h.dir, 0o1777);
+  }
+  const st = lstatSync(h.dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) return "is not a plain directory";
+  if (!(st.mode & 0o1000)) return "has no sticky bit (another account could remove or replace this Dori's files)";
+  return undefined;
+};
+
+const regularFile = (file: string): boolean => {
+  try {
+    return lstatSync(file).isFile();
+  } catch {
+    return false;
+  }
 };
 
 /** The host's live backlog lanes, oldest start first: [file name, start time]. */
@@ -222,7 +241,7 @@ export const hostLanes = (h: HostSlots, now: number): { readonly name: string; r
     .flatMap((name) => {
       try {
         const file = join(h.dir, name);
-        if (now - statSync(file).mtimeMs >= HOST_STALE_MS) return [];
+        if (!regularFile(file) || now - lstatSync(file).mtimeMs >= HOST_STALE_MS) return [];
         return [{ name, at: String((JSON.parse(readFileSync(file, "utf8")) as { at?: string }).at ?? "") }];
       } catch {
         return [];
@@ -237,14 +256,15 @@ const hostRefresh = (h: HostSlots, running: ReadonlySet<string>, now: number): v
   for (const name of readdirSync(h.dir).filter((f) => f.startsWith(mine(h)) && f.endsWith(".json"))) {
     const key = name.slice(mine(h).length, -".json".length);
     const file = join(h.dir, name);
-    if (running.has(key)) utimesSync(file, now / 1000, now / 1000);
+    if (running.has(key) && regularFile(file)) utimesSync(file, now / 1000, now / 1000);
     else rmSync(file, { force: true });
   }
 };
 
 /** Takes a host slot for a start: counted and written under the host directory's lock, so the cap holds across Doris. */
 export const hostReserve = async (h: HostSlots, key: string, now: number): Promise<string | undefined> => {
-  hostDir(h);
+  const unsafe = hostDirProblem(h);
+  if (unsafe) return `the host directory ${h.dir} ${unsafe}; no backlog lane starts until it is fixed`;
   const held = await flockDir(h.dir, 30);
   if (!held) return `the host's backlog lock (${h.dir}) was not free in 30 s`;
   try {
@@ -384,9 +404,9 @@ export const orderIntake = (d: { readonly stateDir: string; readonly settings: B
   return lines;
 };
 
-// the approved follow-up of a feed draft: always a different lane key, cut with a hash when the draft's id is long
-export const followUpId = (id: string): string =>
-  id.length + 3 <= 61 ? `${id}-ok` : `${id.slice(0, 51).replace(/[-._]+$/, "")}-${createHash("sha256").update(id).digest("hex").slice(0, 6)}-ok`;
+// the approved follow-up of a feed draft: "appr-" in place of the feed's "todo-", a name no feed entry can take, the
+// same length; which draft it follows is kept in the item (followUpOf), never read from the name
+export const followUpId = (id: string): string => `appr-${id.startsWith("todo-") ? id.slice(5) : id}`.slice(0, 61);
 
 export type FeedTodo = { readonly todo_id?: string; readonly id?: string; readonly title?: string; readonly status?: string; readonly [k: string]: unknown };
 const FEED_DONE = /^(done|완료|끝|closed)$/i;
@@ -423,7 +443,8 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     if (!ref || !LANE_KEY.test(id)) continue;
     const old = readItem(d.stateDir, id);
     if (FEED_DONE.test(String(todo.status ?? ""))) {
-      for (const open of [old, readItem(d.stateDir, followUpId(id))].filter((i): i is BacklogItem => i?.status === "open")) {
+      const children = listItems(d.stateDir).filter((i) => i.followUpOf === id);
+      for (const open of [old, ...children].filter((i): i is BacklogItem => i?.status === "open")) {
         save(d.stateDir, logged(open, at, "dropped: done on the source", { status: "dropped" }));
         lines.push(`BACKLOG_FEED_DONE ${open.id}: done on the source, dropped from the list`);
       }
@@ -437,11 +458,16 @@ export const feedIntake = async (d: { readonly stateDir: string; readonly settin
     // approved follow-up item once that lane closed (its draft is in the lane's report)
     const upgrade = approved && old?.draftOnly && old.status === "open";
     const followUp = approved && old?.draftOnly && old.status === "done" ? followUpId(id) : undefined;
-    if (old && !upgrade && !(followUp && !readItem(d.stateDir, followUp))) continue;
+    const taken = followUp ? readItem(d.stateDir, followUp) : undefined;
+    if (taken && taken.followUpOf !== id) {
+      lines.push(`BACKLOG_FEED_CLASH ${followUp}: an item not made for ${id} has this id; the approved work of ${id} is not queued`);
+      continue;
+    }
+    if (old && !upgrade && !(followUp && !taken)) continue;
     const itemId = followUp ?? id;
     const brief = join(dir(d.stateDir), "intake", `${itemId}.md`);
     writeAtomic(brief, feedBrief(todo, itemId, approved) + (followUp ? `\n[앞 단계] 승인 전 초안 레인 ${id}이 이미 끝났다. 그 보고서(${old?.done ?? "?"})의 초안을 먼저 읽고 이어서 한다.\n` : ""));
-    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
+    addItem(d.stateDir, { id: itemId, title, brief, done: d.settings.intakeDone.replaceAll("{id}", itemId).replaceAll("{stateDir}", d.stateDir), priority: approved ? "4" : "6", by: approved ? "feed:approved" : "feed", draftOnly: !approved, ...(followUp ? { followUpOf: id } : {}), noThread: approved ? "형이 승인 카드로 받은 할 일(진행은 대시보드에서 봄)" : "자동으로 뽑힌 할 일(읽기·초안까지, 쓰기 전 물음)" }, { registered: false, at });
     lines.push(upgrade ? `BACKLOG_FEED_APPROVED ${id}: the owner approved it; it now works within its scope` : `BACKLOG_INTAKE ${itemId} (feed, ${approved ? "owner-approved" : "draft only"}${followUp ? `, after draft ${id}` : ""}): ${title}`);
   }
   return lines;

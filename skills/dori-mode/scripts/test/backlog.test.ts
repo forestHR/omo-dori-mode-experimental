@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -146,6 +146,7 @@ test("backlog lanes of all Doris on the host count toward hostMaxLanes; a stale 
   // Given: two live lanes of other Doris and one whose loop stopped touching its file seven hours ago
   const host = join(root, "host");
   mkdirSync(host, { recursive: true });
+  chmodSync(host, 0o1777);
   for (const [name, at] of [["ok.a", "2026-11-02T10:00:00Z"], ["moo.b", "2026-11-02T11:00:00Z"], ["gone.c", "2026-11-02T05:00:00Z"]] as const) writeFileSync(join(host, `${name}.json`), JSON.stringify({ at }));
   utimesSync(join(host, "gone.c.json"), (T0 - 7 * 3_600_000) / 1000, (T0 - 7 * 3_600_000) / 1000);
   for (const name of ["ok.a", "moo.b"]) utimesSync(join(host, `${name}.json`), T0 / 1000, T0 / 1000);
@@ -409,15 +410,17 @@ test("a feed entry approved after it came in as a draft: an open draft is upgrad
   const lines = await sweep([entry("aaaaaaaaaaaa", true), entry("bbbbbbbbbbbb", true)]);
   const again = await sweep([entry("aaaaaaaaaaaa", true), entry("bbbbbbbbbbbb", true)]);
   // Then
-  expect(lines).toEqual(["BACKLOG_FEED_APPROVED todo-pb-aaaaaaaaaaaa-1: the owner approved it; it now works within its scope", "BACKLOG_INTAKE todo-pb-bbbbbbbbbbbb-1-ok (feed, owner-approved, after draft todo-pb-bbbbbbbbbbbb-1): 일 bbbbbbbbbbbb"]);
+  expect(lines).toEqual(["BACKLOG_FEED_APPROVED todo-pb-aaaaaaaaaaaa-1: the owner approved it; it now works within its scope", "BACKLOG_INTAKE appr-pb-bbbbbbbbbbbb-1 (feed, owner-approved, after draft todo-pb-bbbbbbbbbbbb-1): 일 bbbbbbbbbbbb"]);
   expect(again).toEqual([]);
   expect([readItem(state, "todo-pb-aaaaaaaaaaaa-1")?.draftOnly, readItem(state, "todo-pb-aaaaaaaaaaaa-1")?.status]).toEqual([undefined, "open"]);
-  expect(readItem(state, "todo-pb-bbbbbbbbbbbb-1-ok")?.draftOnly).toBeUndefined();
+  expect(readItem(state, "appr-pb-bbbbbbbbbbbb-1")?.draftOnly).toBeUndefined();
 });
 
 test("a host slot is counted and written only under the host directory's lock that every Dori takes", async () => {
   // Given: another Dori holds the host lock
   const hostDir = join(root, "host");
+  mkdirSync(hostDir);
+  chmodSync(hostDir, 0o1777);
   const other = await flockDir(hostDir, 5);
   const h = { dir: hostDir, user: "me", instance: "i1", max: 1 };
   // When
@@ -454,4 +457,43 @@ test("an approved follow-up has its own Done line, is dropped when the source fi
   expect(follow?.done).not.toBe(readItem(state, draftId)?.done);
   expect(finished).toEqual([`BACKLOG_FEED_DONE ${followUpId(draftId)}: done on the source, dropped from the list`]);
   expect(readItem(state, followUpId(draftId))?.status).toBe("dropped");
+});
+
+test("finishing a feed entry drops only its own follow-up, never an independent entry whose name looks like one", async () => {
+  // Given: two independent feed entries x and x-ok, both open
+  const settings = { ...SETTINGS, feedCommand: ["node-read", "todo-list", "--json"] };
+  const sweep = (todos: FeedTodo[]) => feedIntake({ stateDir: state, settings, feed: async () => ({ todos }), now: () => now });
+  await sweep([{ todo_id: "x1", title: "x", status: "진행" }, { todo_id: "x1-ok", title: "x-ok", status: "진행" }]);
+  // When
+  const lines = await sweep([{ todo_id: "x1", title: "x", status: "완료" }, { todo_id: "x1-ok", title: "x-ok", status: "진행" }]);
+  // Then
+  expect(lines).toEqual(["BACKLOG_FEED_DONE todo-x1: done on the source, dropped from the list"]);
+  expect(readItem(state, "todo-x1-ok")?.status).toBe("open");
+});
+
+test("an unsafe shared host directory is refused, and a link planted at a slot's name is replaced, never followed", async () => {
+  // Given: a victim file, a host dir that is a link, one without the sticky bit, and a sticky one with a planted link
+  const victim = join(root, "victim.txt");
+  writeFileSync(victim, "keep");
+  const real = join(root, "realdir");
+  mkdirSync(real);
+  symlinkSync(real, join(root, "linkdir"));
+  const plain = join(root, "plain");
+  mkdirSync(plain);
+  chmodSync(plain, 0o777);
+  const sticky = join(root, "sticky");
+  mkdirSync(sticky);
+  chmodSync(sticky, 0o1777);
+  symlinkSync(victim, join(sticky, "me.i1.ay.json"));
+  const at = (dir: string) => ({ dir, user: "me", instance: "i1", max: 3 });
+  // When
+  const viaLink = await hostReserve(at(join(root, "linkdir")), "ay", now);
+  const noSticky = await hostReserve(at(plain), "ay", now);
+  const planted = await hostReserve(at(sticky), "ay", now);
+  // Then
+  expect(viaLink).toContain("is not a plain directory");
+  expect(noSticky).toContain("has no sticky bit");
+  expect(planted).toBeUndefined();
+  expect(readFileSync(victim, "utf8")).toBe("keep");
+  expect(readdirSync(real)).toEqual([]);
 });
