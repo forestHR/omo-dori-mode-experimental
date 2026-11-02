@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
 // allow: SIZE_OK — existing command dispatcher; command behavior lives in separate modules.
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
+import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, type InboxRow, itemLine, lastRun, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps } from "./backlog.ts";
+import { poolFree, tailOf } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
 import { ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers } from "./handover.ts";
@@ -107,6 +109,24 @@ const USAGE = `dori <command> [options]
                                        stops the launch (LAUNCH_DIRECTIVE_MISSING, exit 4, nothing opened) unless
                                        --waive <id> "<reason>" (repeatable) leaves it out: LAUNCH_DIRECTIVE_WAIVED in the
                                        watch log and the registry, and discord.waiveText to the owner
+  backlog [list [--all]|add <id> --title T --brief FILE --done "..." [--priority 1-9] [--cwd DIR] [--thread REF|new | --no-thread "<reason>"] [--why-new R] [--goal "owner words"] [--tag T ...] [--ask "<question for the owner>"] [--read-only] [--owner-link URL] [--by owner|lead]|drop <id> [--reason R]|decide <id> --text "<the owner's answer>"|tick [--force]]
+                                       the list of work the owner or the lead put by (no GitHub import): with config
+                                       backlog.enabled, the freshness loop of dori-lanes runs a pass every tick: new work
+                                       comes in (other Doris' #dori-pair posts by backlog.pairRepairPattern /
+                                       pairRequestPattern, a request only with an owner message link that holds; the owner's
+                                       orders by backlog.orderKinds; at each backlog.everyMin sweep the backlog.feedCommand
+                                       list as draft-only items), a running item whose lane closed is done (BACKLOG_DONE), an
+                                       item with --ask puts one backlog-ask row in the lead's inbox and never starts before
+                                       decide (BACKLOG_ASK), and the next open items start at once by priority through dori
+                                       launch (its directives, eight steps and work thread; --thread new by default) while
+                                       fewer than backlog.maxLanes backlog lanes of this Dori and backlog.hostMaxLanes of all
+                                       Doris on the host run, at most backlog.maxStarts a pass, a model account is free and
+                                       dori can-launch and the load guard allow (BACKLOG_STARTED; BACKLOG_HOLD and
+                                       BACKLOG_WAIT when that changes or at a sweep). With backlog.writeNeedsOwnerLink an
+                                       item without --read-only and without a checked --owner-link asks the owner first. A
+                                       refused launch or two failed starts hold the item (BACKLOG_HELD, a backlog-held row)
+                                       until add replaces it or drop; backlog.dayReportAt sends one backlog-day row a day.
+                                       tick runs a pass by hand (--force: a sweep now, even when off)
   directives [table|prompts|check [--static]|apply <key> [--dry-run]|hint <text>|links [--push]]
                                        hint prints the directives (at most five) an owner message with that text carries
                                        in its inbox row (DIRECTIVE_HINT / DIRECTIVE_HINT_NONE);
@@ -496,7 +516,7 @@ const flags = parseArgs({
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
-    "delete-branch": { type: "boolean" },
+    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -745,6 +765,78 @@ const inboxText = (id: string): string => {
 };
 // the inbox dori directive-audit reads the owner's messages from and leaves its notices for the lead in
 const auditInbox = (): string => config.handover.inbox || process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl");
+// why a Discord message link is not the owner's word (his account or his registered webhook), or undefined when it is
+const ownerLinkProblem = async (url: string, maxAgeMs?: number): Promise<string | undefined> => {
+  const m = /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/channels\/\d+\/(\d+)\/(\d+)$/.exec(url.trim());
+  if (!m) return `${url} is not a Discord message link`;
+  if (!discordToken) return "DORI_DISCORD_TOKEN is not set, so the link cannot be read";
+  const msg = await ownDiscord(discordToken).call<{ author?: { id?: string }; webhook_id?: string; timestamp?: string }>("GET", `/channels/${m[1]}/messages/${m[2]}`).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+  if (typeof msg === "string") return `the message could not be read (${msg.slice(0, 120)})`;
+  const owner = process.env.DORI_DISCORD_OWNER?.trim() ?? "";
+  const hook = process.env.DORI_DISCORD_OWNER_WEBHOOK?.trim() ?? "";
+  if (!(owner && msg.author?.id === owner) && !(hook && msg.webhook_id === hook)) return "the message is not the owner's";
+  if (maxAgeMs !== undefined && Date.now() - Date.parse(msg.timestamp ?? "") > maxAgeMs) return `the owner's message is older than ${Math.round(maxAgeMs / 3_600_000)} hours`;
+  return undefined;
+};
+// dori backlog: a pass starts an item through the same launch as dori launch and tells the lead in its inbox
+const backlogDeps = (): TickDeps => ({
+  stateDir: config.stateDir,
+  settings: config.backlog,
+  now: realClock.now,
+  lanes: () => deps.registry.list(),
+  busy: async () => {
+    const host = await sampleHost(run, config.backend);
+    return [...canLaunch(host, config.guard).reasons, ...(host.load1 > config.guard.loadOk ? [`load ${host.load1.toFixed(1)} > ${config.guard.loadOk}`] : [])];
+  },
+  launch: async (item, brief) => {
+    const leadBrief = readFileSync(brief, "utf8");
+    const input = { key: item.id, title: item.title, brief, done: item.done, thread: item.thread, noThread: item.noThread, whyNew: item.whyNew, cwd: item.cwd, tags: [...(item.tags ?? []), "backlog"], goal: item.goal };
+    const r = await launchLane(deps, input, (line) => console.log(line)).catch((e: unknown) => {
+      throw e instanceof LaunchError ? new StartRefused(e.message) : e;
+    });
+    if (r.lane.thread.startsWith("discord:") && discordToken) {
+      console.log(await Promise.resolve().then(() => postLaneStart(ownDiscord(discordToken), r.lane.thread, laneStartText(config.discord.laneStartText, r.lane, leadBrief))).catch((e: unknown) => `THREAD_START_FAILED ${r.lane.thread}: ${e instanceof Error ? e.message : String(e)}`));
+    }
+    return { pane: r.lane.pane ?? "?", startup: r.startup };
+  },
+  limited: () => {
+    const provider = config.defaultModel.split("/")[0];
+    return poolFree(config.sessionsDir, provider, Date.now()) ? undefined : `usage limit: no ${provider} account is free in omo's credential pool`;
+  },
+  host: { dir: config.backlog.hostDir, user: userInfo().username, max: config.backlog.hostMaxLanes },
+  intake: async (sweep) => {
+    // the last 2 MB of the inbox: a pass runs every freshness tick, and new rows are at the end
+    const rows = (): InboxRow[] => (existsSync(auditInbox()) ? tailOf(auditInbox(), 2 * 1024 * 1024) : "").split("\n").flatMap((line): InboxRow[] => {
+      try {
+        return line.trim().startsWith("{") ? [JSON.parse(line) as InboxRow] : [];
+      } catch {
+        return [];
+      }
+    });
+    const base = { stateDir: config.stateDir, settings: config.backlog, rows, now: realClock.now };
+    const feed = async (): Promise<{ readonly todos: readonly FeedTodo[] } | { readonly why: string }> => {
+      const r = await run(config.backlog.feedCommand.map((p) => p.replace(/^~(?=\/)/, homedir())), { timeoutMs: 120_000 });
+      if (r.code !== 0) return { why: (r.err || r.out).trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code}` };
+      try {
+        const v = JSON.parse(r.out) as unknown;
+        const list = Array.isArray(v) ? v : (v as { todos?: unknown }).todos;
+        return Array.isArray(list) ? { todos: list as FeedTodo[] } : { why: "the output is not a JSON list" };
+      } catch {
+        return { why: "the output is not JSON" };
+      }
+    };
+    return [
+      ...(await pairIntake({ ...base, pairBots: idList(process.env.DORI_DISCORD_PAIR_BOT), guild: process.env.DORI_DISCORD_GUILD?.trim() ?? "", ownerLink: ownerLinkProblem })),
+      ...orderIntake(base),
+      ...(sweep ? await feedIntake({ ...base, feed }) : []),
+    ];
+  },
+  inbox: (kind, id, content) => {
+    const inbox = auditInbox();
+    mkdirSync(join(inbox, ".."), { recursive: true });
+    appendFileSync(inbox, `${JSON.stringify({ ts: new Date().toISOString(), id, kind, content })}\n`);
+  },
+});
 // every thread status change goes through this queue: coalesced, retried after a 429, decided by the open cards and
 // the lanes still working in the thread
 // working, or sent back to work by an objection (not-done); a lane that claimed done or is paused waits like the thread
@@ -1241,6 +1333,13 @@ try {
           watchLog(config.watchLog, realClock, { source: "handover", line });
           console.log(line);
         }
+        // the backlog pass (dori backlog), on a Dori that turned it on: every tick, with a sweep every backlog.everyMin minutes
+        if (config.backlog.enabled) {
+          for (const line of await backlogTick(backlogDeps()).catch((e: unknown) => [`BACKLOG_WARN ${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200)}`])) {
+            watchLog(config.watchLog, realClock, { source: "backlog", line });
+            console.log(line);
+          }
+        }
       });
       break;
     case "dead-panes": {
@@ -1461,6 +1560,50 @@ try {
         else die(`state-git: unknown step ${sub} (init, commit, log, restore, loop, check)`);
       }
       if (!dirs.length) console.log("STATE_GIT_NO_DIRS none of this Dori's directories exists");
+      break;
+    }
+    case "backlog": {
+      const sub = key ?? "list";
+      const id = flags.positionals[1];
+      const at = new Date().toISOString();
+      const state = config.backlog.enabled ? `BACKLOG_ON one pass every ${config.backlog.everyMin} min, at most ${config.backlog.maxStarts} start(s) a pass while fewer than ${config.backlog.maxLanes} lanes are open` : `BACKLOG_OFF backlog.enabled is false in ${configPath()}: items wait until this Dori turns it on`;
+      try {
+        if (sub === "list") {
+          const items = listItems(config.stateDir).filter((i) => flags.values.all || i.status === "open" || i.status === "running").sort(byTurn);
+          console.log(items.length ? items.map(itemLine).join("\n") : "BACKLOG_EMPTY");
+          const last = lastRun(config.stateDir);
+          console.log(`${state}${last ? `; last pass ${last.at}` : ""}`);
+        } else if (sub === "add") {
+          const itemId = id ?? die("usage: dori backlog add <id> --title T --brief FILE --done \"...\"");
+          const ownerLink = opt("owner-link");
+          const ownerProblem = ownerLink ? await ownerLinkProblem(ownerLink) : undefined;
+          if (ownerLink && ownerProblem && !config.backlog.writeNeedsOwnerLink) die(`BACKLOG_REFUSED --owner-link ${ownerLink}: ${ownerProblem}`, 2);
+          const r = addItem(config.stateDir, { id: itemId, title: need("title"), brief: need("brief"), done: need("done"), priority: opt("priority"), cwd: opt("cwd"), thread: threadOpt(), noThread: noThreadOpt(), whyNew: whyNewOpt(), goal: opt("goal"), tags: tags(), ask: flags.values.ask === true ? "" : opt("ask"), by: opt("by"), readOnly: Boolean(flags.values["read-only"]), ownerLink }, { registered: Boolean(await deps.registry.read(itemId)), at, needOwnerLink: config.backlog.writeNeedsOwnerLink, ownerProblem });
+          console.log(`${r.replaced ? "BACKLOG_REPLACED" : "BACKLOG_ADDED"} ${itemLine(r.item)}`);
+          if (!config.backlog.enabled) console.log(state);
+        } else if (sub === "drop") {
+          dropItem(config.stateDir, id ?? die("usage: dori backlog drop <id> [--reason R]"), many("reason").join("; ") || "by the lead", at);
+          console.log(`BACKLOG_DROPPED ${id}`);
+        } else if (sub === "decide") {
+          const kst = `${new Date(Date.now() + 9 * 3_600_000).toISOString().slice(0, 16).replace("T", " ")} KST`;
+          const item = decideItem(config.stateDir, id ?? die("usage: dori backlog decide <id> --text \"<the owner's answer>\""), opt("text") ?? "", at, kst);
+          console.log(`BACKLOG_DECIDED ${item.id}: the answer is in its brief; it starts at a pass when its turn comes`);
+        } else if (sub === "tick") {
+          if (!config.backlog.enabled && !flags.values.force) die(state, 4);
+          const lines = await backlogTick(backlogDeps(), { force: Boolean(flags.values.force) });
+          for (const line of lines) {
+            watchLog(config.watchLog, realClock, { source: "backlog", line });
+            console.log(line);
+          }
+          if (!lines.length) console.log(`BACKLOG_QUIET nothing new since the last pass; the next sweep is ${config.backlog.everyMin} min after ${lastRun(config.stateDir)?.at ?? "?"} (--force: now)`);
+        } else if (sub === "show") {
+          const item = readItem(config.stateDir, id ?? die("usage: dori backlog show <id>")) ?? die(`no backlog item ${id}`);
+          console.log(JSON.stringify(item, null, 1));
+        } else die(`backlog: unknown step ${sub} (list, add, drop, decide, tick, show)`);
+      } catch (e) {
+        if (e instanceof BacklogError) die(`BACKLOG_REFUSED ${e.message}`, 2);
+        throw e;
+      }
       break;
     }
     case "can-launch": {

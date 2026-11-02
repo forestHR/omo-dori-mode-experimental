@@ -11,7 +11,7 @@ What you get:
 | `dori thread open\|set\|map\|list` | Open work threads, set their status through the shared queue, and keep non-lane session mappings in `<cardDir>/threads.json`. Standalone threads require `--first`. |
 | `dori lead` | Print the lead's aoe id and tmux name (` stopped` when its tmux is not running yet); used by no-argument `self-restart.sh` and `dori-lead.service`. |
 | `dori thread reply\|wait\|done` | The thread hooks: posts lane reports into the work thread and sets its status mark (🔄, ⏸️, ✅ with this setup's emoji style); `done` archives the thread. |
-| `dori-lanes.sh` (unit `dori-lanes`) | `dori watch`, `freshness`, `dead-panes` and `guard` in one unit and one log, each line stamped and tagged. |
+| `dori-lanes.sh` (unit `dori-lanes`) | `dori watch`, `freshness`, `dead-panes` and `guard` in one unit and one log, each line stamped and tagged. With `backlog.enabled` in this Dori's config the `freshness` loop also runs the `dori backlog` pass (`BACKLOG_` lines). |
 | `session-watch.ts` (unit `dori-session-watch`) | Notices when another aoe session stops for a human (waiting, error, idle after a turn, a new `MILESTONE` line) and writes the event with the pane's tail, the lane's thread and what the session last said. |
 | `self-restart.sh` | The one safe way to restart an aoe session, the Dori's own included, e.g. after an agent update. A lane restarts with `launchEnv` unless it uses the GPU (`dori launch-env`). |
 | `google-watch.ts` (unit `dori-google-watch`) | Read-only zele polling for new unread mail and upcoming calendar events; writes JSONL and remembers notified ids. |
