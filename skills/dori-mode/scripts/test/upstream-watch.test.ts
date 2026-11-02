@@ -262,3 +262,27 @@ test("with a neutral title the file contents decide: outbound code found in a pa
   expect(inbox().filter((x) => x.kind === "upstream-change").map((x) => [x.item, x.class])).toEqual([["pr:41", "3"], ["pr:42", "3"]]);
   expect(seen()["pr:43"]!.class).toBe("2");
 });
+
+test("a dependency added to a skills package.json goes to the owner whatever its version spec; version and scripts lines do not", async () => {
+  const pkg = "skills/dori-mode/scripts/package.json";
+  // a hunk inside the dependencies block, adding one entry with the given spec
+  const midBlock = (spec: string) => `@@ -3,6 +3,7 @@\n   "dependencies": {\n     "a": "^1.0.0",\n+    "b": "${spec}",\n     "c": "2.0.0"\n   }`;
+  const patches: Record<number, string> = {
+    50: `@@ -0,0 +1,10 @@\n+{\n+  "name": "x",\n+  "version": "1.0.0",\n+  "scripts": {\n+    "build": "tsc"\n+  },\n+  "dependencies": {\n+    "left": "latest"\n+  }\n+}`,
+    51: midBlock("*"),
+    52: midBlock("npm:real@2"),
+    53: midBlock("git+https://github.com/x/b.git"),
+    54: midBlock("file:../b"),
+    55: `@@ -1,6 +1,6 @@\n {\n-  "version": "1.0.0",\n+  "version": "1.1.0",\n   "scripts": {\n-    "build": "tsc"\n+    "build": "tsc -b"\n   }`,
+  };
+  const numbers = Object.keys(patches).map(Number);
+  json("prs.json", numbers.map((n) => ({ number: n, title: "chore: package tidy", url: `${UP}/pull/${n}`, mergedAt: "2026-11-02T00:00:00Z", mergeCommit: { oid: `${n}`.padStart(40, "7") }, body: "" })));
+  for (const n of numbers) json(`files-${n}.json`, [{ filename: pkg, patch: patches[n], status: "modified", changes: 2 }]);
+  json("issues.json", []);
+  writeFileSync(join(gh, "commits.jsonl"), "");
+  expect((await run()).code).toBe(0);
+  const rows = inbox().filter((x) => x.kind === "upstream-change");
+  expect(rows.map((x) => [x.item, x.class])).toEqual([["pr:50", "3"], ["pr:51", "3"], ["pr:52", "3"], ["pr:53", "3"], ["pr:54", "3"], ["pr:55", "4"]]);
+  expect(rows.find((x) => x.item === "pr:50")!.reason).toContain(`${pkg}에 left`);
+  expect(rows.find((x) => x.item === "pr:51")!.reason).toContain(`${pkg}에 b`);
+});

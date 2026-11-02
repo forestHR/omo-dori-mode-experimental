@@ -66,6 +66,9 @@ TEST_FILE = re.compile(r"(?:^|/)tests?/|\.test\.|_test\.")
 URL = re.compile(r"https?://([^/\s'\"`)>]+)")
 SAFE_HOST = re.compile(r"^(?:github\.com|raw\.githubusercontent\.com|api\.github\.com|localhost|127\.0\.0\.1|example\.(?:com|org))(?::\d+)?$", re.I)
 DEP_LINE = re.compile(r'^\s*"(@?[a-z0-9][\w.@/-]*)"\s*:\s*"[\^~>=<]*\d', re.I)
+DEP_KEYS = {"dependencies", "devDependencies", "optionalDependencies", "peerDependencies"}
+JSON_BLOCK = re.compile(r'^\s*"([^"]+)"\s*:\s*\{\s*$')
+JSON_ENTRY = re.compile(r'^\s*"([^"]+)"\s*:\s*"')
 
 CLASS_NAME = {"1": "① 이미 있음", "2": "② 상관없음", "3": "③ 형 결정 필요", "4": "④ 이식 후보"}
 ACTION = {
@@ -236,13 +239,36 @@ def outbound(added: dict[str, list[str]]) -> str | None:
     return None
 
 
-def new_deps(added: dict[str, list[str]]) -> str | None:
-    for path, lines in added.items():
-        if not (path.startswith("skills/") and path.endswith("package.json")):
+def new_deps(diff: str) -> str | None:
+    # An added "name": "<any spec>" line inside a dependency block of skills/**/package.json (latest, *, npm:, git, file:
+    # count too). The block is followed through the patch's own context and added lines; when a hunk starts below its
+    # block header, only a numeric version still marks a dependency.
+    found: dict[str, list[str]] = {}
+    path, blocks = None, []
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            m = re.search(r" b/(.+)$", line)
+            path, blocks = (m.group(1) if m else None), []
             continue
-        names = [m.group(1) for m in map(DEP_LINE.match, lines) if m and m.group(1) != "version"]
-        if names:
-            return f"{path}에 {', '.join(names[:3])}"
+        if not (path and path.startswith("skills/") and path.endswith("package.json")):
+            continue
+        if line.startswith("@@"):
+            blocks = []
+            continue
+        if not line.startswith(("+", " ")):
+            continue
+        body = line[1:]
+        if m := JSON_BLOCK.match(body):
+            blocks.append(m.group(1))
+        elif body.strip().startswith("}"):
+            if blocks:
+                blocks.pop()
+        elif line.startswith("+") and (m := JSON_ENTRY.match(body)):
+            inside = blocks[-1] if blocks else None
+            if inside in DEP_KEYS or (inside is None and m.group(1) != "version" and DEP_LINE.match(body)):
+                found.setdefault(path, []).append(m.group(1))
+    for path, names in found.items():
+        return f"{path}에 {', '.join(names[:3])}"
     return None
 
 
@@ -259,7 +285,7 @@ def classify_change(title: str, paths: list[str], diff: str, blind: list[str] | 
         why.append("바깥으로 데이터를 보냄" + (f"({sent})" if sent else ""))
     if m := AUTONOMY.search(title):
         why.append(f"자율 범위가 바뀜({m.group(0)})")
-    if dep := new_deps(added):
+    if dep := new_deps(diff):
         why.append(f"새 의존성({dep})")
     if ours and (m := OWNER_FELT.search(title)):
         why.append(f"형이 겪는 동작이 바뀜({m.group(0)})")
