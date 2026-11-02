@@ -570,7 +570,9 @@ const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string
   // the template is checked, not the filled argv: the prompt is one argument and never a selector
   const argv = fill(withSessionId(deps.config.agentCommand, crypto.randomUUID()), { model, prompt });
   await deps.run(["herdr", "pane", "run", pane, argv.map(quoteForPane).join(" ")]);
-  return { pane, ...(tab ? { tab } : {}), session: argvSessionId(argv) };
+  // a command with its own --session-dir keeps its sessions (and goals) outside sessionsDir, so launch cannot read them
+  const elsewhere = argv.some((a) => a === "--session-dir" || a.startsWith("--session-dir="));
+  return { pane, ...(tab ? { tab } : {}), session: elsewhere ? "" : argvSessionId(argv) };
 };
 
 const openAoe = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string, env: Readonly<Record<string, string | undefined>>): Promise<Opened> => {

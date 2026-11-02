@@ -37,17 +37,22 @@ export const descendants = (table: readonly Proc[], root: number): Proc[] => {
 
 export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(sessionsDir, `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`);
 
-// The session an agent's command line names: --session-id <id>, or --session <id or path to the session .jsonl> (the uuid
-// at the end of that file name; aoe resumes a session this way). "" when it names none.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The exact session an agent's command line names: --session-id <id> (omo: "use exact project session ID"), or
+// --session <path to the session .jsonl> (the uuid at the end of that file name; aoe resumes a session this way) or a
+// whole uuid. "" when it names none, or only a partial uuid omo would resolve itself (which session that is, is not known).
 export const argvSessionId = (argv: readonly string[]): string => {
   const flagAt = argv.findIndex((a) => a === "--session" || a === "--session-id");
   const value = flagAt >= 0 ? (argv[flagAt + 1] ?? "") : "";
-  return value.endsWith(".jsonl") ? (SESSION_FILE.exec(basename(value))?.[5] ?? "") : value;
+  if (argv[flagAt] === "--session-id") return value;
+  if (value.endsWith(".jsonl")) return SESSION_FILE.exec(basename(value))?.[5] ?? "";
+  return UUID.test(value) ? value : "";
 };
 
-// The flags with which omo picks its session itself (pi's --session, --session-id, --continue/-c, --resume/-r, --fork,
-// --no-session), as a separate word or as --flag=value.
-const SELECTORS = ["--session", "--session-id", "--continue", "-c", "--resume", "-r", "--fork", "--no-session"];
+// The flags with which omo picks its session itself (omo --help: --session, --session-id, --continue/-c, --resume/-r,
+// --fork, --rebind, --no-session), as a separate word or as --flag=value.
+const SELECTORS = ["--session", "--session-id", "--continue", "-c", "--resume", "-r", "--fork", "--rebind", "--no-session"];
 export const hasSessionSelector = (argv: readonly string[]): boolean => argv.some((a) => SELECTORS.some((s) => a === s || a.startsWith(`${s}=`)));
 
 export type SessionDeps = { readonly run: Runner; readonly sessionsDir: string; readonly backend?: Backend; readonly listDir?: (dir: string) => readonly string[] };

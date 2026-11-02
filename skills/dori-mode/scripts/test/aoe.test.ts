@@ -15,7 +15,7 @@ import { eightSteps, launchEnvArgs, launchLane, withSessionId } from "../src/lau
 import { listPanes, sendVerified } from "../src/panes.ts";
 import { SUBMIT_TIMING } from "../src/submit.ts";
 import type { Lane } from "../src/registry.ts";
-import { resolveSession } from "../src/session-id.ts";
+import { argvSessionId, resolveSession } from "../src/session-id.ts";
 import { depsFor, fakeClock, NEW_AOE_ID, newWorld, RUNNING, sent, withState, type World } from "./fakes.ts";
 
 const T0 = Date.parse("2026-01-01T12:00:00.000Z");
@@ -418,12 +418,35 @@ test("exact session id: a herdr omo lane gets launch's own --session-id after th
   const r3 = await launchLane(herdr(["omo", "--continue", "--model", "{model}", "{prompt}"], (cmd) => { continued = cmd; }), input("hd3"));
   expect(continued).toStartWith("omo --continue --model ");
   expect(r3.startup).toStartWith("STARTUP_UNCONFIRMED hd3 w:p9: the agent runs but its command line names no session id");
+  // --session with a partial uuid is resolved by omo itself: the prefix is not the session's id, so no goal file is guessed
+  let partial = "";
+  const r4 = await launchLane(herdr(["omo", "--session", "99999999", "--model", "{model}", "{prompt}"], (cmd) => { partial = cmd; session(ID, cmd, "active"); }), input("hd4"));
+  expect(partial).toStartWith("omo --session 99999999 --model ");
+  expect(r4.startup).toStartWith("STARTUP_UNCONFIRMED hd4 w:p9: the agent runs but its command line names no session id");
+  // --session with a whole uuid names that session exactly
+  const r5 = await launchLane(herdr(["omo", "--session", ID, "--model", "{model}", "{prompt}"], (cmd) => session(ID, cmd, "active")), input("hd5"));
+  expect(r5.startup).toBe("STARTUP_OK hd5 w:p9");
+  expect(r5.lane.session).toBe(ID);
+  // a command that keeps its sessions in its own --session-dir: the goal is not under sessionsDir, so it is not read there
+  let own = "";
+  const r6 = await launchLane(herdr(["omo", "--session-dir", "/elsewhere", "--model", "{model}", "{prompt}"], (cmd) => { own = /--session-id (\S+)/.exec(cmd)?.[1] ?? ""; session(own, cmd, "active"); }), input("hd6"));
+  expect(own).not.toBe("");
+  expect(r6.startup).toStartWith("STARTUP_UNCONFIRMED hd6 w:p9: the agent runs but its command line names no session id");
+});
+
+test("exact session id: argvSessionId reads only an exact id: --session-id, a session file, or a whole uuid; never a partial uuid", () => {
+  expect(argvSessionId(["omo", "--session-id", ID])).toBe(ID);
+  expect(argvSessionId(["omo", "--session", `/s/--x--/2026-01-01T12-00-00-000Z_${ID}.jsonl`])).toBe(ID);
+  expect(argvSessionId(["omo", "--session", ID])).toBe(ID);
+  expect(argvSessionId(["omo", "--session", "99999999"])).toBe("");
+  expect(argvSessionId(["omo", "--fork", ID])).toBe("");
+  expect(argvSessionId(["omo", "--model", "m"])).toBe("");
 });
 
 test("exact session id: withSessionId adds one --session-id only to an omo command that names no session itself", () => {
   expect(withSessionId(["omo", "--model", "{model}", "{prompt}"], ID)).toEqual(["omo", "--session-id", ID, "--model", "{model}", "{prompt}"]);
   expect(withSessionId(["/home/u/.bun/bin/omo", "{prompt}"], ID)).toEqual(["/home/u/.bun/bin/omo", "--session-id", ID, "{prompt}"]);
-  for (const own of [["omo", "--session", "/s/x.jsonl"], ["omo", "--session-id=abc"], ["omo", "--continue"], ["omo", "-c"], ["omo", "--resume"], ["omo", "-r"], ["omo", "--fork", "/s/x.jsonl"], ["omo", "--no-session"], ["claude", "{prompt}"]]) expect(withSessionId(own, ID)).toEqual(own);
+  for (const own of [["omo", "--session", "/s/x.jsonl"], ["omo", "--session-id=abc"], ["omo", "--continue"], ["omo", "-c"], ["omo", "--resume"], ["omo", "-r"], ["omo", "--fork", "/s/x.jsonl"], ["omo", "--rebind", "/old/repo/x.jsonl"], ["omo", "--rebind=abc"], ["omo", "--no-session"], ["claude", "{prompt}"]]) expect(withSessionId(own, ID)).toEqual(own);
 });
 
 test("exact session id: aoe add gets the pi of the agent's own install when its PATH has none, so aoe pins the session", () => {
