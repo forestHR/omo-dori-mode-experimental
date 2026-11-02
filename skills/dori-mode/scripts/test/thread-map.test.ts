@@ -198,6 +198,18 @@ test("closing the last working lane of a thread with an open card turns it waiti
   expect(closed.out).toContain("thread left open: open card Q1; summary posted\",\"waiting requested: applied");
 });
 
+// lead 2026-11-02 23:15 KST: the upstream-port thread stays open between ports
+test("a thread set standing turns waiting, is listed as standing, and closing its last lane leaves it waiting and unarchived", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  const set = await cli("set", REF, "standing");
+  expect({ out: set.out, name: http().name, standing: map()[ID]?.standing }).toEqual({ out: `THREAD_STANDING ${REF} applied`, name: "⏸️ fix login", standing: true });
+  expect((await cli("list")).out).toBe(`${ID} none fix login [standing]`);
+  closable("lane-a");
+  const closed = await dori("close", "lane-a", "--summary", SUMMARY);
+  expect({ code: closed.code, name: http().name, archived: http().archived, standing: map()[ID]?.standing }).toEqual({ code: 0, name: "⏸️ fix login", archived: false, standing: true });
+  expect(closed.out).toContain("thread left open: standing thread; summary posted");
+});
+
 test("a lane still working in the thread keeps it working when another lane closes, open card or not", async () => {
   await cli("open", "fix login", "--first", "Start");
   openCard("Q1");
