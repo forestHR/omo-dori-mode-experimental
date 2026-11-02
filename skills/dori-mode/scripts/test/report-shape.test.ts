@@ -30,3 +30,13 @@ test("a report with its evidence on the lines below still starts with the plain 
 
   expect(report.startsWith("[REPORT] msg-ux | done | 회의록 글이 사람 말 한 줄로 나와, 형 할 일 없음 (fix: owner-post")).toBe(true);
 });
+
+// dori-superagent issue #22: a lane's code that prints a report template shows it on screen before it is filled in
+test("a template line with ${...} or {name} in place of the plain line is not read as the lane's report", () => {
+  const real = "[REPORT] demo-lane | milestone | checks passed";
+  const shell = 'echo "[REPORT] demo-lane | milestone | ${message}"';
+  const python = 'print(f"[REPORT] demo-lane | milestone | {message}")';
+  expect(lastReportLine([real, python, shell].join("\n"), "demo-lane")).toBe(real);
+  expect(lastReportLine(shell, "demo-lane")).toBeNull();
+  expect(lastReportLine(python, "demo-lane")).toBeNull();
+});

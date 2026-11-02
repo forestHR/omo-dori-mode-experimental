@@ -17,8 +17,10 @@ import { join } from "node:path";
 import { watchLog } from "./watch-log.ts";
 
 // Any status word counts as hearing from the lane (pingpong-analytics reports "| working |"); the footer's placeholder
-// "| <milestone|...> | <one plain line ..." never does.
-const reportGrammar = (key: string): RegExp => new RegExp(`\\[REPORT\\] ${key.replace(/[.]/g, "\\.")} \\| [a-z]+ \\| (?!<)\\S`);
+// "| <milestone|...> | <one plain line ..." never does, nor a template line a lane's code prints before filling it in
+// (echo "[REPORT] <key> | milestone | ${message}", f"... | {message}"): issue #22 of dori-superagent
+// (https://github.com/sisyphuslabs/dori-superagent/issues/22, MIT), where the template on screen was posted as the report.
+const reportGrammar = (key: string): RegExp => new RegExp(`\\[REPORT\\] ${key.replace(/[.]/g, "\\.")} \\| [a-z]+ \\| (?!<)(?!.*(?:\\$\\{\\w|\\{\\w+\\}))\\S`);
 
 // A report the agent UI wrapped over several lines continues until the next blank line.
 export const lastReportLine = (screen: string, key: string): string | null => {
