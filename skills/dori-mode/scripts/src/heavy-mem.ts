@@ -57,8 +57,11 @@ export const memVerdict = (m: MemInfo, needKb: number, reservedKb: number, free:
 export const scopeLimit = (m: MemInfo, free: number, needBytes?: number): number =>
   needBytes ?? Math.max(MIN_LIMIT_BYTES, Math.floor((m.availKb - (m.totalKb * free) / 100) * 1024));
 
-// systemd unit names take letters, digits and : _ . - only
-export const unitName = (label: string, pid: number): string => `dori-heavy-${label.replace(/[^\w.:-]/g, "_").slice(0, 64)}-${pid}`;
+// systemd unit names take letters, digits and : _ . - only. n numbers the jobs of one process: systemd drops a scope
+// only some time after its process ends, so a second job of one label in one process (a job sent back from a helper, or
+// started while the first still runs) under the same name was refused ("Unit ... was already loaded", 2026-11-02)
+export const unitName = (label: string, pid: number, n: number): string => `dori-heavy-${label.replace(/[^\w.:-]/g, "_").slice(0, 64)}-${pid}-${n}`;
+let scopes = 0;
 
 export const scopeArgv = (unit: string, limitBytes: number, cmd: readonly string[], props: readonly string[] = []): string[] => [
   "systemd-run",
@@ -118,7 +121,7 @@ type SpawnOpts = { cwd?: string; env?: Record<string, string | undefined>; stdin
 export const spawnScoped = async (r: ScopedRun, opts: SpawnOpts, onStart?: (pid: number, proc: Bun.Subprocess) => void): Promise<number> => {
   const m = readMeminfo();
   const no = m ? await canScope() : "no /proc/meminfo";
-  const unit = unitName(r.label, process.pid);
+  const unit = unitName(r.label, process.pid, ++scopes);
   const limit = m ? scopeLimit(m, r.free, r.needBytes) : 0;
   if (no) r.log?.(`HEAVY_NO_SCOPE ${r.label}: ${no}; runs without a memory cap`);
   else r.log?.(`HEAVY_SCOPE ${r.label} ${unit}.scope MemoryMax=${fmtMem(limit)}${r.needBytes ? " (its --mem)" : ` (keeps ${r.free}% free now)`}`);

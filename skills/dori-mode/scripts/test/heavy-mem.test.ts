@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { canScope, memVerdict, neverFits, parseMem, spawnScoped } from "../src/heavy-mem.ts";
+import { linesOf } from "../src/heavy-queue.ts";
 import { withState } from "./fakes.ts";
 
 let state: ReturnType<typeof withState>;
@@ -23,15 +24,32 @@ test("a heavy command over its MemoryMax is killed alone in its own scope and th
     expect(logs).toEqual([expect.stringMatching(/^HEAVY_NO_SCOPE where: /)]);
     return;
   }
-  expect(readFileSync(out, "utf8")).toMatch(/dori-heavy-where-\d+\.scope/);
+  expect(readFileSync(out, "utf8")).toMatch(/dori-heavy-where-\d+-\d+\.scope/);
   expect(readFileSync(out, "utf8").trim()).not.toBe(ownCgroup());
   // 600M held in memory (tail keeps a line without a newline) against a 200M cap
   logs.length = 0;
   const code = await spawnScoped({ label: "oom", cmd: ["sh", "-c", "head -c 600M /dev/zero | tail -n 1 > /dev/null"], free: 10, needBytes: 200 * 1024 ** 2, log: (l) => logs.push(l) }, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   expect(code).not.toBe(0);
-  expect(logs[0]).toMatch(/^HEAVY_SCOPE oom dori-heavy-oom-\d+\.scope MemoryMax=200M \(its --mem\)$/);
-  expect(logs[1]).toMatch(/^HEAVY_OOM oom: killed at MemoryMax=200M in dori-heavy-oom-\d+\.scope \(exit \d+\); only the job stopped/);
+  expect(logs[0]).toMatch(/^HEAVY_SCOPE oom dori-heavy-oom-\d+-\d+\.scope MemoryMax=200M \(its --mem\)$/);
+  expect(logs[1]).toMatch(/^HEAVY_OOM oom: killed at MemoryMax=200M in dori-heavy-oom-\d+-\d+\.scope \(exit \d+\); only the job stopped/);
   expect(ownCgroup()).not.toContain("dori-heavy-");
+});
+
+test("two jobs with one label in one process each get their own scope, while the first still runs", async () => {
+  // 2026-11-02: the scope was named <label>-<pid>, so a second job of one label in one process (a job sent back from a
+  // helper, two jobs of a queue host's test) met the first one's scope still loaded and systemd-run refused it (exit 1)
+  const fifo = join(state.dir, "fifo");
+  expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+  let started: (out: ReadableStream<Uint8Array>) => void = () => {};
+  const stdout = new Promise<ReadableStream<Uint8Array>>((r) => (started = r));
+  // the first job says it runs (inside its scope, so the scope is loaded), then waits on the fifo
+  const first = spawnScoped({ label: "same", cmd: ["sh", "-c", `echo up; cat ${fifo} > /dev/null`], free: 10 }, { stdin: "ignore", stdout: "pipe", stderr: "inherit" }, (_, p) => started(p.stdout as ReadableStream<Uint8Array>));
+  expect((await linesOf(await stdout).next()).value).toBe("up");
+  const second = await spawnScoped({ label: "same", cmd: ["sh", "-c", `echo go > ${fifo}`], free: 10 }, { stdin: "ignore", stdout: "ignore", stderr: "inherit" });
+  // a refused second job never opened the fifo: open it here so the first one ends either way
+  if (second !== 0) writeFileSync(fifo, "go\n");
+  expect(second).toBe(0);
+  expect(await first).toBe(0);
 });
 
 test("dori heavy refuses at once a --mem that never fits on the host and a size it cannot read", async () => {
