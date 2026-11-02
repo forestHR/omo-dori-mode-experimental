@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, feedItemId, DRAFT_ONLY_RULE, APPROVED_RULE, laneKeyOf, writeLimit, type FeedTodo, flockDir, followUpId, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
+import { addItem, type BacklogItem, BacklogError, backlogTick, dayReport, decideItem, dropItem, feedIntake, feedItemId, DRAFT_ONLY_RULE, APPROVED_RULE, READ_ONLY_RULE, laneKeyOf, writeLimit, type FeedTodo, flockDir, followUpId, hostReserve, type InboxRow, listItems, orderIntake, pairIntake, readItem, StartRefused, type TickDeps, withBacklogLock } from "../src/backlog.ts";
 import { type BacklogSettings, loadConfig } from "../src/config.ts";
 import type { Lane } from "../src/registry.ts";
 import { validateLaunch } from "../src/launch.ts";
@@ -76,7 +76,7 @@ test("add refuses what a launch would refuse, and copies the brief; add again re
   const replaced = addItem(state, { id: "x1", title: "x1 again", brief, done: "file /tmp/x", priority: "2" }, { registered: false, at: "2026-11-02T16:00:00Z" });
   expect(replaced.replaced).toBe(true);
   expect(replaced.item.addedAt).toBe(item.addedAt);
-  expect(() => decideItem(state, "x1", "응", "t", "k")).toThrow(/no question/);
+  expect(() => decideItem(state, "x1", "응", "t", "k")).toThrow(/no open question/);
   add("x2", { ask: "형, 이거 해도 돼?" });
   const decided = decideItem(state, "x2", "응 해", "2026-11-02T16:00:00Z", "2026-11-03 01:00 KST");
   expect(decided.ask).toBeUndefined();
@@ -566,12 +566,13 @@ test("an approval is bound to the content it was given for: changed content void
   const changed = await feedSweep([{ todo_id: "pb-343434343434-1", title: "파일 B 고치기", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
   const asked = readItem(state, "todo-pb-343434343434-1")!;
   const pass = await backlogTick(deps(), { force: true });
-  decideItem(state, "todo-pb-343434343434-1", "응, B로 해", new Date(now).toISOString(), "k");
+  const q = readItem(state, "todo-pb-343434343434-1")!.approvalAsk!;
+  decideItem(state, "todo-pb-343434343434-1", "응, B로 해", new Date(now).toISOString(), "k", q.id, q.hash);
   await backlogTick(deps(), { force: true });
   // Then
-  expect(changed).toEqual(["BACKLOG_FEED_CHANGED todo-pb-343434343434-1: its content changed after the owner approved it; the approval is void and he is asked again"]);
-  expect([writeLimit(asked), Boolean(asked.ask)]).toEqual(["draft", true]);
-  expect(pass).toContain("BACKLOG_ASK todo-pb-343434343434-1: in the lead's inbox; not started before dori backlog decide");
+  expect(changed).toEqual(["BACKLOG_FEED_CHANGED todo-pb-343434343434-1: its content changed; approvals and open questions about the old content are void and asked again"]);
+  expect([writeLimit(asked), asked.approvalAsk?.id]).toEqual(["draft", "q1"]);
+  expect(pass.some((l) => l.startsWith("BACKLOG_ASK todo-pb-343434343434-1 q1: content"))).toBe(true);
   expect(launched).toEqual(["todo-pb-343434343434-1"]);
   const sent = sentBrief("todo-pb-343434343434-1");
   expect(sent).toContain(APPROVED_RULE);
@@ -628,4 +629,60 @@ test("an approval given for other content never counts, whatever else the item s
   expect(writeLimit({ ...base, approval: { at: "t", hash: "old", by: "card" } })).toBe("draft");
   expect(writeLimit({ ...base, approval: { at: "t", hash: "new", by: "card" } })).toBe("approved");
   expect(writeLimit({ ...base, source: undefined })).toBe("none");
+});
+
+test("a question the lead was told of, then a content change: a new question id is told again and the old answer does nothing", async () => {
+  // Given: an approved feed item the lead replaced with his own question, told to him
+  await feedSweep([{ todo_id: "pb-777777777777-1", title: "v1", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
+  addItem(state, { id: "todo-pb-777777777777-1", title: "v", brief, done: "file /tmp/x", ask: "어느 폴더?" }, { registered: false, at: "2026-11-02T15:10:00Z" });
+  const first = await backlogTick(deps(), { force: true });
+  const old = readItem(state, "todo-pb-777777777777-1")!;
+  // When: the content changes
+  await feedSweep([{ todo_id: "pb-777777777777-1", title: "v2", status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false }]);
+  const oldAnswer = (() => { try { decideItem(state, "todo-pb-777777777777-1", "폴더 A", "t", "k", old.askId, old.askHash); return "recorded"; } catch (e) { return String(e); } })();
+  const oldIdNewHash = (() => { try { decideItem(state, "todo-pb-777777777777-1", "폴더 A", "t", "k", old.askId, readItem(state, "todo-pb-777777777777-1")!.feedHash); return "recorded"; } catch (e) { return String(e); } })();
+  const second = await backlogTick(deps(), { force: true });
+  const now2 = readItem(state, "todo-pb-777777777777-1")!;
+  // Then
+  expect(first).toContain(`BACKLOG_ASK todo-pb-777777777777-1: in the lead's inbox; not started before dori backlog decide`);
+  expect(oldAnswer).toContain("is not the open one");
+  expect(oldIdNewHash).toContain("is not the open one");
+  expect([now2.askId === old.askId, now2.approvalAsk?.id === undefined, Boolean(now2.askedAt)]).toEqual([false, false, true]);
+  expect(rows.filter((r) => r.kind === "backlog-ask").length).toBe(3);
+  expect(second.filter((l) => l.startsWith("BACKLOG_ASK")).length).toBe(2);
+  expect(launched).toEqual([]);
+});
+
+test("content that changes again while the owner is being asked (A, B, C): only an answer about C counts", async () => {
+  // Given: approved A, changed to B (asked), changed to C before the answer
+  const entry = (title: string) => ({ todo_id: "pb-888888888888-1", title, status: "진행", approved_at: "2026-11-02T15:00:00Z", auto_applied: false });
+  await feedSweep([entry("A")]);
+  await feedSweep([entry("B")]);
+  await backlogTick(deps(), { force: true });
+  const askedB = readItem(state, "todo-pb-888888888888-1")!.approvalAsk!;
+  await feedSweep([entry("C")]);
+  const askedC = readItem(state, "todo-pb-888888888888-1")!.approvalAsk!;
+  // When
+  const late = (() => { try { decideItem(state, "todo-pb-888888888888-1", "B로 해", "t", "k", askedB.id, askedB.hash); return "recorded"; } catch (e) { return String(e); } })();
+  const currentIdOldHash = (() => { try { decideItem(state, "todo-pb-888888888888-1", "B로 해", "t", "k", askedC.id, askedB.hash); return "recorded"; } catch (e) { return String(e); } })();
+  const held = await backlogTick(deps());
+  decideItem(state, "todo-pb-888888888888-1", "C로 해", new Date(now).toISOString(), "k", askedC.id, askedC.hash);
+  await backlogTick(deps(), { force: true });
+  // Then
+  expect(askedC.id).not.toBe(askedB.id);
+  expect(askedC.hash).not.toBe(askedB.hash);
+  expect(late).toContain("Nothing was recorded");
+  expect(currentIdOldHash).toContain("Nothing was recorded");
+  expect(held.some((l) => l.startsWith("BACKLOG_STARTED"))).toBe(false);
+  expect(launched).toEqual(["todo-pb-888888888888-1"]);
+  expect(sentBrief("todo-pb-888888888888-1").slice(sentBrief("todo-pb-888888888888-1").indexOf("[승인된 할 일 내용]"))).toContain('"title": "C"');
+});
+
+test("an item added --read-only launches with the read-only rule, whatever its brief says", async () => {
+  // Given
+  addItem(state, { id: "ro1", title: "ro", brief, done: "file /tmp/x", readOnly: true }, { registered: false, at: "2026-11-02T15:00:00Z", needOwnerLink: true });
+  // When
+  await backlogTick(deps());
+  // Then
+  expect(sentBrief("ro1")).toContain(READ_ONLY_RULE);
 });

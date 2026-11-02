@@ -109,7 +109,7 @@ const USAGE = `dori <command> [options]
                                        stops the launch (LAUNCH_DIRECTIVE_MISSING, exit 4, nothing opened) unless
                                        --waive <id> "<reason>" (repeatable) leaves it out: LAUNCH_DIRECTIVE_WAIVED in the
                                        watch log and the registry, and discord.waiveText to the owner
-  backlog [list [--all]|add <id> --title T --brief FILE --done "..." [--priority 1-9] [--cwd DIR] [--thread REF|new | --no-thread "<reason>"] [--why-new R] [--goal "owner words"] [--tag T ...] [--ask "<question for the owner>"] [--read-only] [--owner-link URL] [--by owner|lead]|drop <id> [--reason R]|decide <id> --text "<the owner's answer>"|tick [--force]]
+  backlog [list [--all]|add <id> --title T --brief FILE --done "..." [--priority 1-9] [--cwd DIR] [--thread REF|new | --no-thread "<reason>"] [--why-new R] [--goal "owner words"] [--tag T ...] [--ask "<question for the owner>"] [--read-only] [--owner-link URL] [--by owner|lead]|drop <id> [--reason R]|decide <id> [--question Q --hash H] --text "<the owner's answer>"|tick [--force]]
                                        the list of work the owner or the lead put by (no GitHub import): with config
                                        backlog.enabled, the freshness loop of dori-lanes runs a pass every tick: new work
                                        comes in (other Doris' #dori-pair posts by backlog.pairRepairPattern /
@@ -517,7 +517,7 @@ const flags = parseArgs({
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
-    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" },
+    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -1590,7 +1590,7 @@ try {
         } else if (sub === "decide") {
           const kst = `${new Date(Date.now() + 9 * 3_600_000).toISOString().slice(0, 16).replace("T", " ")} KST`;
           const decideId = id ?? die("usage: dori backlog decide <id> --text \"<the owner's answer>\"");
-          const item = await withBacklogLock(config.stateDir, 120, () => decideItem(config.stateDir, decideId, opt("text") ?? "", at, kst));
+          const item = await withBacklogLock(config.stateDir, 120, () => decideItem(config.stateDir, decideId, opt("text") ?? "", at, kst, opt("question"), flags.values.hash === undefined ? undefined : String(flags.values.hash)));
           console.log(`BACKLOG_DECIDED ${item.id}: the answer is in its brief; it starts at a pass when its turn comes`);
         } else if (sub === "tick") {
           if (!config.backlog.enabled && !flags.values.force) die(state, 4);
