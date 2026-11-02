@@ -132,6 +132,9 @@ const applyLinks = (path: string, byId: Map<string, Directive>, skipped: string[
   }
 };
 
+export const retiredError = (path: string, id: unknown): string =>
+  `directive ledger ${path}: retired entry ${typeof id === "string" && id ? id : "(no id)"}; a directive the owner dropped is deleted, not kept: delete the entry and move its message ids to the source of the entry that replaced it, or to reviewed with a note`;
+
 // One ledger from the layers: the fork's (common), the pushed links (links: sources only), the host's (local). A local
 // entry with a common id overrides that entry's fields; others are added. tolerant (dori directive-audit): a local line
 // that would break the ledger (a source-only line for an id the fork does not have, a field that fails the checks, a
@@ -173,6 +176,9 @@ export const loadLedger = (cfg: Pick<DoriConfig, "directives">, opts: { readonly
     reviewed.push(...(raw.reviewed ?? []));
     fillers.push(...(raw.fillers ?? []));
     for (const [n, e] of (raw.entries ?? []).entries()) {
+      // a directive the owner dropped is deleted, never kept marked retired: every read (launch, hint, audit, table,
+      // prompts, check) stops on such an entry, tolerant or not, so it can neither apply again nor half-apply
+      if (e && typeof e === "object" && "retired" in e) throw new DirectiveError(retiredError(path, (e as { id?: unknown }).id));
       if (opts.tolerant && layer === "local" && (!e || typeof e !== "object" || typeof (e as { id?: unknown }).id !== "string")) {
         skipped.push(`DIRECTIVES_LOCAL_SKIP ${path} entry ${n + 1}: not an entry with an id; left out`);
         continue;
@@ -188,15 +194,6 @@ export const loadLedger = (cfg: Pick<DoriConfig, "directives">, opts: { readonly
     for (const [id, prior] of touched) {
       const own = problems.filter((p) => p.startsWith(`directive ${id || "(no id)"}: `)).map((p) => p.slice(`directive ${id || "(no id)"}: `.length));
       if (!own.length) continue;
-      // a line still marking a directive retired (dropped by the owner) leaves it out, the fork entry too, instead of
-      // making it apply again; its message ids count as reviewed, so the audit still sees his old message as handled
-      const now = byId.get(id);
-      if (now && "retired" in now) {
-        byId.delete(id);
-        reviewed.push(...(now.source?.match(/\d{15,}/g) ?? []));
-        skipped.push(`DIRECTIVES_LOCAL_SKIP ${id || "(no id)"}: retired is not kept; the directive is left out and its message ids count as reviewed; delete the line`);
-        continue;
-      }
       if (prior) byId.set(id, prior);
       else byId.delete(id);
       const what = prior ? "its local line is left out and the fork entry stands" : "not in the fork ledger and not a whole entry; left out";
@@ -304,9 +301,6 @@ export const ledgerProblems = (ledger: Ledger): string[] => {
     const at = `directive ${e.id || "(no id)"}`;
     if (!e.id || !/^[a-z0-9][a-z0-9-]*$/.test(e.id)) out.push(`${at}: id must be lowercase words with -`);
     if (!e.name) out.push(`${at}: no name`);
-    // a directive the owner dropped is deleted, not kept as retired: its message ids go to the source of the entry that
-    // replaced it, or to reviewed with a note, so dori directive-audit still counts his old message as handled
-    if ("retired" in e) out.push(`${at}: retired is not kept; delete the entry and move its message ids to the source of the entry that replaced it, or to reviewed with a note`);
     if (e.by !== "owner" && e.by !== "lead") out.push(`${at}: by must be owner or lead`);
     // the owner's words go into briefs as they are: a sentence cut short (… or ...) is a summary of them
     if (/…|\.\.\./.test(e.words ?? "")) out.push(`${at}: words cut with an ellipsis; put the whole sentences of his message, or none (by owner, no words: a decision on record)`);

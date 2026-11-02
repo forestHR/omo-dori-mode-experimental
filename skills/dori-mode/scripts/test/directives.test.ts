@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
-import { APPLIED_HEADING, briefGaps, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
+import { APPLIED_HEADING, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
 import type { Runner } from "../src/run.ts";
 import { DirectiveMissingError, eightSteps, launchLane, renderBrief, uiSteps } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -141,10 +141,6 @@ test("entries with via stay in the ledger and in scope but go into a brief as th
   expect(dry.added).toContain("repo-rules");
   expect(dry.added).not.toContain("rule-a");
   expect(dry.message).not.toContain("규칙 A 원문");
-  // a dropped directive is deleted, never kept as retired (it would apply again once the field is not read)
-  expect(ledgerProblems({ ...ledger, entries: ledger.entries.map((e) => (e.id === "repo-rules" ? { ...e, retired: "2026-10-21: test" } : e)) })).toEqual([
-    "directive repo-rules: retired is not kept; delete the entry and move its message ids to the source of the entry that replaced it, or to reviewed with a note",
-  ]);
   // via must name another inject entry with its own text
   const bad = (via: string) => ledgerProblems({ ...ledger, entries: ledger.entries.map((e) => (e.id === "rule-a" ? { ...e, via } : e)) });
   expect(bad("nope")).toEqual(["directive rule-a: via nope must name another inject entry with its own text and no via"]);
@@ -612,15 +608,21 @@ test("what the text calls comes before every-lane entries of either layer, and a
   expect(lines[1]).toStartWith("[장부 경고] 이 도리 로컬 장부에서 1줄을 못 읽어 뺐다: DIRECTIVES_LOCAL_SKIP");
 });
 
-// 2026-11-02 review of #239: a host line still marking a fork directive retired must not bring the fork entry back in the
-// tolerant read (directive-audit, a message's row), and his old message stays handled
-test("a local line that still marks a directive retired leaves it out of a tolerant read and keeps its message ids as reviewed", async () => {
-  const line = { id: "request-thread", retired: "2026-10-21: test", source: "https://discord.com/channels/100000000000000001/200000000000000002/300000000000000003" };
-  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: await write("retired.json", JSON.stringify({ entries: [line] })) } }, { tolerant: true });
-  expect(ledger.entries.some((e) => e.id === "request-thread")).toBe(false);
-  expect(textDirectives("Claude 10/29 카드 처리", ledger, { all: true }).map(({ e }) => e.id)).not.toContain("request-thread");
-  expect(ledger.reviewed).toContain("300000000000000003");
-  expect(ledger.skipped).toContain("DIRECTIVES_LOCAL_SKIP request-thread: retired is not kept; the directive is left out and its message ids count as reviewed; delete the line");
+// 2026-11-02 (#239): the owner asked why dropped directives stayed in the ledger marked retired; they are deleted now, and an
+// entry still marked retired stops every read the same way instead of applying again or half-applying
+test("an entry marked retired stops every read of the ledger with one error: launch, hint, audit, table, prompts, check", async () => {
+  const local = await write("retired.json", JSON.stringify({ entries: [{ id: "request-thread", retired: "2026-10-21: test", source: "x" }] }));
+  const error = retiredError(local, "request-thread");
+  const cfg = { directives: { common: COMMON_LEDGER, local } };
+  // table, prompts and check read it as is
+  expect(() => loadLedger(cfg)).toThrow(error);
+  // a message's hint and a lead's thread (tolerant, a bad local line left out otherwise)
+  expect(() => checkedLedger(cfg, { tolerant: true })).toThrow(error);
+  const deps = await ledgerDeps({ directives: cfg.directives });
+  await expect(renderBrief(deps, input(await write("r.md", "ulw\n\n[목표] 시험")))).rejects.toThrow(error);
+  const audit = await auditOrReport(deps, { since: "2026-11-01T00:00:00.000Z", inbox: join(state.dir, "inbox.jsonl"), owner: "", dryRun: true });
+  expect(audit.failed).toBe(true);
+  expect(audit.lines).toEqual([`DIRECTIVE_AUDIT_FAILED since 2026-11-01T00:00:00.000Z: ${error}`]);
 });
 
 test("scope replay 2026-11-02: a lane that runs node (Node.js) or edits a gate's write policy is no GPU or learning work, one that runs JEV-9B is GPU work, and a node that trains stays GPU work", async () => {
