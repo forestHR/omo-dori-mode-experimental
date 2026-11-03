@@ -196,7 +196,8 @@ const THINKING = /^(.*):(off|minimal|low|medium|high|xhigh|max)$/;
 const INFRA = /\bmcp\b|--internal-rpc-host-supervisor|--mode rpc|claude-agent-sdk/;
 // omo's eval kernel (python3 -u .../senpi-codemode/src/kernels/py/prelude.py): the session's own interpreter, alive once
 // the lane used it. Not work itself; what a cell started under it is, and a cell running in it is read from the log.
-const KERNEL = /senpi-codemode\/src\/kernels\/[\w-]+\/prelude\.\w+/;
+// either path separator: a native Windows command line names the kernel with backslashes
+const KERNEL = /senpi-codemode[\\/]src[\\/]kernels[\\/][\w-]+[\\/]prelude\.\w+/;
 const CONTEXT = /\b\d+(?:\.\d+)?[KMG]?\/\d+(?:\.\d+)?[KMG]?\s+\((\d+(?:\.\d+)?)%\)/;
 
 export const splitModel = (model: string): { readonly base: string; readonly thinking?: string } => {
@@ -243,6 +244,10 @@ export const compactionStuckOn = (screen: string): number => {
 // The session itself is not a chain: the shells that launched the agent (aoe runs it from /bin/bash /dev/fd/4 under the
 // pane's shell) and omo's eval kernel. What runs under them is. A zombie (an ended process its parent has not collected,
 // "[bash] <defunct>") is no work either: it refused 5 automatic moves of yoodori-gate-gaps on 2026-10-19.
+// When the agent started: native Windows has no ps, and its process table carries the start time (as resolveSession reads it)
+export const agentStartOf = async (run: Runner, agent: Proc, platform: string = process.platform): Promise<number> =>
+  Date.parse(platform === "win32" ? agent.startedAt ?? "" : (await run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out.trim());
+
 export const localChains = (table: readonly Proc[], shellPid: number, monitorPids: readonly number[], exclude: ReadonlySet<number> = new Set()): { readonly agent?: Proc; readonly chains: Job[]; readonly tree: Set<number> } => {
   const tree = descendants(table, shellPid);
   const agent = tree.find((p) => AGENT.test(p.cmd) && !ended(p));
@@ -523,7 +528,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   // a detached eval cell computing in the kernel (or in the agent, for js) has no process of its own: its start without an
   // end in the session log, since this agent started; a ready mark covers the cells started before it
   const oldLog = logOf(sessionDir, session);
-  const agentStart = Date.parse((await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out.trim());
+  const agentStart = await agentStartOf(deps.run, agent);
   const logText = oldLog ? readFileSync(oldLog, "utf8") : "";
   const background = logText ? pendingBackground(logText, Number.isNaN(agentStart) ? 0 : agentStart) : [];
   const cells = background.filter((j) => j.kind === "eval" && !(ready && j.at <= Date.parse(ready.at)));

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { userInfo } from "node:os";
 import { accountHome, windowsDetachRefusal } from "../src/handover.ts";
+import { agentStartOf, localChains } from "../src/lane-handover.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -164,4 +165,29 @@ test("the account home for task records does not depend on $HOME (native Windows
   } finally {
     if (saved !== undefined) process.env.HOME = saved;
   }
+});
+
+test("on Windows an idle eval kernel named with backslashes is not a local chain, and work started under it is", () => {
+  // Given a Windows-shaped tree: the pane's shell, omo.exe, its python kernel, and a job the kernel started.
+  const kernel = "C:\\Python\\python.exe -u C:\\Users\\o\\node_modules\\@code-yeongyu\\senpi-codemode\\src\\kernels\\py\\prelude.py";
+  const table = [
+    { pid: 10, ppid: 1, cmd: "C:\\Program Files\\PowerShell\\7\\pwsh.exe" },
+    { pid: 11, ppid: 10, cmd: "C:\\Users\\o\\.omo\\bin\\omo.exe --model m" },
+    { pid: 30, ppid: 11, cmd: kernel },
+  ];
+  // When the chains are read with the kernel idle, then with a job under it.
+  const idle = localChains(table, 10, []);
+  const busy = localChains([...table, { pid: 31, ppid: 30, cmd: "C:\\Python\\python.exe train.py" }], 10, []);
+  // Then the idle kernel is no chain, and the job under it is one.
+  expect(idle.agent?.pid).toBe(11);
+  expect(idle.chains).toEqual([]);
+  expect(busy.chains.map((c) => c.pid)).toEqual([31]);
+});
+
+test("on Windows the agent's start comes from its process table, not from ps", async () => {
+  const calls: string[][] = [];
+  const run = async (argv: readonly string[]) => { calls.push([...argv]); return { code: 1, out: "", err: "ps: not found" }; };
+  const agent = { pid: 11, ppid: 10, cmd: "omo.exe", startedAt: "2026-11-03T09:00:00.000Z" };
+  expect(await agentStartOf(run, agent, "win32")).toBe(Date.parse("2026-11-03T09:00:00.000Z"));
+  expect(calls).toEqual([]);
 });
