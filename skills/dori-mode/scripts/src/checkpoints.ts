@@ -39,9 +39,17 @@ type LockOwner = { readonly pid: number; readonly host: string; readonly at: str
 // process dies, so a writer killed mid-write never locks the lane and nothing is taken over by age.
 const LOCK_EX = 2;
 const LOCK_NB = 4;
-const libc = dlopen(process.platform === "darwin" ? "libc.dylib" : "libc.so.6", {
+// libc is opened on first use, not at import: every dori command imports this module, and native Windows has no libc
+// (dlopen at import made the whole CLI fail there); checkpoints themselves are refused on Windows for now.
+let libc: ReturnType<typeof openLibc> | undefined;
+const openLibc = () => dlopen(process.platform === "darwin" ? "libc.dylib" : "libc.so.6", {
   flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
 });
+const flock = (fd: number, op: number): number => {
+  if (process.platform === "win32") throw new CheckpointError("checkpoints are not supported on native Windows yet (no flock)");
+  libc ??= openLibc();
+  return libc.symbols.flock(fd, op);
+};
 
 const ownerOf = (lock: string): LockOwner | null => {
   let raw: string;
@@ -70,7 +78,7 @@ export const takeLock = (lock: string, now: number, what: string, key: string): 
   const record = JSON.stringify({ pid: process.pid, host: hostname(), at: new Date(now).toISOString(), nonce: randomUUID() } satisfies LockOwner);
   for (let attempt = 0; attempt < 3; attempt++) {
     const fd = openSync(lock, "a+", 0o600);
-    if (libc.symbols.flock(fd, LOCK_EX | LOCK_NB) !== 0) {
+    if (flock(fd, LOCK_EX | LOCK_NB) !== 0) {
       closeSync(fd);
       const owner = ownerOf(lock);
       const since = owner ? Date.parse(owner.at) : NaN;
