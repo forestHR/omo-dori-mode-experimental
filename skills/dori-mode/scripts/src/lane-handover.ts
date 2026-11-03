@@ -26,7 +26,7 @@ import { hasSessionSelector } from "./session-id.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
-import { appendRollover, type OwnerMessage, ownerMessagesFor, APPROVAL_BORROWED, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
+import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section, seedRestatement, wholeBullet } from "./restatement.ts";
 import { watchLog } from "./watch-log.ts";
@@ -456,16 +456,19 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     if (!opts.dryRun) watchLog(config.watchLog, deps.clock, { source: "handover", line });
   };
   let fromPane = "";
-  const refuse = (why: string, held?: { readonly blocked: Blocked; readonly pids?: readonly number[]; readonly tasks?: readonly string[] }, logged = true): LaneHandoverResult => {
+  // an auto: approval without the grant of a run freshness started is borrowed: refused first, and never logged, since a
+  // row approved auto: is read by freshness as its own run's result (lastAuto) and ends a lead's waiting request
+  const borrowed = decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && !granted;
+  const refuse = (why: string, held?: { readonly blocked: Blocked; readonly pids?: readonly number[]; readonly tasks?: readonly string[] }): LaneHandoverResult => {
     emit(`HANDOVER_REFUSED ${key}: ${why}`);
-    // a borrowed auto: string is no automatic run: logged as one, freshness would read it as its own run's result (lastAuto)
-    if (!logged) return { code: 2 };
+    if (borrowed) return { code: 2 };
     // a run refused while the lane was busy keeps the options it was given (the note as an absolute path): a ready mark
     // starts it again with them (freshness readyResume)
     const request: RolloverRequest = { ...(opts.note ? { note: resolve(opts.note) } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}), ...(opts.keepOld ? { keepOld: true } : {}), ...(opts.verifyMin ? { verifyMin: opts.verifyMin } : {}) };
     if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), request } : {}) });
     return { code: 2 };
   };
+  if (borrowed) return refuse(`a lane moves to a new session only with an approval: ${approvalProblem(opts.approvedBy, () => undefined, { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, "", [])} (--dry-run needs none)`);
   if (!omoSession(config)) return refuse("dori handover --lane needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
   // a herdr handover opens a new conversation; an agentCommand that picks its session itself (--continue, --session ...) would reopen the old one
   if (config.backend === "herdr" && hasSessionSelector(config.agentCommand.slice(1))) return refuse(`dori handover --lane on herdr needs an agentCommand without a session selector (it opens a new session): ${config.agentCommand.join(" ")}`);
@@ -486,7 +489,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   }
   // a dry run needs no approval, but a given one is checked the same way, so it can be tried before the real run
   const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, lane.pane ?? "", readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox ?? "", deps.ownerIds ?? []));
-  if (unapproved) return refuse(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`, undefined, !unapproved.startsWith(APPROVAL_BORROWED));
+  if (unapproved) return refuse(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
   if (!old) return refuse(`no live session for pane ${lane.pane}`);

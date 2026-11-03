@@ -738,6 +738,12 @@ test("an automatic lead rollover tells the owner afterwards with what it crossed
   expect(byHand.code).toBe(2);
   expect(printed.find((l) => l.includes("HANDOVER_APPROVAL"))).toStartWith("HANDOVER_REFUSED the lead moves to a new session only with an approval: HANDOVER_APPROVAL auto:handover.autoRolloverLead is the approval of a run freshness starts by itself");
   expect(handRows).toBe(0);
+  // an early refusal (a note that does not exist) of a borrowed string is the approval refusal, and is not logged either (review 312)
+  const rowsBeforeEarly = readRollovers(state.dir).length;
+  const early = await handover(on, { approvedBy: "auto:handover.autoRolloverLead", note: join(state.dir, "no-such-note.md"), title: "lead2" });
+  expect(early.code).toBe(2);
+  expect(printed.filter((l) => l.includes("HANDOVER_APPROVAL"))).toHaveLength(2);
+  expect(readRollovers(state.dir).length).toBe(rowsBeforeEarly);
   expect(r).toMatchObject({ code: 0, to: NEW });
   expect(posted).toHaveLength(1);
   // the owner's notice says how long the old session is kept, with no pane, arrow or key; the thaw command is in the watch log

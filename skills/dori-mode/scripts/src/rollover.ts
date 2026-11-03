@@ -3,7 +3,7 @@
 // set the automation parameters from what happened. A proposal never switches anything: the lead decides (--approved-by
 // lead:<reason and signal>) and the owner is told afterwards; handover.autoRollover (off by default) is the only path that
 // runs one without a person's decision.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 
@@ -252,14 +252,21 @@ export const mintAutoGrant = (stateDir: string, who: Who, key: string, now: numb
 // true when token names a grant for this side and key minted within AUTO_GRANT_MS; the grant is gone afterwards either way
 export const takeAutoGrant = (stateDir: string, who: Who, key: string, token: string | undefined, now: number): boolean => {
   if (!token || !/^[0-9a-f]{32}$/.test(token)) return false;
+  // claimed by a rename first: of runs that present one token at once, only one rename succeeds
   const file = join(grantDir(stateDir), `${token}.json`);
+  const claimed = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.taken`;
+  try {
+    renameSync(file, claimed);
+  } catch {
+    return false;
+  }
   let grant: { who?: unknown; key?: unknown; at?: unknown } | undefined;
   try {
-    grant = JSON.parse(readFileSync(file, "utf8")) as typeof grant;
+    grant = JSON.parse(readFileSync(claimed, "utf8")) as typeof grant;
   } catch {
     return false;
   } finally {
-    rmSync(file, { force: true });
+    rmSync(claimed, { force: true });
   }
   return grant?.who === who && grant.key === key && typeof grant.at === "number" && now >= grant.at && now - grant.at <= AUTO_GRANT_MS;
 };

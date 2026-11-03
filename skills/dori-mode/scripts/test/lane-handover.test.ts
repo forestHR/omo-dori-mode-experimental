@@ -833,6 +833,37 @@ test("an automatic grant is taken once, only for the side and key it was minted 
   expect(readdirSync(join(dir, "handover", "auto-grants"))).toHaveLength(1);
 });
 
+test("a borrowed auto: approval is refused with HANDOVER_APPROVAL before any other refusal, and no early refusal logs it as an automatic run (review 312)", async () => {
+  // Given: a hand-run whose --note does not exist would be refused before the approval was read, and logged as auto:
+  const base = await setup();
+  const deps: LaneHandoverDeps = { ...base, config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } }, reportOwner: async () => "msg-1" };
+  // When
+  const missingNote = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, note: join(state.dir, "no-such-note.md") });
+  const noLane = await laneHandover(deps, "nope", "aoe_lead_x", { approvedBy: AUTO });
+  const otherSide = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLead" });
+  // Then
+  expect([missingNote.code, noLane.code, otherSide.code]).toEqual([2, 2, 2]);
+  const lines = printed.filter((l) => l.startsWith("HANDOVER_REFUSED"));
+  expect(lines[0]).toContain("demo: a lane moves to a new session only with an approval: HANDOVER_APPROVAL");
+  expect(lines[1]).toContain("nope: a lane moves to a new session only with an approval: HANDOVER_APPROVAL");
+  expect(lines[2]).toContain("is not the automatic approval of this side");
+  expect(readRollovers(state.dir)).toEqual([]);
+});
+
+test("two processes that present one grant at once: exactly one takes it (review 312)", async () => {
+  // Given
+  const dir = mkdtempSync(join(tmpdir(), "dori-grant-race-"));
+  const token = mintAutoGrant(dir, "lane", "demo", Date.now());
+  const code = `import { takeAutoGrant } from ${JSON.stringify(join(import.meta.dir, "../src/rollover.ts"))}; console.log(takeAutoGrant(${JSON.stringify(dir)}, "lane", "demo", ${JSON.stringify(token)}, Date.now()));`;
+  // When: 12 separate processes, started together
+  const procs = Array.from({ length: 12 }, () => Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "pipe" }));
+  const outs = await Promise.all(procs.map(async (p) => { await p.exited; return (await new Response(p.stdout).text()).trim(); }));
+  // Then
+  expect(outs.filter((o) => o === "true")).toHaveLength(1);
+  expect(outs.filter((o) => o === "false")).toHaveLength(11);
+  expect(readdirSync(join(dir, "handover", "auto-grants"))).toEqual([]);
+});
+
 test("the ready mark's start again of a lead's refused handover goes through the real handover with the lead's approval and needs no grant", async () => {
   // Given: a lead's handover refused for the lane's chain 15
   const base: LaneHandoverDeps = { ...(await setup()), reportOwner: async () => "msg-1" };
