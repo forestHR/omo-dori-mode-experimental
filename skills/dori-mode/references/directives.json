@@ -650,6 +650,22 @@
       },
       "mode": "lead",
       "check": "none"
+    },
+    {
+      "id": "herdr-only",
+      "name": "앞으로 herdr판만 유지보수",
+      "by": "owner",
+      "basis": "형이 herdr-switch 작업 스레드에서 전환 순서와 그 뒤의 유지보수 범위를 정한 말(2026-11-03 13:00 KST). 한 번 하고 끝나는 순서(전환·동작 확인·모든 도리 이사·aoe tmux 정리·릴리스)와, 그 뒤로 계속 지킬 범위(herdr판만 유지보수)가 함께 있다. 장부에는 계속 지킬 뜻을 prompt로 두고, 순서는 lane이 지킨다.",
+      "words": "전환 하고 동작 확인한 다음에 모든 도리 이사하고, 기존 aoe tmux 정리 후 릴리즈 해. 앞으로 herdr판만 유지 보수 될거야",
+      "original": "전환 하고 동작 확인한 다음에 모든 도리 이사하고, 기존 aoe tmux 정리 후 릴리즈 해. 앞으로 herdr판만 유지 보수 될거야",
+      "prompt": "앞으로 도리는 herdr판만 유지보수한다. 도리를 herdr로 전환해 동작을 확인한 다음 모든 도리를 옮기고, 기존 aoe·tmux를 정리한 뒤 릴리스한다.",
+      "rule": "새 기능·수리·이식은 herdr 경로(backend herdr)에만 만들고 시험한다. 여섯 도리가 herdr로 옮겨 동작이 확인되기 전까지 aoe 경로는 되돌리기용으로 남기되 새로 고치지 않는다. 옮김이 끝나면 aoe·tmux 유닛·설정·포크의 aoe backend 코드를 단계로 정리하고(정리 전 되돌리기 태그·백업), 수돌이 릴리스한다.",
+      "date": "2026-11-03",
+      "source": "형 2026-11-03 13:00 KST, herdr-switch 작업 스레드 https://discord.com/channels/1528936606264856737/1566998375314751528/1567025752166244494, 전달 짱돌 리드, 레인 herdr-switch",
+      "scope": {
+        "all": true
+      },
+      "mode": "inject"
     }
   ],
   "reviewed": []
