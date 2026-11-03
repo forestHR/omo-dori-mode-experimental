@@ -495,7 +495,7 @@ It passes when all of these hold:
 - every shadow row has a live row with the same `id` and no field differs except a card answer's `ts`;
 - each test id has exactly one live row and one shadow row (no duplicates on either side);
 - the shadow wrote nothing to Discord: no `eyes.json` next to the shadow inbox, and no `EYES_CLEARED` or `THREAD_REOPENED` lines in its log. If both listeners use the same bot account, the eyes count on a message cannot tell whose reaction it is, so judge by the shadow log, not by the count;
-- in a pair channel, a message from the other Dori's bot gets no eyes from ours (`pair-bot` rows are information, not requests).
+- in a pair channel, a message from the other Dori's bot gets no eyes from ours (`pair-bot` rows are information, not requests). With `discord.callNames` set, another Dori's reply to an owner message that did not call ours takes our eyes off it (`EYES_CLEARED_ANSWERED`), and a lead that will not answer one runs `dori eyes off <id>`.
 
 Then `systemctl --user stop dori-inbound-shadow` and remove `~/.dori/shadow`.
 

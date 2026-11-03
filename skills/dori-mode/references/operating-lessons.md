@@ -29,6 +29,8 @@ If a card becomes moot before the owner taps it (you asked a better question, or
 
 The eyes reaction promises "I read this and will answer". When two Doris share a pair channel (`DORI_DISCORD_PAIR_CHANNEL`, `DORI_DISCORD_PAIR_BOT`), the other Dori's posts arrive as `pair-bot` rows: information, not requests. The listener puts no eyes on them, because an eyes reaction that is never followed by an answer only confuses the people reading the channel. The owner's own messages in the pair channel still get eyes.
 
+With six Doris in one pair channel, every owner message there gets six eyes, and usually only one or two Doris answer it. When the rest stay on, the owner can no longer tell who took the message (owner 2026-11-03 09:58 KST: "짱돌아 이런 식으로 각돌이들이 내 글을 읽고 자기 글 아니라고 응답 안 하면 눈 바로 지우도록 해."). Two things take them off. First, a lead that reads the message, decides it is not its own and will not answer runs `dori eyes off <id>`; the row's `note` tells it to. Second, with `discord.callNames` set, the listener removes its own eyes as soon as another Dori replies to that message or links it, unless the owner called this Dori there: one of its names, a mention of its bot or role, or a reply to its post. A Dori that was called keeps its eyes until its own answer.
+
 ## 6. Applying an update to the scripts
 
 `dori` runs the code of its clone (`~/.dori/src`) directly. After a change is merged upstream:
