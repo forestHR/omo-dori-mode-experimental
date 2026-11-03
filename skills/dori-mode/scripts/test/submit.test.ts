@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
 import { writeFrozen } from "../src/frozen.ts";
 import { SEND_CHUNK_BYTES, sendVerified, submitToPane, transcriptHas } from "../src/panes.ts";
-import { editorText, type PaneKeys, SUBMIT_TIMING, submitText } from "../src/submit.ts";
+import { asTextRefusal, editorText, type PaneKeys, SUBMIT_TIMING, submitText } from "../src/submit.ts";
 import { announceChange } from "../src/update-announce.ts";
 import { fakeClock, fakeRunner, newWorld, withState } from "./fakes.ts";
 
@@ -105,59 +105,115 @@ test("a skill, a template or an unknown /text is no command omo runs: an emptied
 });
 
 // omo refuses a /word it has no command for: the text goes back into the box under "Unknown command /x." and "Enter again
-// sends it as a message", so dori type's second Enter would send it to the agent (lane type-slash-submitted, 2026-11-03)
-const refusingPane = (refused: string, warning: readonly string[]) => {
-  const log = { enters: 0, clears: 0, escapes: 0 };
-  let inBox = "";
-  let above: readonly string[] = [" Update Available"];
+// sends it as a message", so dori type's second Enter sent it to the agent (lane type-slash-submitted, 2026-11-03). The fake
+// keeps omo's state: the refusal stays armed until Esc or any submit, and Esc while a turn runs would stop that turn.
+const omoPane = (unknown: string, width = 200) => {
+  const s = { box: "", armed: undefined as string | undefined, busy: false, warning: [] as string[], sent: [] as string[], enters: 0, escapes: 0, clears: 0, typed: 0, stored: undefined as string | undefined };
+  const rows = (): string[] => { const out: string[] = []; for (let i = 0; i < Math.max(1, s.box.length); i += width) out.push(s.box.slice(i, i + width)); return out; };
   const keys: PaneKeys = {
-    type: async (text) => { inBox += text; return undefined; },
+    type: async (text) => { s.typed++; s.box += text; return undefined; },
     enter: async () => {
-      log.enters++;
-      if (inBox === refused && log.enters === 1) above = [...above, ...warning];
-      else inBox = "";
+      s.enters++;
+      const text = s.box.trim();
+      const armed = s.armed;
+      s.armed = undefined; // every submit takes the armed refusal back
+      if (!text) return;
+      if (armed !== text && text.split(" ")[0] === unknown) {
+        s.armed = text;
+        s.warning = [` Warning: Unknown command ${unknown}.`, "", "", ` Enter again sends it as a message${s.busy ? "." : "; Esc keeps editing."}`, "", ""];
+        return;
+      }
+      s.sent.push(text);
+      s.box = "";
     },
-    read: async () => [...above, BORDER, `❯ ${inBox}`, BORDER, " ~/qa • effort low"].join("\n"),
-    clear: async () => { log.clears++; inBox = ""; },
-    escape: async () => { log.escapes++; },
-    delivered: async () => false,
+    read: async () => [" Update Available", ...s.warning, s.busy ? `── • Working (2s • esc to interrupt) ${BORDER}` : BORDER, ...rows().map((r, i) => (i === 0 ? `❯ ${r}` : `  ${r}`)), BORDER, " ~/qa • effort low"].join("\n"),
+    clear: async () => { s.clears++; s.box = ""; },
+    escape: async () => { s.escapes++; s.armed = undefined; },
+    armed: { get: () => s.stored, set: (text) => { s.stored = text; } },
+    delivered: async () => s.sent.length > 0,
     runsOmoCommands: true,
   };
-  return { keys, log, inBox: () => inBox };
+  return { keys, s };
 };
 
-test("a /text omo refuses as an unknown command gets no second Enter, is cleared and is NOT_SUBMITTED SLASH_UNKNOWN", async () => {
-  for (const [text, warning] of [
-    ["/notacommand", [" Warning: Unknown command /notacommand.", "", "", " Enter again sends it as a message; Esc keeps editing.", "", "", ""]],
-    ["/thinkingx low", [" Warning: Unknown command /thinkingx. Did you mean /thinking?", " Enter again sends it as a message; Esc keeps editing."]],
-  ] as const) {
-    const pane = refusingPane(text, warning);
-    const r = await submitText(pane.keys, fakeClock(0), text);
-    expect(r.status).toBe("NOT_SUBMITTED");
-    expect(r.reason).toStartWith("SLASH_UNKNOWN");
-    expect(r.reason).toContain("cleared from the box");
-    expect(r.reason).toContain("--as-text");
-    expect(pane.log.enters).toBe(1);
-    // Esc takes back omo's armed "Enter again sends it", so a repeat of the same text is refused again, not sent
-    expect(pane.log.escapes).toBe(1);
-    expect(pane.inBox()).toBe("");
+test("a /text omo refuses as an unknown command gets no second Enter, is cleared and is NOT_SUBMITTED SLASH_UNKNOWN, also when typed again", async () => {
+  for (const text of ["/notacommand", "/thinkingx low"]) {
+    const pane = omoPane(text.split(" ")[0] ?? "");
+    for (let run = 1; run <= 2; run++) {
+      const r = await submitText(pane.keys, fakeClock(0), text);
+      expect(r.status).toBe("NOT_SUBMITTED");
+      expect(r.reason).toStartWith("SLASH_UNKNOWN:");
+      expect(r.reason).toContain("cleared from the box");
+      expect(r.reason).toContain("--as-text");
+      expect(pane.s.box).toBe("");
+    }
+    expect(pane.s.enters).toBe(2); // one per run
+    expect(pane.s.escapes).toBe(2); // Esc takes back omo's armed Enter each time, so the repeat was refused again
+    expect(pane.s.sent).toEqual([]);
   }
 });
 
-test("a refusal shown while a turn runs gets no Esc (it would stop that turn), and still no second Enter", async () => {
-  const pane = refusingPane("/notacommand", [" Warning: Unknown command /notacommand.", " Enter again sends it as a message."]);
-  const r = await submitText(pane.keys, fakeClock(0), "/notacommand");
-  expect(r.reason).toStartWith("SLASH_UNKNOWN");
-  expect(pane.log.enters).toBe(1);
-  expect(pane.log.escapes).toBe(0);
+test("a refusal while a turn runs gets no Esc (it would stop the turn); a retry then is not typed until the turn has ended", async () => {
+  const pane = omoPane("/notacommand");
+  pane.s.busy = true;
+  const r1 = await submitText(pane.keys, fakeClock(0), "/notacommand");
+  expect(r1.reason).toStartWith("SLASH_UNKNOWN:");
+  expect(r1.reason).toContain("SLASH_UNKNOWN_ARMED");
+  expect(pane.s.escapes).toBe(0);
+  expect(pane.s.stored).toBe("/notacommand");
+  // the lead sends it once more, as a NOT_SUBMITTED report is: omo would send it on the first Enter
+  const r2 = await submitText(pane.keys, fakeClock(0), "/notacommand");
+  expect(r2.reason).toStartWith("SLASH_UNKNOWN_ARMED:");
+  expect(pane.s.typed).toBe(1);
+  // the turn ended: Esc takes the refusal back first, and the text is refused again, not sent
+  pane.s.busy = false;
+  const r3 = await submitText(pane.keys, fakeClock(0), "/notacommand");
+  expect(r3.reason).toStartWith("SLASH_UNKNOWN:");
+  expect(pane.s.escapes).toBe(2);
+  expect(pane.s.stored).toBeUndefined();
+  expect(pane.s.sent).toEqual([]);
+});
+
+test("another text typed while a refusal is armed is submitted as usual and takes the record back with it", async () => {
+  const pane = omoPane("/notacommand");
+  pane.s.busy = true;
+  await submitText(pane.keys, fakeClock(0), "/notacommand");
+  expect(await submitText(pane.keys, fakeClock(0), "[LEAD] carry on")).toMatchObject({ status: "SUBMITTED" });
+  expect(pane.s.sent).toEqual(["[LEAD] carry on"]);
+  expect(pane.s.stored).toBeUndefined();
+});
+
+test("a refused text that wraps over several rows of the box is still recognized: no second Enter", async () => {
+  const text = `/notacommand ${"x".repeat(150)}`;
+  const pane = omoPane("/notacommand", 60);
+  const r = await submitText(pane.keys, fakeClock(0), text);
+  expect(r.reason).toStartWith("SLASH_UNKNOWN:");
+  expect(pane.s.enters).toBe(1);
+  expect(pane.s.sent).toEqual([]);
+});
+
+test("--as-text answers omo's refusal with the Enter that sends the text as a message, also over an armed retry", async () => {
+  const pane = omoPane("/notacommand");
+  const r = await submitText({ ...pane.keys, sendRefusedAsText: true }, fakeClock(0), "/notacommand");
+  expect(r.status).toBe("SUBMITTED");
+  expect(pane.s.enters).toBe(2);
+  expect(pane.s.sent).toEqual(["/notacommand"]);
+});
+
+test("--as-text refuses a command omo runs itself, which no refusal would ever stop", () => {
+  for (const text of ["/quit", "/new", "/thinking low", "/goal pause"]) expect(asTextRefusal(text)).toStartWith("AS_TEXT_COMMAND");
+  expect(asTextRefusal("/notacommand")).toBeUndefined();
+  expect(asTextRefusal("/usr/bin/ls -la")).toBeUndefined();
 });
 
 test("another command's refusal still on screen does not stop the second Enter for a text the first Enter left in the box", async () => {
-  const pane = refusingPane("/thinking medium", []);
-  const stale = [" Warning: Unknown command /other.", " Enter again sends it as a message; Esc keeps editing."];
-  const keys: PaneKeys = { ...pane.keys, read: async () => (await pane.keys.read()).replace(" Update Available", stale.join("\n")), delivered: async () => true };
+  const pane = omoPane("/other");
+  pane.s.warning = [" Warning: Unknown command /other.", " Enter again sends it as a message; Esc keeps editing."];
+  let enters = 0;
+  // autocomplete ate the first Enter: the box still holds the text
+  const keys: PaneKeys = { ...pane.keys, enter: async () => { if (++enters > 1) await pane.keys.enter(); } };
   const r = await submitText(keys, fakeClock(0), "/thinking medium");
-  expect(pane.log.enters).toBe(2);
+  expect(enters).toBe(2);
   expect(r.status).toBe("SUBMITTED");
 });
 

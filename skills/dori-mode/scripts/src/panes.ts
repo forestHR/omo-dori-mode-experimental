@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { captureTmux, listAoePanes, liveSessions, paneLife, QUESTION_MARK, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
@@ -122,7 +123,24 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
 export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || isOmoExecutable(config.agentCommand[0] ?? "");
 export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
 
-const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): PaneKeys => {
+// The refused text dori left armed in omo, per pane (submit.ts PaneKeys.armed): <stateDir>/submit-armed.json
+const armedStore = (stateDir: string, pane: string): NonNullable<PaneKeys["armed"]> => {
+  const file = join(stateDir, "submit-armed.json");
+  // no file yet: nothing armed
+  const all = (): Record<string, string> => (existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, string>) : {});
+  return {
+    get: () => all()[pane],
+    set: (text) => {
+      const { [pane]: _, ...rest } = all();
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(file, JSON.stringify(text === undefined ? rest : { ...rest, [pane]: text }));
+    },
+  };
+};
+
+export type TypeOptions = { readonly asText?: boolean };
+
+const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string, opts: TypeOptions = {}): PaneKeys => {
   const herdr = isHerdrPane(pane);
   if (!omoPane(config, pane))
     return {
@@ -159,6 +177,8 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
     read: () => captureTmux(run, pane),
     clear: async () => { await key("clear"); },
     escape: async () => { await key("escape"); },
+    armed: armedStore(config.stateDir, pane),
+    sendRefusedAsText: opts.asText,
     delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
     runsOmoCommands: true,
   };
@@ -179,11 +199,11 @@ export const typeLine = async (run: Runner, clock: Clock, config: DoriConfig, pa
 // Every text the scripts type into a pane goes through here; NOT_SUBMITTED lands in the watch log for the lead. A pane a
 // handover froze reads nothing, so the text goes to the session that replaced it (pane: where it went; FORWARDED in the
 // watch log).
-export const submitToPane = async (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): Promise<Submitted & { readonly pane: string }> => {
+export const submitToPane = async (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string, opts: TypeOptions = {}): Promise<Submitted & { readonly pane: string }> => {
   if (/`|\$\(/.test(text)) throw new UnsafeTextError("refusing to send text containing a backtick or $(");
   const to = replacementOf(config.stateDir, pane) ?? pane;
   if (to !== pane) watchLog(config.watchLog, clock, { source: "submit", line: `FORWARDED ${pane} -> ${to}: ${pane} was frozen by a handover; the text goes to the session that replaced it` });
-  const result = await submitText(paneKeys(run, clock, config, to, text), clock, text);
+  const result = await submitText(paneKeys(run, clock, config, to, text, opts), clock, text);
   if (result.status === "NOT_SUBMITTED") watchLog(config.watchLog, clock, { source: "submit", line: `NOT_SUBMITTED ${to} ${result.reason}` });
   return { ...result, pane: to };
 };

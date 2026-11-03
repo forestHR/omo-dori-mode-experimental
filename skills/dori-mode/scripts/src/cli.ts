@@ -34,6 +34,7 @@ import { retryLaneTells } from "./lane-tells.ts";
 import { applyUpdate } from "./update.ts";
 import { announceChange } from "./update-announce.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
+import { asTextRefusal } from "./submit.ts";
 import { claimDone, closeLane, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
 import { ownerSpeechProblem, plainSummaryProblem } from "./close-summary.ts";
 import { literalNewlineProblem } from "./messenger/literal-newline.ts";
@@ -389,8 +390,9 @@ const USAGE = `dori <command> [options]
                                        box (one more Enter if not), a running turn. Prints SUBMITTED, or NOT_SUBMITTED
                                        <reason> (also in the watch log) and exits 1. Use it for every [LEAD] relay.
                                        A /word omo refuses as an unknown command gets no second Enter (that would
-                                       send it as a message): NOT_SUBMITTED <pane> SLASH_UNKNOWN; --as-text types a
-                                       space before the / so omo sends it as a message
+                                       send it as a message): NOT_SUBMITTED <pane> SLASH_UNKNOWN; with --as-text it
+                                       presses that Enter and the text goes as a message (a command omo runs itself,
+                                       such as /quit, is refused: AS_TEXT_COMMAND)
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
   inbound slack [--loop MIN]           print INBOUND lines: unread thread replies (threads view), replies in threads
@@ -979,11 +981,16 @@ try {
     case "type": {
       const pane = key ?? die("type needs a pane (a tmux session name or a herdr pane id)");
       const file = opt("text-file");
-      const given = file ? (await Bun.file(file).text()).trim() : need("text");
-      if (!given) die("type needs non-empty text");
-      // omo sends a /text typed after a leading space as an ordinary message instead of checking it as a command
-      const text = flags.values["as-text"] === true && given.startsWith("/") ? ` ${given}` : given;
-      const r = await typeIntoPane(deps, pane, text);
+      const text = file ? (await Bun.file(file).text()).trim() : need("text");
+      if (!text) die("type needs non-empty text");
+      const asText = flags.values["as-text"] === true;
+      const notCommand = asText ? asTextRefusal(text) : undefined;
+      if (notCommand) {
+        console.log(`NOT_SUBMITTED ${pane} ${notCommand}`);
+        process.exitCode = 1;
+        break;
+      }
+      const r = await typeIntoPane(deps, pane, text, { asText });
       for (const note of r.notes) console.error(note);
       if (r.pane !== pane) console.error(`FORWARDED ${pane} -> ${r.pane}: ${pane} was frozen by a handover, so the text went to the session that replaced it`);
       console.log(r.status === "SUBMITTED" ? `SUBMITTED ${r.pane}` : `NOT_SUBMITTED ${r.pane} ${r.reason}`);

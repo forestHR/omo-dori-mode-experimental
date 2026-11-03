@@ -21,6 +21,11 @@ export type PaneKeys = {
   readonly clear?: () => Promise<void>;
   // omo's Esc: takes back an armed "Enter again sends it as a message" (and stops a running turn, so only on an idle one)
   readonly escape?: () => Promise<void>;
+  // the refused text dori left armed in omo (a refusal it could not take back with Esc while a turn ran), kept per pane
+  // across dori type runs: omo sends that same text as a message on its next Enter, until Esc or any other submit
+  readonly armed?: { readonly get: () => string | undefined; readonly set: (text: string | undefined) => void };
+  // dori type --as-text: answer omo's unknown-command refusal of this text with the Enter that sends it as a message
+  readonly sendRefusedAsText?: boolean;
   // the pane runs omo, so a command omo runs itself counts as taken once omo empties the box (isOmoCommand); another
   // agent may take the same /text as an ordinary prompt
   readonly runsOmoCommands?: boolean;
@@ -95,6 +100,13 @@ export const isOmoCommand = (text: string): boolean => {
   return OMO_COMMANDS.has(name) && (name === text || WITH_ARGS.has(name));
 };
 
+// dori type --as-text only answers omo's refusal of a /word it does not know: a command omo runs itself is run, never
+// refused, so that is refused before anything is typed (an extension or skill command omo knows runs as with plain dori type)
+export const asTextRefusal = (text: string): string | undefined => {
+  const name = text.trim().split(/\s/, 1)[0] ?? "";
+  return OMO_COMMANDS.has(name) ? `AS_TEXT_COMMAND: omo runs ${name} itself, so --as-text cannot send it as a message; nothing was typed` : undefined;
+};
+
 // omo refuses a /word it has no command for (a typo, a skill that is not there): it puts the text back into the box and
 // shows "Unknown command /x." with "Enter again sends it as a message" (senpi interactive-mode.js
 // reportUnknownCommandRejection, unknown-command-feedback.js), so a second Enter would send the text to the agent. Only a
@@ -103,7 +115,9 @@ export const isOmoCommand = (text: string): boolean => {
 const COMMAND_TOKEN = /^\/[A-Za-z][A-Za-z0-9:_-]*$/;
 const refusedUnknown = (screen: string, text: string): { readonly name: string; readonly idle: boolean } | undefined => {
   const name = text.trim().split(/\s/, 1)[0] ?? "";
-  if (!COMMAND_TOKEN.test(name) || editorText(screen) !== squash(text)) return undefined;
+  // the box shows the text again, or the part of it a wrapped or scrolled box shows (wrapped rows read as spaces)
+  const shown = editorText(screen).replace(/\s/g, "");
+  if (!COMMAND_TOKEN.test(name) || !shown || !text.replace(/\s/g, "").includes(shown)) return undefined;
   const above = screen.split("\n").slice(0, inputBox(screen).top);
   if (!above.some((line) => line.includes(`Unknown command ${name}.`) || line.includes(`${name} is an interactive command`))) return undefined;
   const hint = above.findLast((line) => line.includes("again sends it as a message"));
@@ -149,8 +163,18 @@ const clearOwn = async (keys: PaneKeys, clock: Clock, timing: SubmitTiming, text
 export const submitText = async (keys: PaneKeys, clock: Clock, text: string, timing: SubmitTiming = SUBMIT_TIMING): Promise<Submitted> => {
   const failed = (reason: string): Submitted => ({ status: "NOT_SUBMITTED", reason });
   const command = !!keys.runsOmoCommands && isOmoCommand(text);
-  const first = keys.clear || command ? await keys.read() : "";
+  const first = keys.clear || command || keys.armed ? await keys.read() : "";
   const emptyBefore = keys.clear ? !editorText(first) : false;
+  const held = keys.runsOmoCommands ? keys.armed?.get() : undefined;
+  if (held !== undefined) {
+    if (keys.escape && promptShown(first) && !turnRunning(first)) {
+      // the turn is over: Esc takes back the refusal an earlier run left armed (on an empty box it does nothing more)
+      await keys.escape();
+      await clock.sleep(timing.pollMs);
+      keys.armed?.set(undefined);
+    } else if (squash(held) === squash(text) && !keys.sendRefusedAsText)
+      return failed(`SLASH_UNKNOWN_ARMED: omo still holds its refusal of this text from an earlier dori type, armed while its turn runs, so its first Enter would send the text to the agent as a message; nothing was typed. Type it again once the turn has ended (dori type then takes the refusal back with Esc first), or with --as-text to send it as a message`);
+  }
   // only into a box seen empty is the typed text all that omo gets (after a draft it is one ordinary message)
   const commandAlone = command && promptShown(first) && !editorText(first);
   const typed = await keys.type(text);
@@ -160,18 +184,23 @@ export const submitText = async (keys: PaneKeys, clock: Clock, text: string, tim
   let left = "";
   for (let enter = 1; enter <= 2; enter++) {
     await keys.enter();
+    // any submit, this Enter's included, takes back what omo held armed; a refusal of this text arms it again below
+    if (held !== undefined) keys.armed?.set(undefined);
     for (let poll = 0; poll < timing.clearPolls; poll++) {
       await clock.sleep(timing.pollMs);
       screen = await keys.read();
       left = editorText(screen);
       if (!left) break;
       const refused = keys.runsOmoCommands ? refusedUnknown(screen, text) : undefined;
+      if (refused && keys.sendRefusedAsText) break; // the second Enter below is the one omo asked for
       if (refused) {
-        if (refused.idle && keys.escape && !turnRunning(screen)) {
-          await keys.escape();
+        const disarmed = refused.idle && !!keys.escape && !turnRunning(screen);
+        if (disarmed) {
+          await keys.escape?.();
           await clock.sleep(timing.pollMs);
-        }
-        return failed(`SLASH_UNKNOWN: omo has no command ${refused.name} and asked for one more Enter to send the text to the agent as a message; dori type did not press it, so nothing was sent; ${await clearOwn(keys, clock, timing, text, emptyBefore)}. To send it as a message, type it again with --as-text (a space before the /, which omo sends as text)`);
+        } else keys.armed?.set(text);
+        const still = disarmed ? "" : " omo keeps that Enter armed until its turn ends, so a retry of the same text waits for it (SLASH_UNKNOWN_ARMED).";
+        return failed(`SLASH_UNKNOWN: omo has no command ${refused.name} and asked for one more Enter to send the text to the agent as a message; dori type did not press it, so nothing was sent; ${await clearOwn(keys, clock, timing, text, emptyBefore)}.${still} To send it as a message, type it again with --as-text`);
       }
     }
     if (!left) break;
