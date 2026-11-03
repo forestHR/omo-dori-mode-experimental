@@ -4,11 +4,13 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
 import { isHerdrPane } from "./herdr.ts";
 import { reviveHerdr } from "./herdr-sessions.ts";
 import { windowsHandoverRefusal } from "./windows-handover.ts";
+import { fileLog, serve, serveLoops, spawnLoop, TASK_NAME, taskArgv } from "./serve.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
@@ -81,6 +83,12 @@ const USAGE = `dori <command> [options]
 
   lead                                 print the live lead as "<aoe-id> <tmux-session>" (herdr: "<omo session id> <pane>"),
                                        " stopped" after it when its session or agent is not running
+  serve [--log FILE] [--only TAG ...] [--install-task]
+                                       keep this Dori's loops running in one process where there is no systemd (native
+                                       Windows): watch, freshness, dead-panes, guard, state-git, inbound discord and the
+                                       session watcher, each started again when it exits, every line stamped and tagged in
+                                       --log (default <stateDir>/serve.log); --install-task registers it with the Windows
+                                       Task Scheduler to start at logon with no execution time limit
   revive <herdr pane> [--text TEXT]    start the omo session recorded for a herdr pane whose agent is gone again in that
                                        pane (omo --session-id), wait for its prompt and type TEXT; REVIVE_OK or REVIVE_FAIL;
                                        a pane whose agent runs is left alone (REVIVE_ALREADY_RUNNING)
@@ -540,7 +548,7 @@ const flags = parseArgs({
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
-    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
+    "delete-branch": { type: "boolean" }, "install-task": { type: "boolean" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -1855,6 +1863,23 @@ try {
     case "lead":
       console.log(await findLead(run, config));
       break;
+    case "serve": {
+      const cli = fileURLToPath(import.meta.url);
+      const sessionWatch = fileURLToPath(new URL("../../setups/discord-aoe/session-watch.ts", import.meta.url));
+      if (flags.values["install-task"]) {
+        const argv = taskArgv(process.execPath, cli, config.stateDir);
+        const r = await run(argv);
+        console.log(r.code === 0 ? `SERVE_TASK_INSTALLED "${TASK_NAME}" at logon` : `SERVE_TASK_FAIL ${(r.err || r.out).slice(0, 200)}`);
+        if (r.code !== 0) process.exitCode = 1;
+        break;
+      }
+      const only = new Set(Array.isArray(flags.values.only) ? flags.values.only : []);
+      const loops = serveLoops(process.execPath, cli, sessionWatch).filter((l) => !only.size || only.has(l.tag));
+      const log = opt("log") ?? join(config.stateDir, "serve.log");
+      console.log(`SERVE_READY ${loops.map((l) => l.tag).join(",")} log ${log}`);
+      await serve(loops, { start: spawnLoop, log: fileLog(log, realClock), clock: realClock });
+      break;
+    }
     case "revive": {
       const pane = key ?? die("usage: dori revive <herdr pane> [--text TEXT]");
       if (!isHerdrPane(pane)) die("revive takes a herdr pane id (an aoe session restarts with self-restart.sh)");

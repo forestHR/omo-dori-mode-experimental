@@ -30,6 +30,8 @@ Then open your agent inside herdr, or inside an aoe session for the aoe backend,
 
 ## Requirements
 
+For native Windows installation, skill registration and `dori serve`, follow the [Windows setup guide](skills/dori-mode/setups/windows/README.md).
+
 - [bun](https://bun.sh) 1.3 or newer, and git
 - either [herdr](https://herdr.dev) for lane tabs, or [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires) and `tmux` for lane sessions
 - a coding agent that loads skills (built for [OmO](https://github.com/code-yeongyu/oh-my-openagent); the agent command is configurable)
@@ -246,10 +248,10 @@ The tests cover both backends, launch/report delivery, freshness, blocked lanes,
 The Windows subset in `.github/workflows/windows.yml` is run by hand, not on pushes or pull requests:
 
 ```sh
-gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref feat/herdr-windows
+gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref feat/herdr-windows-serve
 ```
 
-Replace `feat/herdr-windows` with the branch to validate. The workflow runs the native Windows process, refusal, revive, session-discovery and PowerShell-literal tests, plus their herdr backend tests. Windows freeze, thaw and handover refuse without changing processes or records; that implementation is deferred to `feat/herdr-windows-freeze`. Suites built on POSIX shell, process-table and launch-world fixtures stay in the Linux suite. Native Windows installation and supervision are a separate dependent change.
+Replace `feat/herdr-windows-serve` with the branch to validate. The workflow runs the native process/session, refusal and PowerShell-literal tests plus the supervisor, installer, launcher, skill-discovery and registered-task tests. Windows freeze, thaw and handover refuse without changing processes or records; that implementation is deferred to `feat/herdr-windows-freeze`. Suites built on POSIX shell, process-table and launch-world fixtures stay in the Linux suite.
 
 ## License
 
