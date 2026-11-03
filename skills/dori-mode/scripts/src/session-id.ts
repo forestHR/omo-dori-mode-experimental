@@ -17,8 +17,10 @@ const ENV_ID = /(?:^|\s)PI_SESSION_ID=([0-9a-f-]{36})(?:\s|$)/;
 export const SESSION_FILE = /^(\d{4}-\d\d-\d\dT\d\d)-(\d\d)-(\d\d)-(\d{3})Z_([0-9a-f-]{36})\.jsonl$/;
 const START_WINDOW_MS = 180_000;
 
-// Windows has no ps: its process table comes from Win32_Process (pid, parent, command line; no state letters)
-export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath,@{Name='StartedAt';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')}}} | ConvertTo-Json -Compress"];
+// Win32_Process has no suspension state. NtSuspendProcess puts every thread in Wait/Suspended; query that state too,
+// so a different invocation's pane messaging guard sees a freeze even before handover writes its replacement record.
+// This script is static: no process names, PIDs, paths or arguments are interpolated as PowerShell code.
+export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "$stopped = @{}; Get-Process | ForEach-Object { try { $threads = @($_.Threads); if ($threads.Count -gt 0 -and @($threads | Where-Object { $_.ThreadState -ne 'Wait' -or $_.WaitReason -ne 'Suspended' }).Count -eq 0) { $stopped[$_.Id] = $true } } catch {} }; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath,@{Name='StartedAt';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')}}},@{Name='Stat';Expression={if ($stopped.ContainsKey([int]$_.ProcessId)) {'T'} else {''}}} | ConvertTo-Json -Compress"];
 
 export const winProcs = (json: string): Proc[] => {
   try {
@@ -31,7 +33,7 @@ export const winProcs = (json: string): Proc[] => {
         cmd: "CommandLine" in r && typeof r.CommandLine === "string" ? r.CommandLine : "",
         ...("ExecutablePath" in r && typeof r.ExecutablePath === "string" ? { executable: r.ExecutablePath } : {}),
         ...("StartedAt" in r && typeof r.StartedAt === "string" ? { startedAt: r.StartedAt } : {}),
-        stat: "",
+        stat: "Stat" in r && r.Stat === "T" ? "T" : "",
       }];
     });
     const byPid = new Map(table.map((p) => [p.pid, p]));

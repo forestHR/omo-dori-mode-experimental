@@ -250,10 +250,10 @@ The tests cover both backends, launch/report delivery, freshness, blocked lanes,
 The Windows subset in `.github/workflows/windows.yml` is run by hand, not on pushes or pull requests:
 
 ```sh
-gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref feat/herdr-windows-serve
+gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref feat/herdr-windows-freeze-b
 ```
 
-Replace `feat/herdr-windows-serve` with the branch to validate. The workflow runs the native process/session, refusal and PowerShell-literal tests plus the supervisor, installer, launcher, skill-discovery and registered-task tests. Windows freeze, thaw and handover refuse without changing processes or records; that implementation is deferred to `feat/herdr-windows-freeze`. Suites built on POSIX shell, process-table and launch-world fixtures stay in the Linux suite.
+Replace `feat/herdr-windows-freeze-b` with the branch to validate. The workflow runs the native process/session, freeze/thaw and PowerShell-literal tests plus the supervisor, installer, launcher, skill-discovery and registered-task tests. Windows lead and lane handovers freeze with NtSuspendProcess and thaw with NtResumeProcess. Process discovery reports an agent whose threads are all suspended as stopped, so messaging sends neither text nor Enter during a handover, even before its replacement record exists. The native regression freezes a real child, attempts a send against its stale running-turn screen, and thaws it through the CLI from a separate invocation. Suites built on POSIX shell, process-table and launch-world fixtures stay in the Linux suite.
 
 ## License
 

@@ -103,7 +103,7 @@ const transcriptCheck = (run: Runner, clock: Clock, sessionsDir: string, pane: s
   };
 };
 
-// A stopped agent (SIGSTOP, state T: frozen by a handover) reads nothing, while its screen keeps whatever it showed, a
+// A stopped agent (SIGSTOP or native Windows suspension, state T) reads nothing, while its screen keeps whatever it showed, a
 // running turn included, so the screen would pass a text typed there as taken. Its pid when stopped, else undefined.
 export const stoppedAgent = async (run: Runner, pane: string): Promise<number | undefined> => {
   const shell = await tmuxPanePid(run, pane);
