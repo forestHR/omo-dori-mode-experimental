@@ -31,6 +31,7 @@ jobs:
             ./test/herdr-backend.test.ts `
             ./test/herdr-revive.test.ts `
             ../setups/herdr-web/proxy.test.ts `
+            ../setups/herdr-web/state.test.ts `
             ./test/windows-process.test.ts `
             ./test/windows-freeze.test.ts `
             ./test/windows-install.test.ts `
