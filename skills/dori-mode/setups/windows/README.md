@@ -14,7 +14,9 @@ From a checkout of the branch you want to install:
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Branch (git branch --show-current)
 ```
 
-The installer checks every native command's exit code. It installs missing bun, herdr and omo dependencies, clones or updates the selected branch, installs the CLI dependencies, and creates a Unicode-safe `dori.cmd` under `%USERPROFILE%\.dori\bin`.
+The installer checks every native command's exit code. It installs missing bun, herdr and omo dependencies, clones or updates the selected branch, installs the CLI dependencies, and creates the PowerShell launcher `dori.ps1` under `%USERPROFILE%\.dori\bin` (it needs pwsh 7.3 or newer). A `.cmd` launcher is not used: cmd.exe reads `&`, `|`, `<` and `>` in arguments as commands.
+
+PowerShell runs `dori.ps1` only when the account's script policy allows local scripts. If it is already RemoteSigned or looser, the installer leaves it alone. Otherwise it shows the change (`Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`) and why, and asks; it changes the policy only on a yes. On a no, or when it cannot ask (`-NonInteractive`), it changes nothing, prints that command, and finishes the install; until the policy allows it, run Dori with `pwsh -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\.dori\bin\dori.ps1" <arguments>`.
 
 The `dori-mode` skill is registered with a directory junction under `%USERPROFILE%\.agents\skills`, so agents discover it outside the checkout. An existing `dori-mode` directory or working link is kept. If your agent uses another skill search directory, set `SKILLS_DIR` to that configured directory before installing:
 

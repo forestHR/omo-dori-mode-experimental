@@ -66,19 +66,66 @@ if (Test-Path -LiteralPath $skill) {
 }
 
 Step "dori command"
+if (-not (Have pwsh)) { throw "PowerShell 7.3 or newer (pwsh) is needed: install it (winget install Microsoft.PowerShell) and run this again" }
 $binDir = Join-Path $DoriHome "bin"
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-$launcher = Join-Path $binDir "dori.cmd"
-Set-Content -Encoding ASCII -Path $launcher -Value @'
-@echo off
-setlocal
-if not defined DORI_CONFIG set "DORI_CONFIG=%~dp0..\config.json"
-if not defined DORI_ENV_FILE set "DORI_ENV_FILE=%~dp0..\dori.env"
-if not defined DORI_STATE_DIR set "DORI_STATE_DIR=%~dp0..\state"
-bun "%~dp0..\src\skills\dori-mode\scripts\src\cli.ts" %*
-exit /b %errorlevel%
+# A PowerShell launcher, not a .cmd: cmd.exe would read & | < > in the arguments as commands. It fills in this
+# installation's config, env file and state only where the caller set none, and puts the caller's variables back after.
+$launcher = Join-Path $binDir "dori.ps1"
+Set-Content -Encoding UTF8 -Path $launcher -Value @'
+#Requires -Version 7.3
+$PSNativeCommandArgumentPassing = 'Standard'
+$doriHome = Split-Path -Parent $PSScriptRoot
+$filled = @()
+foreach ($pair in @(@('DORI_CONFIG', 'config.json'), @('DORI_ENV_FILE', 'dori.env'), @('DORI_STATE_DIR', 'state'))) {
+  if (-not [Environment]::GetEnvironmentVariable($pair[0])) {
+    [Environment]::SetEnvironmentVariable($pair[0], (Join-Path $doriHome $pair[1]))
+    $filled += $pair[0]
+  }
+}
+try {
+  & bun (Join-Path $doriHome 'src\skills\dori-mode\scripts\src\cli.ts') @args
+  $code = $LASTEXITCODE
+} finally {
+  foreach ($name in $filled) { [Environment]::SetEnvironmentVariable($name, $null) }
+}
+exit $code
 '@
+Remove-Item -LiteralPath (Join-Path $binDir "dori.cmd") -ErrorAction SilentlyContinue
 AddUserPath $binDir
+
+# PowerShell runs dori.ps1 only when the account allows local scripts. A policy of RemoteSigned or looser is left alone;
+# otherwise the installer says what it would change and why and asks, and changes nothing without a yes. A run that
+# cannot ask (-NonInteractive) changes nothing either. Without the change Dori still runs through pwsh -File.
+Step "script policy for the dori command"
+$policies = Get-ExecutionPolicy -List
+$policyOf = { param($scope) [string]($policies | Where-Object { $_.Scope -eq $scope }).ExecutionPolicy }
+$locked = @("MachinePolicy", "UserPolicy") | Where-Object { (& $policyOf $_) -ne "Undefined" } | Select-Object -First 1
+$current = @("MachinePolicy", "UserPolicy", "CurrentUser", "LocalMachine") | ForEach-Object { & $policyOf $_ } | Where-Object { $_ -ne "Undefined" } | Select-Object -First 1
+if (-not $current) { $current = "Restricted" }
+$fallback = "pwsh -NoProfile -ExecutionPolicy Bypass -File `"$launcher`" <arguments>"
+$setCommand = "Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser"
+if (@("RemoteSigned", "Unrestricted", "Bypass") -contains $current) {
+  Write-Host "EXECUTION_POLICY_OK ${current}: the dori command runs as it is"
+} else {
+  $canAsk = -not $locked -and -not ([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-noni' })
+  $answer = $null
+  if ($canAsk) {
+    Write-Host "The dori command is a PowerShell script, and this account's script policy is $current, which does not run it."
+    Write-Host "Proposed change: $setCommand"
+    Write-Host "RemoteSigned runs scripts made on this PC; scripts downloaded from the internet still need a signature. Only your account changes."
+    Write-Host -NoNewline "Change it now? [y/N] "
+    $answer = [Console]::In.ReadLine()
+  }
+  if ($answer -match '^\s*(y|yes)\s*$') {
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+    Write-Host "EXECUTION_POLICY_SET RemoteSigned for CurrentUser"
+  } else {
+    Write-Host "EXECUTION_POLICY_UNCHANGED $current$(if ($locked) { " (set by $locked; ask your administrator)" })"
+    if (-not $locked) { Write-Host "To allow the dori command later: $setCommand" }
+    Write-Host "Until then run Dori with: $fallback"
+  }
+}
 
 Step "config"
 $cfg = Join-Path $DoriHome "config.json"
@@ -88,7 +135,7 @@ if (-not (Test-Path $cfg)) {
   $c | Add-Member -Force NoteProperty agentCommand @("omo", "--model", "{model}", "{prompt}")
   $c | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 $cfg
 }
-$help = Native $launcher @()
+$help = Native "pwsh" @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $launcher)
 $help | Select-Object -First 1
 
 Write-Host ""
