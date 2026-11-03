@@ -257,12 +257,12 @@ export class DiscordListener {
 
   // our bot wrote in a channel: take the eyes off the owner's earlier messages there, and off the message it replies to.
   // Sweeps of one channel run one after another; Discord.call waits out a 429's retry_after.
-  private clearEyes(m: DiscordMessage, sweep: (m: DiscordMessage) => Promise<void> = (x) => this.sweep(x)): Promise<void> {
-    const prev = this.sweeps.get(m.channel_id) ?? Promise.resolve();
-    const next = prev.then(() => sweep(m));
+  private clearEyes(channel: string, sweep: () => Promise<void>): Promise<void> {
+    const prev = this.sweeps.get(channel) ?? Promise.resolve();
+    const next = prev.then(sweep);
     const tail = next.catch(() => {});
-    this.sweeps.set(m.channel_id, tail);
-    void tail.then(() => this.sweeps.get(m.channel_id) === tail && this.sweeps.delete(m.channel_id));
+    this.sweeps.set(channel, tail);
+    void tail.then(() => this.sweeps.get(channel) === tail && this.sweeps.delete(channel));
     return next;
   }
 
@@ -312,7 +312,7 @@ export class DiscordListener {
 
   async onMessage(m: DiscordMessage): Promise<void> {
     if (this.self && m.author.id === this.self) {
-      if (this.d.words.autoUnEye && !this.d.shadow) await this.clearEyes(m);
+      if (this.d.words.autoUnEye && !this.d.shadow) await this.clearEyes(m.channel_id, () => this.sweep(m));
       return;
     }
     const pair = this.d.pairChannel ?? "";
@@ -361,7 +361,7 @@ export class DiscordListener {
     if (scope === "pair" && this.d.words.callNames.length) await this.readRoles();
     // so can a voice note whose words did not come through (no transcriber, a failed or empty transcript)
     const unheard = !!audio && !transcript?.trim();
-    const called = scope === "pair" && this.d.words.callNames.length ? (this.calledHere(m, said) ? true : this.rolesStale || unheard ? undefined : false) : undefined;
+    const called = scope === "pair" && this.d.words.callNames.length ? (this.calledHere(m, `${m.content ?? ""}\n${transcript ?? ""}`) ? true : this.rolesStale || unheard ? undefined : false) : undefined;
     if (called === false) this.uncalled.add(m.id);
     const note = open.length ? `card ${open.join(", ")} still open, owner replied in text: resolve it with dori resolve ${open[0]} --answer "<the answer, short>" so the card folds` : "";
     this.append({
@@ -386,9 +386,9 @@ export class DiscordListener {
     if (scope === "pair-bot") {
       const ids = answeredIds(m.channel_id, m.message_reference?.message_id, m.content);
       for (const id of ids) this.answered.set(id, { by: m.id, bot: m.author.id });
-      if (ids.length && this.answersClear()) await this.clearEyes(m, () => this.sweepAnswered(m.channel_id, ids));
+      if (ids.length && this.answersClear()) await this.clearEyes(m.channel_id, () => this.sweepAnswered(m.channel_id, ids));
     }
-    if (called === false && this.answered.has(m.id) && this.answersClear()) await this.clearEyes(m, () => this.sweepAnswered(m.channel_id, [m.id]));
+    if (called === false && this.answered.has(m.id) && this.answersClear()) await this.clearEyes(m.channel_id, () => this.sweepAnswered(m.channel_id, [m.id]));
     if (newer(m.id, this.cursor)) this.cursor = m.id;
     this.d.log(`INBOUND discord-${scope} ${m.channel_id} ${m.id} ${viaWebhook ? `${this.d.owner} via=owner-webhook` : m.author.id} ${JSON.stringify((transcript ?? m.content).slice(0, 200))}`);
     if (open.length) this.d.log(`CARD_STILL_OPEN ${open.join(",")} thread=${m.channel_id} ${note}`);
@@ -557,6 +557,11 @@ export class DiscordListener {
   }
 
   start(): void {
+    // eyes left on a message that was already both uncalled and answered when the listener stopped (its removal had not
+    // finished) come off now: both rows are seen, so no incoming message would take them off
+    const pair = this.d.pairChannel ?? "";
+    const left = (this.eyes[pair] ?? []).filter((id) => this.answered.has(id) && this.uncalled.has(id));
+    if (pair && left.length && this.answersClear()) this.track(this.clearEyes(pair, () => this.sweepAnswered(pair, left)), "eyes");
     const ws = this.d.open();
     this.seq = null;
     let beat: unknown;

@@ -608,6 +608,32 @@ test("another Dori's reply that comes before the owner's message is taken in (ba
   expect(unreacts(later.calls)).toEqual([`${PAIR}/messages/9101`]);
 });
 
+test("eyes still on a message that was already uncalled and answered when the listener stopped come off at start, with no new message", async () => {
+  const rows = [
+    { id: "9301", ts: "x", channel_id: PAIR, scope: "pair", author_id: OWNER, called: false },
+    { id: "9302", ts: "x", channel_id: PAIR, scope: "pair-bot", author_id: PAIR_BOT, reply_to: "9301", content: "" },
+    { id: "9303", ts: "x", channel_id: PAIR, scope: "pair", author_id: OWNER, called: false },
+  ];
+  const { restart, calls, eyesPath, logs } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, inbox: rows.map((r) => `${JSON.stringify(r)}\n`).join("") });
+  writeFileSync(eyesPath, JSON.stringify({ [PAIR]: ["9301", "9303"] }));
+  const listener = restart();
+  listener.start();
+  await listener.settled();
+  expect(unreacts(calls)).toEqual([`${PAIR}/messages/9301`]);
+  expect(logs).toContain(`EYES_CLEARED_ANSWERED ${PAIR} by=9302 bot=${PAIR_BOT} 9301`);
+});
+
+test("an owner voice note whose text calls this Dori by name is called even when its transcript does not name it", async () => {
+  const transcribe = async () => "이 녹음 내용 확인";
+  const { listener, gw, inbox, calls } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, transcribe });
+  listener.start();
+  ready(gw);
+  await listener.onMessage(msg("9401", { channel_id: PAIR, content: "짱돌아 이 녹음 확인해", attachments: [{ url: "https://cdn/v.ogg", filename: "voice-message.ogg", content_type: "audio/ogg" }] }));
+  await listener.onMessage(pairBot("9402", { message_reference: { message_id: "9401" } }));
+  expect(inbox().find((r) => r.id === "9401")?.called).toBe(true);
+  expect(unreacts(calls)).toEqual([]);
+});
+
 test("an owner voice note in the pair channel whose words did not come through is not uncalled: no transcriber, a failed or an empty transcript", async () => {
   const voice = { content: "", attachments: [{ url: "https://cdn/v.ogg", filename: "voice-message.ogg", content_type: "audio/ogg" }] };
   for (const transcribe of [undefined, async () => { throw new Error("whisper down"); }, async () => "  "]) {
