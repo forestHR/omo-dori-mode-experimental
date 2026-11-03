@@ -101,7 +101,7 @@ export type GuardThresholds = {
 
 export type Backend = "herdr" | "aoe";
 
-// "words" marks status as [working] / [waiting] / [done] / [standing]; "emoji" uses 🔄 / ⏸️ / ✅ / 📌 (and ⏳ / ✅ in progress text).
+// "words" marks status as [working] / [waiting] / [done] / [standing]; "emoji" uses 🔄 / 🔔 / ✅ / 📌 (and ⏳ / ✅ in progress text).
 export type StatusStyle = "words" | "emoji";
 
 // The speech this Dori uses with its owner in his channel and threads, which a lane's summary for him has to match (the

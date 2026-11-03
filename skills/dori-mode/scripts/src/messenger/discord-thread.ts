@@ -21,36 +21,92 @@ export type ThreadStatus = "working" | "waiting" | "done";
 // A standing thread (thread-map.ts) wears its own mark whatever the status events ask; it is not one of the statuses.
 export type ThreadMark = ThreadStatus | "standing";
 
-export const STATUS_EMOJI: Readonly<Record<ThreadMark, string>> = { working: "🔄", waiting: "⏸️", done: "✅", standing: "📌" };
+// The owner's marks (Q474, 2026-11-03): 🔄 a Dori is working, 🔔 his answer is needed, ✅ done, 📌 standing. ⏸️ read as "stopped"
+// and is retired; an old ⏸️ name is still recognised and converted at its next rename.
+export const STATUS_EMOJI: Readonly<Record<ThreadMark, string>> = { working: "🔄", waiting: "🔔", done: "✅", standing: "📌" };
 
-// either style's mark, so switching statusStyle never leaves two marks on one name
-const STATUS_PREFIX = /^(?:\[[^\]]{1,20}\]|(?:🔄|⏸|✅|⏳)\uFE0F?)\s*/u;
-const EMOJI_PREFIX = /^(?:🔄|⏸|✅|⏳)\uFE0F?\s*/u;
+// either style's mark, so switching statusStyle never leaves two marks on one name; ⛔ 💤 ❗ (and the old ⌛) are how an
+// Autophagy (Yoodori) request ended, one mark each too
+const STATUS_PREFIX = /^(?:\[[^\]]{1,20}\]|(?:🔄|🔔|⏸|✅|⏳|⛔|💤|❗|⌛)\uFE0F?)\s*/u;
+const EMOJI_PREFIX = /^(?:🔄|🔔|⏸|✅|⏳|⛔|💤|❗|⌛)\uFE0F?\s*/u;
 
 export const statusMark = (status: ThreadMark, words: DiscordWords): string => (words.statusStyle === "emoji" ? STATUS_EMOJI[status] : `[${words[status]}]`);
 
 // The name without any leading status marks: "🔄 🔄 x" and "✅ 🔄 x" both give "x". A title passed in with its own
 // mark, or an earlier rename that kept one, would otherwise stack marks. Any one bracket in front goes (an older
 // words setting); after that only emoji and this setting's [word] marks do, so a title's own "[tag]" stays.
-export const bareThreadName = (name: string, words: DiscordWords): string => {
+// How an Autophagy (Yoodori) request ended: ⛔ cancelled, 💤 replaced by a newer one or withdrawn, ❗ failed, written
+// bare, or as the closing words of older names ("⛔ 취소 · ", "⌛ 만료 · ", ...). One mark too, stripped like ours, so
+// neither side stacks on the other ("✅ ⛔ 취소 · x", "🔄 완료 · x"); done keeps it. "✅ 완료 · " is just done.
+const CLOSINGS: ReadonlyArray<readonly [RegExp, string | undefined]> = [
+  [/^✅ 완료 · /u, undefined],
+  [/^⛔ 취소 · /u, "⛔"],
+  [/^⌛ 만료 · /u, "💤"],
+  [/^❗ 실패 · /u, "❗"],
+  // the word alone, left behind when an older rename took only the emoji in front of it ("🔄 완료 · x")
+  [/^완료 · /u, undefined],
+  [/^취소 · /u, "⛔"],
+  [/^만료 · /u, "💤"],
+  [/^실패 · /u, "❗"],
+  [/^⛔\uFE0F?\s*/u, "⛔"],
+  [/^💤\s*/u, "💤"],
+  [/^⌛\uFE0F?\s*/u, "💤"],
+  [/^❗\uFE0F?\s*/u, "❗"],
+];
+
+const closingOf = (rest: string): { readonly text: string; readonly mark: string | undefined } | undefined => {
+  for (const [re, mark] of CLOSINGS) {
+    const text = re.exec(rest)?.[0];
+    if (text) return { text, mark };
+  }
+  return undefined;
+};
+
+const splitMarks = (name: string, words: DiscordWords): { readonly outcome?: string; readonly rest: string } => {
   const marks = new Set<string>(["working", "waiting", "done"].map((s) => `[${words[s as ThreadStatus]}]`));
-  let rest = name.trimStart().replace(STATUS_PREFIX, "");
+  let outcome: string | undefined;
+  let ended = false;
+  let rest = name.trimStart();
+  let first = true;
   for (;;) {
+    const closing = closingOf(rest);
     const word = /^\[[^\]]{1,20}\]/u.exec(rest)?.[0];
-    const next = word && marks.has(word) ? rest.slice(word.length).trimStart() : rest.replace(EMOJI_PREFIX, "");
-    if (next === rest) return rest;
+    const next = closing
+      ? rest.slice(closing.text.length).trimStart()
+      : first
+        ? rest.replace(STATUS_PREFIX, "")
+        : word && marks.has(word)
+          ? rest.slice(word.length).trimStart()
+          : rest.replace(EMOJI_PREFIX, "");
+    // the outermost way it ended counts: "✅ ❗ 실패 · x" failed
+    if (closing && !ended) [outcome, ended] = [closing.mark, true];
+    if (next === rest && !first) return { outcome, rest };
+    first = false;
     rest = next;
   }
 };
+
+export const bareThreadName = (name: string, words: DiscordWords): string => splitMarks(name, words).rest;
 
 // 📌 is not a status mark to every other name, so a title of its own that starts with one stays: only a standing mark
 // being set (one 📌, not two) or released (unpin) takes it off.
 export const unpinnedName = (name: string, words: DiscordWords): string => bareThreadName(name, words).replace(/^(?:📌\uFE0F?\s*)+/u, "");
 
-export const threadName = (status: ThreadMark, title: string, words: DiscordWords, unpin = false): string =>
-  `${statusMark(status, words)} ${unpin || status === "standing" ? unpinnedName(title, words) : bareThreadName(title, words)}`;
+// Done keeps how an Autophagy request ended (⛔ stays ⛔, ❗ never turns into ✅); every other status replaces it.
+export const threadName = (status: ThreadMark, title: string, words: DiscordWords, unpin = false): string => {
+  const outcome = status === "done" ? splitMarks(title, words).outcome : undefined;
+  const rest = unpin || status === "standing" ? unpinnedName(title, words) : bareThreadName(title, words);
+  return `${outcome ?? statusMark(status, words)} ${rest}`;
+};
 
-export const isDoneName = (name: string, words: DiscordWords): boolean => name.startsWith(STATUS_EMOJI.done) || name.startsWith(`[${words.done}]`);
+// A thread that ended and may sit archived: done, or a Yoodori request cancelled (⛔) or replaced or withdrawn (💤).
+// ❗ (failed) is not: it waits for the owner, like 🔔.
+export const isDoneName = (name: string, words: DiscordWords): boolean =>
+  [STATUS_EMOJI.done, "⛔", "💤"].some((m) => name.startsWith(m)) || name.startsWith(`[${words.done}]`);
+
+// A thread that shows the owner's turn: 🔔 (or the old ⏸️), ❗, or this setting's waiting word.
+export const isOwnerTurnName = (name: string, words: DiscordWords): boolean =>
+  [STATUS_EMOJI.waiting, "⏸", "❗"].some((m) => name.startsWith(m)) || name.startsWith(`[${words.waiting}]`);
 
 export const progressText = (status: "working" | "done", text: string, words: DiscordWords): string =>
   words.statusStyle === "emoji" ? (status === "working" ? `⏳ · ${text}` : `${STATUS_EMOJI.done} ${text}`) : `${words[status]}: ${text}`;
@@ -94,7 +150,10 @@ export const setThreadStatus = async (dc: Discord, threadId: string, status: Thr
 };
 
 export type ThreadVerb = "reply" | "wait" | "done";
-export const VERB_STATUS: Readonly<Record<ThreadVerb, ThreadStatus>> = { reply: "working", wait: "waiting", done: "done" };
+// A reply asks for waiting: with a lane still working in the thread it shows working (desiredStatus), but when none is,
+// nothing runs on our side after our answer and it is the owner's turn (🔔). A reply used to mark working, and a thread
+// the lead answered (or one whose lanes were all paused or closed) showed 🔄 for days while it waited on him.
+export const VERB_STATUS: Readonly<Record<ThreadVerb, ThreadStatus>> = { reply: "waiting", wait: "waiting", done: "done" };
 
 // dori launch writes the lane's first message in its work thread, so a thread opened for a lane never sits empty;
 // a thread that already has a message (the lead wrote first, or it was started from a message) is left as it is.

@@ -225,7 +225,7 @@ dori resolve Q1
 
 `--thread`를 주면 해당 작업 스레드 안에 카드를 올리고 대기 상태로 표시합니다. 답하면 그 자리에서 기록으로 접히며 별도 기록 메시지는 없습니다. 그 스레드에 열린 질문이 더 없으면 작업 중으로 돌아갑니다. `dori reopen`은 버튼을 복구하고 스레드를 다시 대기로 표시합니다. `--thread`가 없으면 새 카드는 설정된 채널에 올라갑니다. 스레드가 연결된 예전 채널 카드는 답변 기록을 그 스레드에 알림 없이 남깁니다. 후속 작업이 끝나면 `dori resolve`로 추적 목록에서 지우며, 접힌 카드는 채팅에 남습니다. 답을 받지 않은 카드를 resolve로 지울 때도 그 스레드에 열린 질문이 더 없으면 작업 중으로 돌아가므로, 버린 질문 때문에 스레드가 대기로 남지 않습니다.
 
-`discord.statusStyle: "emoji"`는 스레드 이름 앞에 🔄 작업 중, ⏸️ 대기, ✅ 완료를 붙이고, 일부러 계속 열어 두는 스레드(`dori thread set <ref> standing`, 풀 때는 `unstanding`)에는 상태와 상관없이 📌를 붙입니다. 기본 `"words"`는 `[working]`, `[waiting]`, `[done]`입니다. 표시는 스레드에만 붙습니다. 텍스트 채널·포럼·카테고리를 스레드로 넘겨도(예: `dori ask --thread`에 채널 id) 이름은 그대로이고, 그 상태는 `THREAD_STATUS_DROPPED <id> ... is not a thread`로 버려집니다. `dori thread reply` / `wait` / `done`이 상태를 바꾸며, done은 보관하고 reply/wait는 보관을 해제합니다. 완료 스레드에 소유자가 메시지를 쓰면 리스너가 작업 중으로 다시 엽니다. 서비스와 카드 문구 번역 설정은 [디스코드 + aoe 설정](skills/dori-mode/setups/discord-aoe/README.md)을 보세요.
+`discord.statusStyle: "emoji"`는 스레드 이름 앞에 🔄 작업 중, 🔔 소유자 응답 필요, ✅ 완료를 붙이고(유돌 요청은 ⛔ 취소, 💤 새 걸로 바뀜·거둠, ❗ 실패), 일부러 계속 열어 두는 스레드(`dori thread set <ref> standing`, 풀 때는 `unstanding`)에는 상태와 상관없이 📌를 붙입니다. 기본 `"words"`는 `[working]`, `[waiting]`, `[done]`입니다. 표시는 스레드에만 붙습니다. 텍스트 채널·포럼·카테고리를 스레드로 넘겨도(예: `dori ask --thread`에 채널 id) 이름은 그대로이고, 그 상태는 `THREAD_STATUS_DROPPED <id> ... is not a thread`로 버려집니다. `dori thread reply` / `wait` / `done`이 상태를 바꾸며, done은 보관하고 reply/wait는 보관을 해제합니다. 완료 스레드에 소유자가 메시지를 쓰면 리스너가 작업 중으로 다시 엽니다. 서비스와 카드 문구 번역 설정은 [디스코드 + aoe 설정](skills/dori-mode/setups/discord-aoe/README.md)을 보세요.
 
 ### 아이폰 단축어로 음성 지시
 

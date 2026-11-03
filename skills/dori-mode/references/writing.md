@@ -22,7 +22,7 @@ Each piece of work gets its own thread (or topic) with:
 - one status message you edit in place: `working: <work> · <time elapsed>` while working, `done: <work>` when done;
 - a status word at the start of the thread name: `[working]`, `[waiting]` (on the owner or someone else), `[done]`.
 
-With `discord.statusStyle: "emoji"` the same marks are emoji: the status message reads `⏳ · <work>` while working and `✅ <work>` when done, and the thread name starts with 🔄 (working), ⏸️ (waiting) or ✅ (done). Only these marks are emoji; the text stays words.
+With `discord.statusStyle: "emoji"` the same marks are emoji: the status message reads `⏳ · <work>` while working and `✅ <work>` when done, and the thread name starts with 🔄 (working), 🔔 (the owner's answer needed) or ✅ (done), and a Yoodori request that ended otherwise with ⛔ (cancelled), 💤 (replaced by a newer one or withdrawn) or ❗ (failed). Always exactly one mark. Only these marks are emoji; the text stays words.
 
 When the work is done, remove your "eyes" reaction and close (archive) the thread. On Discord, `dori inbound discord` removes the eyes for you as soon as your bot writes in that channel or thread (`discord.autoUnEye`, on by default). If the owner writes in a closed thread, reopen it, set it back to working, and carry on there. Threads the owner started get the same treatment.
 

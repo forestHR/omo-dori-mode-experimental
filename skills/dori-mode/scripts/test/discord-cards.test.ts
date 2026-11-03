@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { defaultDiscordWords } from "../src/config.ts";
 import { Discord } from "../src/messenger/discord.ts";
 import { type Interaction, QuestionCards, QuestionError, QuestionStore } from "../src/messenger/discord-cards.ts";
-import { progressText, threadHook, ThreadRefError } from "../src/messenger/discord-thread.ts";
+import { setThreadStatus, progressText, threadHook, ThreadRefError } from "../src/messenger/discord-thread.ts";
 import { type Http, type HttpRequest, type HttpResponse, UnsafeMessageError } from "../src/messenger/http.ts";
 import { fakeClock, withState } from "./fakes.ts";
 
@@ -159,13 +159,13 @@ const threadCards = (name = "🔄 fix login") => {
 };
 const threadTap = (customId: string): Interaction => ({ ...tap(customId), channel_id: "300" });
 
-test("with a work thread the card is posted inside it, with no link back, and the thread is marked ⏸️", async () => {
+test("with a work thread the card is posted inside it, with no link back, and the thread is marked 🔔", async () => {
   const { cards, store, calls, json, thread } = threadCards();
   await cards.ask("Ship?", ["Yes", "No"], { thread: "300" });
   expect(calls()).toEqual(["POST /channels/300/messages", "GET /channels/300", "PATCH /channels/300"]);
   expect(json(0).components[0].components[0].content).toBe(`<@${OWNER}> **Q1** Ship?`);
-  expect(json(2)).toEqual({ name: "⏸️ fix login" });
-  expect(thread.name).toBe("⏸️ fix login");
+  expect(json(2)).toEqual({ name: "🔔 fix login" });
+  expect(thread.name).toBe("🔔 fix login");
   expect(store.get("Q1")).toMatchObject({ channel: "300", thread: "300", message: "900" });
 });
 
@@ -179,7 +179,7 @@ test("an answer to a card inside its thread posts no record line and marks the t
   expect(json(5)).toEqual({ name: "🔄 fix login" });
 });
 
-test("while another question in the same thread is still open, an answer leaves the thread ⏸️", async () => {
+test("while another question in the same thread is still open, an answer leaves the thread 🔔", async () => {
   const { cards, calls, thread } = threadCards();
   await cards.ask("Ship?", ["Yes"], { thread: "300" });
   await cards.ask("Deploy where?", ["Staging"], { thread: "300" });
@@ -188,11 +188,11 @@ test("while another question in the same thread is still open, an answer leaves 
   const before = calls().length;
   await cards.afterAnswer(out.question);
   expect(calls().slice(before).filter((c) => c.startsWith("PATCH"))).toEqual([]);
-  expect(thread.name).toBe("⏸️ fix login");
+  expect(thread.name).toBe("🔔 fix login");
 });
 
 test("a card posted in the channel for a work thread leaves a silent record line there, then marks the thread 🔄", async () => {
-  const { cards, store, calls, json } = threadCards("⏸️ fix login");
+  const { cards, store, calls, json } = threadCards("🔔 fix login");
   const asked = store.create("Ship?", ["Yes"], CHANNEL, { thread: "300" }, "2026-01-02T03:00:00Z");
   store.setMessage(asked.id, "900");
   const out = await cards.handle(tap("q:Q1:0"));
@@ -203,7 +203,7 @@ test("a card posted in the channel for a work thread leaves a silent record line
   expect(json(3)).toEqual({ name: "🔄 fix login" });
 });
 
-test("reopening a card inside its thread patches it there and marks the thread ⏸️ again", async () => {
+test("reopening a card inside its thread patches it there and marks the thread 🔔 again", async () => {
   const { cards, calls, thread } = threadCards();
   await cards.ask("Ship?", ["Yes"], { thread: "300" });
   const out = await cards.handle(threadTap("q:Q1:0"));
@@ -213,7 +213,7 @@ test("reopening a card inside its thread patches it there and marks the thread �
   const before = calls().length;
   await cards.reopen("Q1");
   expect(calls().slice(before)).toEqual(["PATCH /channels/300/messages/900", "GET /channels/300", "PATCH /channels/300"]);
-  expect(thread.name).toBe("⏸️ fix login");
+  expect(thread.name).toBe("🔔 fix login");
 });
 
 test("resolving the last open card in a thread without an answer marks the thread 🔄", async () => {
@@ -223,7 +223,7 @@ test("resolving the last open card in a thread without an answer marks the threa
   const out = await cards.handle(threadTap("q:Q2:0"));
   if (out.kind !== "answered") throw new Error(out.kind);
   await cards.afterAnswer(out.question);
-  expect(thread.name).toBe("⏸️ fix login");
+  expect(thread.name).toBe("🔔 fix login");
   expect(await cards.resolve("Q1")).toBe("folded");
   expect(thread.name).toBe("🔄 fix login");
 });
@@ -236,25 +236,25 @@ test("with word status the same resolve marks the thread [working]", async () =>
   expect(thread.name).toBe("[working] fix login");
 });
 
-test("resolving an open card while another card in the thread is still open leaves the thread ⏸️", async () => {
+test("resolving an open card while another card in the thread is still open leaves the thread 🔔", async () => {
   const { cards, calls, thread } = threadCards();
   await cards.ask("Ship?", ["Yes"], { thread: "300" });
   await cards.ask("Deploy where?", ["Staging"], { thread: "300" });
   const before = calls().length;
   expect(await cards.resolve("Q1")).toBe("folded");
   expect(calls().slice(before).filter((c) => c.startsWith("PATCH"))).toEqual(["PATCH /channels/300/messages/900"]);
-  expect(thread.name).toBe("⏸️ fix login");
+  expect(thread.name).toBe("🔔 fix login");
 });
 
 test("resolving an answered card does not touch the thread status", async () => {
   const { cards, calls, thread } = threadCards();
   await cards.ask("Ship?", ["Yes"], { thread: "300" });
   await cards.handle(threadTap("q:Q1:0"));
-  thread.name = "⏸️ fix login";
+  thread.name = "🔔 fix login";
   const before = calls().length;
   expect(await cards.resolve("Q1", "no")).toBe("kept");
   expect(calls().slice(before)).toEqual([]);
-  expect(thread.name).toBe("⏸️ fix login");
+  expect(thread.name).toBe("🔔 fix login");
   expect(await cards.resolve("Q9")).toBeNull();
 });
 
@@ -300,7 +300,7 @@ test("a card in a thread that archived itself is folded by opening the thread an
   const { cards, calls, json } = setup((req) => {
     if (req.method === "PATCH" && req.url.endsWith("/channels/300")) thread.archived = JSON.parse(String(req.body)).archived ?? thread.archived;
     if (req.method === "PATCH" && req.url.includes("/messages/") && thread.archived) throw new Error('discord PATCH /channels/300/messages/900: 400 {"message": "Thread is archived", "code": 50083}');
-    if (req.method === "GET") return { name: "⏸️ fix login", type: 11, thread_metadata: { archived: thread.archived } };
+    if (req.method === "GET") return { name: "🔔 fix login", type: 11, thread_metadata: { archived: thread.archived } };
     return req.method === "POST" && req.url.endsWith("/messages") ? { id: "900" } : {};
   });
   await cards.ask("Ship?", ["Yes"], { thread: "300" });
@@ -357,32 +357,32 @@ test("with emoji status the done hook swaps the word mark for ✅ and archives; 
   expect(f.json(4)).toEqual({ archived: true });
 });
 
-test("reply marks the thread working and wait marks it waiting, opening an archived thread in the same request", async () => {
+test("a reply with no lane working leaves the thread to the owner (🔔) and wait marks it waiting, opening an archived thread in the same request", async () => {
   const done = threadAs("✅ fix login", true);
   await threadHook(done.dc, "reply", `discord:${T}`, "picking this up again", emoji);
   expect(done.calls().slice(2)).toEqual([`GET /channels/${T}`, `PATCH /channels/${T}`]);
-  expect(done.json(3)).toEqual({ name: "🔄 fix login", archived: false });
+  expect(done.json(3)).toEqual({ name: "🔔 fix login", archived: false });
   const working = threadAs("🔄 fix login");
   await threadHook(working.dc, "wait", `discord:${T}`, "Q2 is waiting on you", emoji);
-  expect(working.json(3)).toEqual({ name: "⏸️ fix login" });
+  expect(working.json(3)).toEqual({ name: "🔔 fix login" });
 });
 
 test("a thread named with the old ⏸ (no U+FE0F) mark is still recognized: its mark is replaced, never doubled", async () => {
   const legacy = threadAs("\u23F8 fix login");
-  await threadHook(legacy.dc, "reply", `discord:${T}`, "back on it", emoji);
-  expect(legacy.json(3)).toEqual({ name: "🔄 fix login" });
-  const waiting = threadAs("\u23F8 fix login");
+  await setThreadStatus(legacy.dc, T, "working", emoji);
+  expect(legacy.json(1)).toEqual({ name: "🔄 fix login" });
+  const waiting = threadAs("\u23F8\uFE0F fix login");
   await threadHook(waiting.dc, "wait", `discord:${T}`, "still waiting", emoji);
-  expect(waiting.json(3)).toEqual({ name: "\u23F8\uFE0F fix login" });
+  expect(waiting.json(3)).toEqual({ name: "🔔 fix login" });
 });
 
 test("a status that already holds sends no rename, since Discord allows only about two per ten minutes", async () => {
-  const f = threadAs("🔄 fix login");
+  const f = threadAs("🔔 fix login");
   await threadHook(f.dc, "reply", `discord:${T}`, "tests are green", emoji);
   expect(f.calls().filter((c) => c.startsWith("PATCH"))).toEqual([]);
   const words = threadAs("fix login");
   await threadHook(words.dc, "reply", `discord:${T}`, "started", defaultDiscordWords);
-  expect(words.json(3)).toEqual({ name: "[working] fix login" });
+  expect(words.json(3)).toEqual({ name: "[waiting] fix login" });
 });
 
 test("the progress message reads working:/done: in words, ⏳ · / ✅ with emoji", () => {

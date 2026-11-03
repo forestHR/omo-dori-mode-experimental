@@ -240,6 +240,32 @@ test("the owner writing in a closed thread reopens it as working; an open thread
   expect(logs.filter((l) => l.startsWith("THREAD_REOPENED"))).toEqual(["THREAD_REOPENED 501", "THREAD_REOPENED 502"]);
 });
 
+test("the owner answering while our reply's 🔔 still waits out a 429 replaces it with working before it is applied", async () => {
+  const { listener, cards } = setup((req) => (/\/channels\/521$/.test(req.url) ? { parent_id: CHANNEL, name: "🔄 talking", type: 11, thread_metadata: { archived: false } } : {}));
+  mkdirSync(`${state.dir}/discord`, { recursive: true });
+  writeFileSync(`${state.dir}/discord/thread-status.json`, JSON.stringify({ "521": { status: "waiting", due: Date.parse("2026-01-02T03:10:00Z"), tries: 1, rev: 1 } }));
+  await listener.onMessage(msg("3001", { channel_id: "521" }));
+  expect(cards.statuses.pending("521")).toBe("working");
+});
+
+test("the owner answering a thread that showed his turn (🔔 with no card, the old ⏸️, ❗) makes it ours again, and one that ended ⛔ or 💤 reopens", async () => {
+  const names: Record<string, string> = { "511": "🔔 asked you", "512": "⏸️ old wait", "513": "❗ 🔐 share failed", "514": "⛔ ✉️ cancelled mail", "515": "💤 ✉️ replaced draft" };
+  const { listener, seen, logs } = setup((req) => {
+    const id = /\/channels\/(\d+)$/.exec(req.url)?.[1] ?? "";
+    return id in names ? { parent_id: CHANNEL, name: names[id], type: 11, thread_metadata: { archived: id === "514" || id === "515" } } : {};
+  });
+  for (const [n, thread] of Object.keys(names).entries()) await listener.onMessage(msg(`200${n}`, { channel_id: thread }));
+  const patches = seen.filter((r) => r.method === "PATCH").map((r) => [r.url.replace("https://discord.com/api/v10", ""), JSON.parse(String(r.body)).name]);
+  expect(patches).toEqual([
+    ["/channels/511", "🔄 asked you"],
+    ["/channels/512", "🔄 old wait"],
+    ["/channels/513", "🔄 🔐 share failed"],
+    ["/channels/514", "🔄 ✉️ cancelled mail"],
+    ["/channels/515", "🔄 ✉️ replaced draft"],
+  ]);
+  expect(logs.filter((l) => /^THREAD_(REOPENED|ANSWERED)/.test(l))).toEqual(["THREAD_ANSWERED 511", "THREAD_ANSWERED 512", "THREAD_ANSWERED 513", "THREAD_REOPENED 514", "THREAD_REOPENED 515"]);
+});
+
 test("a voice note is transcribed into the inbox row; a failed transcription still records the message", async () => {
   let fail = false;
   const { listener, inbox, logs } = setup(() => ({}), { transcribe: async () => { if (fail) throw new Error("stt down"); return "ship it"; } });
@@ -306,7 +332,7 @@ test("with no owner webhook set, a webhook recording in the channel lands transc
 });
 
 test("a tap on a card inside its work thread is taken, lands in the inbox with its session and tmux, and turns the thread working; a tap from an unrelated channel is ignored", async () => {
-  const { listener, cards, gw, inbox, calls } = setup((req) => (req.method === "GET" ? { name: "⏸️ fix login", type: 11 } : req.method === "POST" && req.url.endsWith(`/channels/${THREAD}/messages`) ? { id: "900" } : {}));
+  const { listener, cards, gw, inbox, calls } = setup((req) => (req.method === "GET" ? { name: "🔔 fix login", type: 11 } : req.method === "POST" && req.url.endsWith(`/channels/${THREAD}/messages`) ? { id: "900" } : {}));
   await cards.ask("Ship?", ["Yes", "No"], { thread: THREAD, session: "sess-1", tmux: "aoe_demo_1234abcd" });
   expect(calls()[0]).toBe(`POST /channels/${THREAD}/messages`);
   const before = calls().length;
