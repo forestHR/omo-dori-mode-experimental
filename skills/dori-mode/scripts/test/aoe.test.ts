@@ -516,6 +516,14 @@ test("a herdr pending lane waiting on a background job of its own is not told; o
   expect((await watchTick(deps)).filter((l) => /^LANE_NO_GOAL/.test(l))).toEqual([]);
 });
 
+test("a herdr omo lane whose agent is gone before its goal is left to the lane death check, as on aoe: no LANE_NO_GOAL, the mark stays", async () => {
+  const sessions = join(state.dir, "sessions");
+  world.ps = "500 1 bash";
+  const deps = herdrWatch(sessions, ["omo", "--model", "{model}", "{prompt}"]);
+  await deps.registry.write({ key: "hp", title: "hp", thread: "none", brief: "/b", done: "file /x", openedAt: "2026-01-01T00:00:00Z", pane: "w:p9", session: ID, cwd: "/tmp/w", pendingGoal: { idle: 0 } });
+  expect((await watchTick(deps)).filter((l) => /^LANE_NO_GOAL/.test(l))).toEqual([]);
+  expect((await deps.registry.read("hp"))?.pendingGoal).toEqual({ idle: 0 });
+});
 
 test("a job record from before the agent's own start (a restarted session) keeps no first turn on: three idle reads say LANE_NO_GOAL", async () => {
   const sessions = join(state.dir, "sessions");

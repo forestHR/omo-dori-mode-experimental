@@ -13,7 +13,7 @@ import { leadLimitTick, limitResumeTick } from "./lead-limit.ts";
 import { missedAnswersTick } from "./missed-answers.ts";
 import { hasThread, type Lane, type Registry, statusOf, type ThreadPost, withStatus } from "./registry.ts";
 import { type Clock, iso, type Runner } from "./run.ts";
-import { omoPane, sendVerified, submitToPane } from "./panes.ts";
+import { omoPane, omoSession, sendVerified, submitToPane } from "./panes.ts";
 import { pendingGoalTick } from "./pending-goal.ts";
 import type { Submitted } from "./submit.ts";
 import { replacementOf } from "./frozen.ts";
@@ -502,7 +502,7 @@ export const watchTick = async (deps: FlowDeps): Promise<string[]> => {
     out.push(...(await settle(deps, (await deps.registry.read(lane.key)) ?? lane, claim.evidence)));
   }
   out.push(...(await pendingGoalTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN pending goal check: ${String(e).slice(0, 200)}`])));
-  if (deps.config.backend === "aoe") {
+  if (omoSession(deps.config)) {
     out.push(...(await blockedTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN blocked check: ${String(e).slice(0, 200)}`])));
     out.push(...(await autoturnTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN autoturn check: ${String(e).slice(0, 200)}`])));
     out.push(...(await missedAnswersTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN missed answer check: ${String(e).slice(0, 200)}`])));

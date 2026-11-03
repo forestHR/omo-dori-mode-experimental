@@ -109,8 +109,9 @@ export const noGoalText = (key: string): string => `[DORI] LANE_NO_GOAL ${key}: 
 // dori watch: each lane dori launch marked pending (STARTUP_PENDING_GOAL) is read again. A goal clears the mark
 // (LANE_GOAL_SET); a running turn or a background job of its own resets the idle count kept on the mark; the third idle
 // read in a row says LANE_NO_GOAL and types one line into the lead's pane, once (no retry, like a lane's death:
-// LANE_NO_GOAL_TOLD or _NOT_TOLD), and clears the mark. A lane whose agent is gone is left to the lane death check on aoe;
-// on herdr, which has none, it is LANE_NO_GOAL_AGENT_GONE, told once the same way. Working and not-done lanes are read;
+// LANE_NO_GOAL_TOLD or _NOT_TOLD), and clears the mark. A lane whose agent is gone is left to the lane death check where
+// dori watch runs one (aoe, and herdr with omo: panes.ts omoSession); with another herdr agent, which has none, it is
+// LANE_NO_GOAL_AGENT_GONE, told once the same way. Working and not-done lanes are read;
 // paused, claimed and closed ones, and a lane that names no session, are skipped.
 export const pendingGoalTick = async (deps: FlowDeps): Promise<string[]> => {
   const out: string[] = [];
@@ -118,7 +119,7 @@ export const pendingGoalTick = async (deps: FlowDeps): Promise<string[]> => {
     const mark = lane.pendingGoal;
     if (!mark || !lane.pane || !["working", "not-done"].includes(statusOf(lane)) || (!lane.session && !deps.readGoal)) continue;
     const gone = await agentGone(deps, lane.pane);
-    if (gone && deps.config.backend === "aoe") continue;
+    if (gone && omoPane(deps.config, lane.pane)) continue;
     if (gone) {
       await deps.registry.patch(lane.key, { pendingGoal: undefined });
       out.push(`LANE_NO_GOAL_AGENT_GONE ${lane.key} ${lane.pane}: ${gone} before it set a goal`);

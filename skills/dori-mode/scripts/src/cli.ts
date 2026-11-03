@@ -5,7 +5,9 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import { currentTmuxSession, paneActivity } from "./aoe.ts";
+import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
+import { isHerdrPane } from "./herdr.ts";
+import { reviveHerdr } from "./herdr-sessions.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
@@ -76,7 +78,11 @@ import { transcribe, TranscriptionError } from "./messenger/voice.ts";
 
 const USAGE = `dori <command> [options]
 
-  lead                                 print the live lead as "<aoe-id> <tmux-session>"
+  lead                                 print the live lead as "<aoe-id> <tmux-session>" (herdr: "<omo session id> <pane>"),
+                                       " stopped" after it when its session or agent is not running
+  revive <herdr pane> [--text TEXT]    start the omo session recorded for a herdr pane whose agent is gone again in that
+                                       pane (omo --session-id), wait for its prompt and type TEXT; REVIVE_OK or REVIVE_FAIL;
+                                       a pane whose agent runs is left alone (REVIVE_ALREADY_RUNNING)
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" --thread REF|new [--why-new "<reason>"] | --no-thread "<reason>" [--model M] [--cwd DIR] [--tag T ...] [--done-weak-ok]
          [--goal "owner words"] [--challenge-before STEP ...] [--use-gpu] [--ui] [--dry-run]
                                        every lane opens with a work thread (the owner's long work gets one): --thread REF
@@ -169,8 +175,8 @@ const USAGE = `dori <command> [options]
                                        nothing without launchEnv); used by setups/discord-aoe/self-restart.sh
   sync   [--write]                     registry vs live panes; read-only unless --write; a SIGNALS line per open lane with a record
   claim-done [<key>] --evidence TEXT [--summary TEXT] [--posted ID|LINK] [--post-summary]
-                                       key defaults to the lane registered for this pane (its herdr pane, else the tmux session
-                                       it runs in); --summary: 2 to 5 plain lines for the owner's thread in his language.
+                                       key defaults to the lane registered for this pane (the tmux session it runs in, else
+                                       $HERDR_PANE_ID); --summary: 2 to 5 plain lines for the owner's thread in his language.
                                        The result reaches the thread once: when this lane's session posted in its work thread
                                        (dori send, dori thread) in the last 30 minutes, or --posted names that message, it is
                                        the result (RESULT_ALREADY_POSTED) and the close posts no summary; --post-summary: that
@@ -1847,6 +1853,19 @@ try {
     case "lead":
       console.log(await findLead(run, config));
       break;
+    case "revive": {
+      const pane = key ?? die("usage: dori revive <herdr pane> [--text TEXT]");
+      if (!isHerdrPane(pane)) die("revive takes a herdr pane id (an aoe session restarts with self-restart.sh)");
+      // dori never ends a live herdr agent: only a pane whose agent is gone is started again
+      if ((await paneLife(run, pane)).live) {
+        console.log(`REVIVE_ALREADY_RUNNING ${pane}`);
+        break;
+      }
+      const line = await reviveHerdr(run, realClock, config, pane, opt("text") ?? "", (p, t) => sendVerified(run, realClock, config, p, t));
+      console.log(line);
+      if (!line.startsWith("REVIVE_OK")) process.exitCode = 1;
+      break;
+    }
     case "thread": {
       await quietGuard();
       const [verb, ref, text] = flags.positionals;
