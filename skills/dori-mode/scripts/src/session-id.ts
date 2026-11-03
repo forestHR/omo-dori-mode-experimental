@@ -9,13 +9,27 @@ import type { Runner } from "./run.ts";
 export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string };
 export type SessionHit = { readonly id: string; readonly via: "argv" | "child-env" | "start-time" | "none"; readonly pid?: number };
 
-export const AGENT = /senpi\/dist\/bundle\/cli\.js|(^|\/)omo(\s|$)/;
+// omo on Linux and macOS (senpi's bundle under bun, or the omo command), and on Windows (the same bundle path with
+// backslashes, or omo.exe / omo-windows-x64.exe, quoted as Win32_Process shows a command line with spaces in its path)
+export const AGENT = /senpi[\\/]dist[\\/]bundle[\\/]cli\.js|(^|[\\/"])omo(-windows-[a-z0-9]+)?(\.exe)?"?(\s|$)/i;
 const ENV_ID = /(?:^|\s)PI_SESSION_ID=([0-9a-f-]{36})(?:\s|$)/;
 export const SESSION_FILE = /^(\d{4}-\d\d-\d\dT\d\d)-(\d\d)-(\d\d)-(\d{3})Z_([0-9a-f-]{36})\.jsonl$/;
 const START_WINDOW_MS = 180_000;
 
-export const procTable = async (run: Runner): Promise<Proc[]> =>
-  (await run(["ps", "-A", "-o", "pid=,ppid=,stat=,command="])).out.split("\n").flatMap((line) => {
+// Windows has no ps: its process table comes from Win32_Process (pid, parent, command line; no state letters)
+export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress"];
+
+export const winProcs = (json: string): Proc[] => {
+  try {
+    const rows = JSON.parse(json || "[]") as { ProcessId?: number; ParentProcessId?: number; CommandLine?: string | null } | { ProcessId?: number; ParentProcessId?: number; CommandLine?: string | null }[];
+    return (Array.isArray(rows) ? rows : [rows]).flatMap((r) => (r.ProcessId ? [{ pid: r.ProcessId, ppid: r.ParentProcessId ?? 0, cmd: r.CommandLine ?? "", stat: "" }] : []));
+  } catch {
+    return [];
+  }
+};
+
+export const procTable = async (run: Runner, platform: string = process.platform): Promise<Proc[]> =>
+  platform === "win32" ? winProcs((await run(WIN_PROCS)).out) : (await run(["ps", "-A", "-o", "pid=,ppid=,stat=,command="])).out.split("\n").flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
     return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), stat: m[3] ?? "", cmd: m[4] ?? "" }] : [];
   });

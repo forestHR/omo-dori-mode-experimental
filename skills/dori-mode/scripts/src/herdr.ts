@@ -67,7 +67,14 @@ export const shellQuote = (arg: string): string => (/^[\w./:@=+,-]+$/.test(arg) 
 
 // The line a pane's shell runs to start the agent: env(1) sets and removes the session's variables (an undefined value
 // removes one, as laneEnv asks for a --use-gpu lane), so the agent starts as asked whatever the server's environment holds.
-export const agentLine = (argv: readonly string[], env: Readonly<Record<string, string | undefined>> = {}): string => {
+// On Windows a herdr pane runs PowerShell (herdr 0.9.5): there a line starting with a quoted path is an expression, so the
+// command goes after the call operator &, words in single quotes ('' for a quote), and the variables are set before it.
+export const agentLine = (argv: readonly string[], env: Readonly<Record<string, string | undefined>> = {}, platform: string = process.platform): string => {
+  if (platform === "win32") {
+    const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+    const vars = Object.entries(env).map(([k, v]) => (v === undefined ? `Remove-Item Env:${k} -ErrorAction SilentlyContinue; ` : `$env:${k} = ${q(v)}; `)).join("");
+    return `${vars}& ${argv.map(q).join(" ")}`;
+  }
   const unset = Object.entries(env).flatMap(([k, v]) => (v === undefined ? ["-u", k] : []));
   const set = Object.entries(env).flatMap(([k, v]) => (v === undefined ? [] : [`${k}=${v}`]));
   return [...(unset.length || set.length ? ["env", ...unset, ...set] : []), ...argv].map(shellQuote).join(" ");
