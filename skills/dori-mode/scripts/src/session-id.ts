@@ -1,5 +1,5 @@
 import { readdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import { tmuxPanePid } from "./aoe.ts";
 import type { Backend } from "./config.ts";
@@ -76,6 +76,35 @@ export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// A Windows command line split the way CommandLineToArgvW splits it: quotes group words, 2n backslashes before a quote
+// give n backslashes and toggle quoting, 2n+1 give n and a literal quote, "" inside quotes is a literal quote, and other
+// backslashes are literal.
+export const winArgv = (line: string): string[] => {
+  const out: string[] = [];
+  let word = "";
+  let inWord = false;
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "\\") {
+      let n = 0;
+      while (line[i] === "\\") { n++; i++; }
+      if (line[i] === '"') { word += "\\".repeat(Math.floor(n / 2)); if (n % 2) word += '"'; else { quoted = !quoted; } }
+      else { word += "\\".repeat(n); i--; }
+      inWord = true;
+    } else if (c === '"') {
+      if (quoted && line[i + 1] === '"') { word += '"'; i++; } else quoted = !quoted;
+      inWord = true;
+    } else if ((c === " " || c === "\t") && !quoted) {
+      if (inWord) out.push(word);
+      word = "";
+      inWord = false;
+    } else { word += c; inWord = true; }
+  }
+  if (inWord) out.push(word);
+  return out;
+};
+
 // The exact session an agent's command line names: --session-id <id> (omo: "use exact project session ID"), or
 // --session <path to the session .jsonl> (the uuid at the end of that file name; aoe resumes a session this way) or a
 // whole uuid. "" when it names none, or only a partial uuid omo would resolve itself (which session that is, is not known).
@@ -83,7 +112,7 @@ export const argvSessionId = (argv: readonly string[]): string => {
   const flagAt = argv.findIndex((a) => a === "--session" || a === "--session-id");
   const value = flagAt >= 0 ? (argv[flagAt + 1] ?? "") : "";
   if (argv[flagAt] === "--session-id") return value;
-  if (value.endsWith(".jsonl")) return SESSION_FILE.exec(basename(value))?.[5] ?? "";
+  if (value.endsWith(".jsonl")) return SESSION_FILE.exec(value.split(/[\\/]/).pop() ?? "")?.[5] ?? "";
   return UUID.test(value) ? value : "";
 };
 
@@ -103,7 +132,7 @@ export const resolveSession = async (pane: string, cwd: string, table: readonly 
   const shellPid = await shellPidOf(pane, deps);
   const agent = topAgent(table, shellPid);
   if (!agent) return { id: "", via: "none" };
-  const argv = agent.cmd.split(/\s+/);
+  const argv = process.platform === "win32" ? winArgv(agent.cmd) : agent.cmd.split(/\s+/);
   const fromFlag = argvSessionId(argv);
   if (fromFlag) return { id: fromFlag, via: "argv", pid: agent.pid };
   // a selector omo resolves itself (a partial --session uuid, --continue, --resume, --fork, --rebind) can open an older

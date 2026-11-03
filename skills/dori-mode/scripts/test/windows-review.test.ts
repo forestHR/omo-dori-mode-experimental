@@ -6,6 +6,7 @@ import { herdrLeadSession, readHerdrSessions, recordHerdrSession, reviveHerdr } 
 import { run, type Runner } from "../src/run.ts";
 import { powershellLiteral as quote } from "../src/powershell.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld } from "./fakes.ts";
+import { argvSessionId, winArgv } from "../src/session-id.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -95,3 +96,39 @@ test.skipIf(process.platform !== "win32")("review 1 records a native lead starte
     await child.exited;
   }
 }, 40_000);
+
+test("review 5 splits a Windows command line with CommandLineToArgvW quoting", () => {
+  // Given command lines as Win32_Process reports them.
+  const resumed = `"C:\\Program Files\\omo\\omo.exe" --session "C:\\work dir\\2026-11-03T08-00-00-000Z_${session}.jsonl" --model m`;
+  // Then quoted words stay whole and backslash runs follow the Windows rules.
+  expect(winArgv(resumed)).toEqual(["C:\\Program Files\\omo\\omo.exe", "--session", `C:\\work dir\\2026-11-03T08-00-00-000Z_${session}.jsonl`, "--model", "m"]);
+  expect(argvSessionId(winArgv(resumed))).toBe(session);
+  expect(winArgv('a\\\\"b c" d')).toEqual(["a\\b c", "d"]);
+  expect(winArgv('a\\\\\\"b c')).toEqual(['a\\"b', "c"]);
+  expect(winArgv('"x""y" ""')).toEqual(['x"y', ""]);
+  expect(winArgv("C:\\dir\\omo.exe   -c\t")).toEqual(["C:\\dir\\omo.exe", "-c"]);
+});
+
+test.skipIf(process.platform !== "win32")("review 5 records a lead resumed from a quoted session path with spaces", async () => {
+  // Given a live lead whose Windows command line resumes a session file under a directory with a space.
+  const dir = temporary();
+  const sessions = join(dir, "sessions");
+  const file = `C:\\work dir\\2026-11-03T08-00-00-000Z_${session}.jsonl`;
+  const table = [
+    { ProcessId: 4242, ParentProcessId: 1, CommandLine: "pwsh.exe", ExecutablePath: "C:\\pwsh\\pwsh.exe", StartedAt: "2026-11-03T07:59:00.000Z" },
+    { ProcessId: 4243, ParentProcessId: 4242, CommandLine: `"C:\\Program Files\\omo\\omo.exe" --session "${file}"`, ExecutablePath: "C:\\Program Files\\omo\\omo.exe", StartedAt: "2026-11-03T08:00:00.000Z" },
+  ];
+  const runner: Runner = async (argv) => {
+    if (argv[0] === "powershell") return { code: 0, out: JSON.stringify(table), err: "" };
+    if (argv[0] !== "herdr") throw new TypeError(`unexpected command ${argv[0]}`);
+    const result = argv[2] === "process-info"
+      ? { process_info: { shell_pid: 4242 } }
+      : argv[1] === "pane" ? { panes: [{ pane_id: "w1:p1", cwd: "C:\\work dir" }] } : { tabs: [] };
+    return { code: 0, out: JSON.stringify({ result }), err: "" };
+  };
+  // When the lead's session is read from that process table.
+  const id = await herdrLeadSession(runner, { stateDir: dir, sessionsDir: sessions }, "w1:p1", true);
+  // Then the session named by the quoted path is recorded.
+  expect(id).toBe(session);
+  expect(readHerdrSessions(dir)["w1:p1"]).toMatchObject({ session });
+});
