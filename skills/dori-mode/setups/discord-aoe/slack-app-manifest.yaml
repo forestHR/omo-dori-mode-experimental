@@ -21,6 +21,7 @@ oauth_config:
       - im:history
       - chat:write
       - reactions:write
+      - files:write # dori send slack --file
       - users:read
       # - channels:history
       # - groups:history

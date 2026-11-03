@@ -60,16 +60,20 @@ test("text carrying a $( substitution is refused before any request goes out, on
   expect(seen).toHaveLength(0);
 });
 
-test("a Slack upload asks for an upload URL, sends the bytes there, then shares the file into the thread", async () => {
+test("a Slack upload asks for an upload URL per file, sends the bytes there, then shares all files as one message into the thread", async () => {
+  let slots = 0;
   const { http, seen } = fakeHttp((req) => {
-    if (req.url.endsWith("files.getUploadURLExternal")) return ok({ ok: true, upload_url: "https://files.example/up/1", file_id: "F1" });
+    if (req.url.endsWith("files.getUploadURLExternal")) return ok({ ok: true, upload_url: `https://files.example/up/${++slots}`, file_id: `F${slots}` });
     if (req.url.startsWith("https://files.example")) return { status: 200, headers: {}, body: "OK" };
     return ok({ ok: true });
   });
-  const id = await new Slack(http, sleeps().clock, { token: "t" }).upload("C1", "report.png", new Uint8Array([1, 2, 3]), "5.6");
-  expect(id).toBe("F1");
-  expect(seen.map((r) => r.url.split("/").pop())).toEqual(["files.getUploadURLExternal", "1", "files.completeUploadExternal"]);
-  expect(JSON.parse(String(seen[2]?.body))).toMatchObject({ channel_id: "C1", thread_ts: "5.6" });
+  const file = (filename: string, bytes: number[]) => ({ filename, length: bytes.length, read: async () => new Uint8Array(bytes) });
+  const files = [file("report.png", [1, 2, 3]), file("deck.pdf", [4])];
+  const ids = await new Slack(http, sleeps().clock, { token: "t" }).upload("C1", files, "5.6", "the deck");
+  expect(ids).toEqual(["F1", "F2"]);
+  expect(seen.map((r) => r.url.split("/").pop())).toEqual(["files.getUploadURLExternal", "1", "files.getUploadURLExternal", "2", "files.completeUploadExternal"]);
+  expect(JSON.parse(String(seen[2]?.body))).toEqual({ filename: "deck.pdf", length: 1 });
+  expect(JSON.parse(String(seen[4]?.body))).toEqual({ files: [{ id: "F1", title: "report.png" }, { id: "F2", title: "deck.pdf" }], channel_id: "C1", thread_ts: "5.6", initial_comment: "the deck" });
 });
 
 test("a Telegram reply starts as Thinking…, streams drafts no faster than the interval, then persists as a real message", async () => {

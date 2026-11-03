@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { run } from "../src/run.ts";
 import { withState } from "./fakes.ts";
 
@@ -295,3 +295,103 @@ for (const [name, args, parent, out] of [
     }
   });
 }
+
+// 2026-11-03: the owner wants OkDori to put the AX-MVP deck (pptx, PDF) and demo video into Slack itself; send had no
+// --file, so Slack.upload had no caller and the Dori could only post a Drive link
+const fakeSlack = () => {
+  const calls: { path: string; body: unknown }[] = [];
+  let slots = 0;
+  let port = 0;
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: async (req) => {
+      const path = new URL(req.url).pathname;
+      if (path.startsWith("/up/")) {
+        const bytes = new Uint8Array(await req.arrayBuffer());
+        calls.push({ path, body: new TextDecoder().decode(bytes) });
+        return new Response("OK");
+      }
+      const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      calls.push({ path, body });
+      if (path === "/api/files.getUploadURLExternal") return Response.json({ ok: true, upload_url: `http://127.0.0.1:${port}/up/${++slots}`, file_id: `F${slots}` });
+      if (path === "/api/files.completeUploadExternal") return Response.json({ ok: true, files: body.files });
+      if (path === "/api/chat.postMessage") return Response.json({ ok: true, channel: body.channel, ts: "1700000100.000100" });
+      if (path === "/api/reactions.remove") return Response.json({ ok: true });
+      return Response.json({ ok: false, error: "unknown_method" });
+    },
+  });
+  port = server.port ?? 0;
+  return { calls, server };
+};
+const slackCli = (dir: string, port: number | undefined, args: readonly string[]) =>
+  run(["env", `DORI_CONFIG=${join(dir, "missing.json")}`, `DORI_STATE_DIR=${dir}`, `DORI_ENV_FILE=${join(dir, "missing.env")}`, "DORI_SLACK_TOKEN=xoxb-fake", "DORI_DISCORD_TOKEN=fake", `DORI_SLACK_API=http://127.0.0.1:${port}/api`,
+    "bun", join(import.meta.dir, "../src/cli.ts"), "send", ...args]);
+
+test("send slack --file uploads every file to its own URL, then shares them as one message with the text in the thread, once", async () => {
+  const { calls, server } = fakeSlack();
+  const state = withState();
+  try {
+    writeFileSync(join(state.dir, "deck.pdf"), "pdf bytes");
+    writeFileSync(join(state.dir, "demo.mp4"), "video");
+    // the owner's message the watcher put eyes on: the files answer it in its thread, so the eyes come off as for a text
+    mkdirSync(join(state.dir, "discord"));
+    writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${JSON.stringify({ scope: "slack", id: "1700000000.000001", channel_id: "C1", reply_thread: "1700000000.000001", addressed: "mention" })}\n`);
+    const args = ["slack", "--to", "C1", "--file", join(state.dir, "deck.pdf"), "--file", join(state.dir, "demo.mp4"), "--text", "AX-MVP 발표자료", "--thread", "1700000000.000001"];
+    const r = await slackCli(state.dir, server.port, args);
+    expect({ code: r.code, out: r.out, calls }).toEqual({
+      code: 0, out: "SENT F1,F2", calls: [
+        { path: "/api/files.getUploadURLExternal", body: { filename: "deck.pdf", length: 9 } },
+        { path: "/up/1", body: "pdf bytes" },
+        { path: "/api/files.getUploadURLExternal", body: { filename: "demo.mp4", length: 5 } },
+        { path: "/up/2", body: "video" },
+        { path: "/api/files.completeUploadExternal", body: { files: [{ id: "F1", title: "deck.pdf" }, { id: "F2", title: "demo.mp4" }], channel_id: "C1", thread_ts: "1700000000.000001", initial_comment: "AX-MVP 발표자료" } },
+        { path: "/api/reactions.remove", body: { channel: "C1", timestamp: "1700000000.000001", name: "eyes" } },
+      ],
+    });
+    // the same files and text again within 10 minutes are not shared twice
+    const again = await slackCli(state.dir, server.port, args);
+    expect({ code: again.code, duplicate: again.out.startsWith("SEND_DUPLICATE F1,F2"), calls: calls.length }).toEqual({ code: 0, duplicate: true, calls: 6 });
+    // a file alone needs no text, and a text-only send still posts a message
+    const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
+    const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--text", "글만"]);
+    expect({ bare: bare.out, share: calls[8]?.body, text: text.out, post: calls.at(-1) }).toEqual({
+      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", post: { path: "/api/chat.postMessage", body: { channel: "C1", text: "글만" } },
+    });
+  } finally {
+    server.stop(true);
+    state.done();
+  }
+});
+
+test("send --file refuses a missing, empty, too big or non-regular file, more than 10 files, other platforms and --edit before any request", async () => {
+  const { calls, server } = fakeSlack();
+  const state = withState();
+  try {
+    const ok = join(state.dir, "ok.txt");
+    writeFileSync(ok, "x");
+    writeFileSync(join(state.dir, "empty.txt"), "");
+    mkdirSync(join(state.dir, "folder"));
+    writeFileSync(join(state.dir, "big.bin"), "");
+    truncateSync(join(state.dir, "big.bin"), 1024 ** 3 + 1); // sparse: over Slack's 1 GB without the disk space
+    const cases: [string, string[]][] = [
+      ["SEND_FILE_MISSING", ["slack", "--to", "C1", "--file", ok, "--file", join(state.dir, "nope.pptx")]],
+      ["SEND_FILE_REFUSED", ["slack", "--to", "C1", "--file", join(state.dir, "empty.txt")]],
+      ["SEND_FILE_REFUSED", ["slack", "--to", "C1", "--file", join(state.dir, "folder")]],
+      ["SEND_FILE_TOO_BIG", ["slack", "--to", "C1", "--file", join(state.dir, "big.bin")]],
+      ["SEND_FILE_REFUSED", ["slack", "--to", "C1", ...Array.from({ length: 11 }, () => ["--file", ok]).flat()]],
+      ["SEND_FILE_REFUSED", ["slack", "--to", "C1", "--file", ""]],
+      ["SEND_FILE_REFUSED", ["discord", "--to", "channel", "--file", ok, "--text", "x"]],
+      ["SEND_FILE_REFUSED", ["slack", "--to", "C1", "--edit", "1.2", "--file", ok, "--text", "x"]],
+    ];
+    const got = [];
+    for (const [, args] of cases) {
+      const r = await slackCli(state.dir, server.port, args);
+      got.push({ code: r.code, line: r.err.split(" ")[0] });
+    }
+    expect({ got, calls }).toEqual({ got: cases.map(([line]) => ({ code: 2, line })), calls: [] });
+  } finally {
+    server.stop(true);
+    state.done();
+  }
+});

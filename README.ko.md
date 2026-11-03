@@ -188,6 +188,7 @@ CLI에는 Dori에게 필요한 메신저 기능도 들어 있습니다. `scripts
 | 명령 | 하는 일 |
 |---|---|
 | `dori send slack\|telegram\|discord --to T --text X [--thread ID] [--edit ID]` | 메시지 보내기와 수정. rate limit은 기다렸다 다시 보내고, `$(`가 들어간 글은 거부합니다 |
+| `dori send slack --to C --file PATH [--file PATH ...] [--text X] [--thread TS]` | 파일을 10개까지(하나 1GB까지) 올려 글과 함께 슬랙 메시지 하나로 공유합니다. 없거나 비었거나 너무 큰 파일은 보내기 전에 거부합니다 |
 | `dori presence slack\|discord` | 계정을 온라인으로 유지. 디스코드 봇은 게이트웨이로, 슬랙 사용자 계정은 1분마다 신호를 보내는 웹 클라이언트 소켓으로 유지합니다 |
 | `dori transcribe <file>` | `hooks.transcribe` 명령으로 음성 메시지를 글로 변환 |
 | `dori can-launch` | 레인을 하나 더 열 여유가 있는지 확인 |

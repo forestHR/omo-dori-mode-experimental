@@ -187,6 +187,7 @@ CLI 还带有 Dori 需要的消息相关功能，也可以作为 `scripts/src/me
 | 命令 | 作用 |
 |---|---|
 | `dori send slack\|telegram\|discord --to T --text X [--thread ID] [--edit ID]` | 发送或编辑消息。遇到限流会等待后重发，含有 `$(` 的文字会被拒绝 |
+| `dori send slack --to C --file PATH [--file PATH ...] [--text X] [--thread TS]` | 上传最多 10 个文件（每个不超过 1GB），并与文字一起作为一条 Slack 消息分享；不存在、为空或过大的文件在发送前即被拒绝 |
 | `dori presence slack\|discord` | 让账号保持在线显示。Discord 机器人通过网关保持;Slack 用户账号通过每分钟发一次信号的网页客户端连接保持 |
 | `dori transcribe <file>` | 用 `hooks.transcribe` 的命令把语音消息转成文字 |
 | `dori can-launch` | 看看还有没有余量再开一条 lane |

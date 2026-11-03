@@ -2,7 +2,7 @@
 // allow: SIZE_OK — existing command dispatcher; command behavior lives in separate modules.
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
@@ -56,7 +56,7 @@ import { canLaunch } from "./routing.ts";
 import { normFix, recordFix } from "./same-fix.ts";
 import { computeScorecard, dayWindow, formatScorecard, saveScorecard, ScorecardError } from "./scorecard.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
-import { clearEyes, Slack, slackUnreact } from "./messenger/slack.ts";
+import { clearEyes, Slack, slackUnreact, type UploadFile } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -318,7 +318,11 @@ const USAGE = `dori <command> [options]
                                        content; restore "yesterday 21:00" (stateGit.timeZone) commits first, so it can
                                        be undone; loop is what dori-lanes runs every stateGit.everyMin minutes
   send <slack|telegram|discord> --to TARGET --text TEXT | --text-file FILE [--thread ID] [--edit ID] [--status working|done] [--no-typing] [--ping USER_ID] [--reply ID] [--again]
+  send slack --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread TS] [--again]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN);
+                                       --file (slack, up to 10, 1 GB each) uploads the files and shares them as one message
+                                       with the text, in the thread with --thread (SENT <file ids>); a missing, empty or too
+                                       big file is refused before anything is sent (SEND_FILE_MISSING|REFUSED|TOO_BIG, exit 2)
                                        --text-file posts the file's text (real line breaks) the same way as --text. A text
                                        with a literal \n and no real line break outside code is refused before anything is
                                        sent (SEND_LITERAL_NEWLINE, exit 2; also thread reply|wait|done|open --first, ask,
@@ -543,6 +547,36 @@ const textOrFile = async (inline: string | undefined, usage: string): Promise<st
   const file = opt("text-file");
   if (file && inline) die(`${usage}: give --text-file or the text, not both`);
   return file ? (await Bun.file(file).text()).trim() || die(`${usage}: ${file} is empty`) : inline || die(usage);
+};
+// dori send slack --file: every path is checked before anything goes out (Slack takes up to 1 GB a file and refuses an
+// empty one); the sha256 (streamed, the bytes are read again only for the upload) joins the repeat key, so the same
+// files again within 10 minutes are not reshared
+const SLACK_FILE_MAX = 1024 ** 3;
+const SLACK_FILES_MAX = 10;
+const readUploads = async (paths: readonly string[]): Promise<(UploadFile & { sha: string })[]> => {
+  if (paths.length > SLACK_FILES_MAX) die(`SEND_FILE_REFUSED ${paths.length} files: one send shares at most ${SLACK_FILES_MAX}; nothing was sent`, 2);
+  for (const p of paths) {
+    const st = statSync(p, { throwIfNoEntry: false }) ?? die(`SEND_FILE_MISSING ${p}: no such file; nothing was sent`, 2);
+    if (!st.isFile()) die(`SEND_FILE_REFUSED ${p}: not a regular file; nothing was sent`, 2);
+    const size = st.size;
+    if (size === 0) die(`SEND_FILE_REFUSED ${p}: the file is empty (Slack takes no 0-byte upload); nothing was sent`, 2);
+    if (size > SLACK_FILE_MAX) die(`SEND_FILE_TOO_BIG ${p}: ${size} bytes, over Slack's ${SLACK_FILE_MAX} bytes (1 GB) a file; nothing was sent`, 2);
+  }
+  const out: (UploadFile & { sha: string })[] = [];
+  for (const p of paths) {
+    const hash = new Bun.CryptoHasher("sha256");
+    let length = 0;
+    for await (const chunk of Bun.file(p).stream()) {
+      hash.update(chunk);
+      length += chunk.byteLength;
+    }
+    out.push({ filename: basename(p), length, sha: hash.digest("hex"), read: async () => {
+      const bytes = new Uint8Array(await Bun.file(p).arrayBuffer());
+      if (bytes.byteLength !== length) throw new Error(`SEND_FILE_CHANGED ${p}: ${length} bytes when checked, ${bytes.byteLength} now; the upload stopped before it was shared`);
+      return bytes;
+    } });
+  }
+  return out;
 };
 // a bare --thread (no value) is a thread ref that came out empty, not a lane without a thread
 const threadOpt = (): string | undefined => (flags.values.thread === true ? "" : opt("thread"));
@@ -1631,14 +1665,20 @@ try {
     case "send": {
       await quietGuard();
       const platform = key ?? die("send needs slack, telegram or discord");
-      onlyOptions("send", ["to", "text", "text-file", "thread", "edit", "status", "no-typing", "ping", "reply", "again"], 1);
+      onlyOptions("send", ["to", "text", "text-file", "thread", "edit", "status", "no-typing", "ping", "reply", "again", "file"], 1);
       const to = need("to");
       const status = opt("status");
       if (status !== undefined && (platform !== "discord" || (status !== "working" && status !== "done"))) die("--status takes working or done, with discord");
-      const body = postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE"), "send");
-      const text = status === "working" || status === "done" ? progressText(status, body, config.discord) : body;
       const thread = opt("thread");
       const edit = opt("edit");
+      const filePaths = ((flags.values.file as (string | boolean)[] | undefined) ?? []).map((p) => (typeof p === "string" ? p.trim() : ""));
+      if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);
+      if (filePaths.length && platform !== "slack") die(`SEND_FILE_REFUSED --file is only supported for slack, not ${platform}; nothing was sent`, 2);
+      if (filePaths.length && edit) die("SEND_FILE_REFUSED --file is for a new message, not --edit; nothing was sent", 2);
+      const uploads = filePaths.length ? await readUploads(filePaths) : [];
+      // with --file the text is optional: it goes out as the files' message (initial_comment)
+      const body = uploads.length && !opt("text") && !opt("text-file") ? "" : postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE (or --file PATH, slack)"), "send");
+      const text = status === "working" || status === "done" ? progressText(status, body, config.discord) : body;
       const rawPing = flags.values.ping;
       if (rawPing !== undefined && (typeof rawPing !== "string" || rawPing.length === 0 || /[^0-9]/.test(rawPing))) die("--ping takes a digits-only user id");
       const ping = typeof rawPing === "string" ? rawPing : undefined;
@@ -1650,7 +1690,7 @@ try {
       const token = (name: string) => process.env[name] ?? die(`${name} is not set`);
       // a new message goes out once per place, reply target, ping and text in SEND_DEDUPE_MS (src/send-dedupe.ts)
       const once = async (post: () => Promise<string>) => {
-        const r = await sendOnce(join(config.stateDir, "sent"), sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, text]), post, { again: Boolean(flags.values.again) });
+        const r = await sendOnce(join(config.stateDir, "sent"), sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, text, ...uploads.map((u) => `${u.filename}:${u.sha}`)]), post, { again: Boolean(flags.values.again) });
         console.log(r.duplicate ? duplicateLine(r) : `SENT ${r.id}`);
         return r;
       };
@@ -1659,7 +1699,14 @@ try {
         if (edit) await slack.edit(to, edit, text);
         else {
           let posted: { channel: string; ts: string } | undefined;
-          await once(async () => (posted = await slack.post(to, text, thread)).ts);
+          if (uploads.length)
+            await once(async () => {
+              const ids = await slack.upload(to, uploads, thread, text || undefined);
+              // completeUploadExternal names no message ts; the share is newer than every message before this moment
+              posted = { channel: to, ts: (Date.now() / 1000).toFixed(6) };
+              return ids.join(",");
+            });
+          else await once(async () => (posted = await slack.post(to, text, thread)).ts);
           // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off
           if (posted && process.env.DORI_SLACK_TOKEN?.startsWith("xoxb-")) {
             const files = { inbox: process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"), uneyed: join(config.stateDir, "slack-uneyed.log") };

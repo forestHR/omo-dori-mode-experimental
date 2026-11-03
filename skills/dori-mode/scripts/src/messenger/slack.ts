@@ -6,6 +6,8 @@ import { type ThreadLedger, tsAfter } from "./thread-ledger.ts";
 
 export type SlackAuth = { readonly token: string; readonly cookie?: string };
 export type Posted = { readonly channel: string; readonly ts: string };
+// read() gives the bytes only when that file's turn comes, so a send of several big files holds one at a time
+export type UploadFile = { readonly filename: string; readonly length: number; readonly read: () => Promise<Uint8Array<ArrayBuffer>>; readonly title?: string };
 
 export class Slack {
   constructor(
@@ -44,12 +46,18 @@ export class Slack {
     await this.call("chat.update", { channel, ts, text: guardText(text) });
   }
 
-  async upload(channel: string, filename: string, bytes: Uint8Array<ArrayBuffer>, threadTs?: string, title?: string): Promise<string> {
-    const slot = await this.call("files.getUploadURLExternal", { filename, length: bytes.byteLength });
-    const put = await withBackoff(this.http, this.clock, { method: "POST", url: String(slot.upload_url), body: bytes });
-    if (put.status !== 200) throw new MessengerError(`slack upload: ${put.status}`, put.status);
-    await this.call("files.completeUploadExternal", { files: [{ id: slot.file_id, title: title ?? filename }], channel_id: channel, ...(threadTs ? { thread_ts: threadTs } : {}) });
-    return String(slot.file_id);
+  // Every file gets its own upload URL and bytes, then one completeUploadExternal shares them all as one message, with
+  // the comment as its text (initial_comment) and in the thread when threadTs is given. Returns the file ids in order.
+  async upload(channel: string, files: readonly UploadFile[], threadTs?: string, comment?: string): Promise<string[]> {
+    const done: { id: string; title: string }[] = [];
+    for (const f of files) {
+      const slot = await this.call("files.getUploadURLExternal", { filename: f.filename, length: f.length });
+      const put = await withBackoff(this.http, this.clock, { method: "POST", url: String(slot.upload_url), body: await f.read() });
+      if (put.status !== 200) throw new MessengerError(`slack upload ${f.filename}: ${put.status}`, put.status);
+      done.push({ id: String(slot.file_id), title: f.title ?? f.filename });
+    }
+    await this.call("files.completeUploadExternal", { files: done, channel_id: channel, ...(threadTs ? { thread_ts: threadTs } : {}), ...(comment ? { initial_comment: guardText(comment) } : {}) });
+    return done.map((f) => f.id);
   }
 
   async setPresence(presence: "auto" | "away"): Promise<void> {

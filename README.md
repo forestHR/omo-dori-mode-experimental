@@ -189,6 +189,7 @@ The CLI also carries the messenger pieces a Dori needs. You can import them as t
 | Command | What it does |
 |---|---|
 | `dori send slack\|telegram\|discord --to T --text X [--thread ID] [--edit ID]` | post or edit a message; rate limits are retried, and text containing `$(` is refused |
+| `dori send slack --to C --file PATH [--file PATH ...] [--text X] [--thread TS]` | upload up to 10 files (1 GB each) and share them as one Slack message with the text; a missing, empty or too big file is refused before anything is sent |
 | `dori presence slack\|discord` | keep the account shown online (a Discord bot on the gateway, or a Slack user account through a web-client socket tickled every minute) |
 | `dori transcribe <file>` | turn a voice note into text through your `hooks.transcribe` command |
 | `dori can-launch` | tell whether there's room for another lane |
