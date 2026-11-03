@@ -1,10 +1,13 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { injectStateBar } from "./state-bar.ts";
 
 type Config = {
   readonly port: number;
   readonly upstreamPort: number;
   readonly passphrase: string;
   readonly origin: string;
+  readonly statePort: number;
+  readonly stateSecret: string;
 };
 
 const loginPage = `<!doctype html><html lang="en"><meta charset="utf-8">
@@ -53,7 +56,20 @@ export function startProxy(config: Config) {
         } });
       }
       const upgrading = request.headers.get("upgrade")?.toLowerCase() === "websocket";
-      if (!authorized(request)) return upgrading ? new Response("Unauthorized", { status: 401 }) : login();
+      if (!authorized(request)) return upgrading || url.pathname === "/__dori/state"
+        ? new Response("Unauthorized", { status: 401, headers: { "cache-control": "no-store" } }) : login();
+      if (url.pathname === "/__dori/state" && request.method === "GET") {
+        // Only the terminal account can inspect its herdr server and process tree.
+        const response = await fetch(`http://127.0.0.1:${config.statePort}/state`, {
+          headers: { authorization: `Bearer ${config.stateSecret}` },
+          signal: AbortSignal.timeout(10_000),
+          redirect: "error",
+        });
+        return new Response(response.ok ? response.body : "State unavailable", {
+          status: response.ok ? 200 : 502,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        });
+      }
       const target = `http://127.0.0.1:${config.upstreamPort}${url.pathname}${url.search}`;
       if (upgrading) {
         const upstream = new WebSocket(target.replace(/^http/, "ws"), request.headers.get("sec-websocket-protocol")?.split(",").map((p) => p.trim()) ?? []);
@@ -92,7 +108,7 @@ export function startProxy(config: Config) {
       resultHeaders.set("cache-control", "no-store");
       // ttyd 1.7.7 omits a viewport declaration and otherwise renders a 980px phone page.
       const body = response.headers.get("content-type")?.includes("text/html")
-        ? (await response.text()).replace("<head>", '<head><meta name="viewport" content="width=device-width,initial-scale=1">')
+        ? injectStateBar(await response.text())
         : response.body;
       return new Response(body, { status: response.status, headers: resultHeaders });
     },
@@ -120,11 +136,15 @@ if (import.meta.main) {
   const upstreamPort = Number(process.env.HERDR_TTYD_PORT);
   const passphrase = passphraseFrom(process.env);
   const origin = process.env.HERDR_WEB_ORIGIN;
+  const statePort = Number(process.env.HERDR_STATE_PORT);
+  const stateSecret = process.env.HERDR_STATE_SECRET;
   if (!Number.isInteger(port) || port < 1 || port > 65535 ||
       !Number.isInteger(upstreamPort) || upstreamPort < 1 || upstreamPort > 65535 ||
-      port === upstreamPort || !passphrase || !origin ||
+      !Number.isInteger(statePort) || statePort < 1 || statePort > 65535 ||
+      port === upstreamPort || statePort === port || statePort === upstreamPort ||
+      !passphrase || !origin || !stateSecret ||
       !["http:", "https:"].includes(new URL(origin).protocol) || new URL(origin).origin !== origin) {
-    throw new TypeError("Set valid HERDR_WEB_PORT, HERDR_TTYD_PORT, HERDR_WEB_ORIGIN and HERDR_WEB_PASSPHRASE (or AOE_SERVE_PASSPHRASE)");
+    throw new TypeError("Set valid HERDR_WEB_PORT, HERDR_TTYD_PORT, HERDR_WEB_ORIGIN, HERDR_WEB_PASSPHRASE (or AOE_SERVE_PASSPHRASE), HERDR_STATE_PORT and HERDR_STATE_SECRET");
   }
-  startProxy({ port, upstreamPort, passphrase, origin });
+  startProxy({ port, upstreamPort, passphrase, origin, statePort, stateSecret });
 }
