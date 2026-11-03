@@ -509,6 +509,7 @@ const requestOf = (opts: LaneHandoverOptions): RolloverRequest => ({ ...(opts.no
 // the taking side: leave the request, wait for the holder to take it, then follow the holder to its end and report its result
 const handOver = async (deps: LaneHandoverDeps, key: string, holder: { readonly pid: number; readonly at: string }, opts: LaneHandoverOptions, at: string, emit: (line: string) => void, refuse: (why: string) => LaneHandoverResult): Promise<LaneHandoverResult> => {
   const file = takeoverFile(deps.config.stateDir, key);
+  const from = (await deps.registry.read(key))?.pane;
   const mine: Takeover = { pid: process.pid, at, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}), force: Boolean(opts.force), request: requestOf(opts) };
   writeFileSync(file, JSON.stringify(mine));
   for (let i = 0; i < TAKE_TRIES && existsSync(file); i++) await deps.clock.sleep(TAKE_POLL_MS);
@@ -525,6 +526,13 @@ const handOver = async (deps: LaneHandoverDeps, key: string, holder: { readonly 
   for (let i = 0; i < tries && deps.alive(holder.pid); i++) await deps.clock.sleep(2_000);
   const row = readRollovers(deps.config.stateDir).findLast((e): e is Extract<RolloverEntry, { kind: "rollover" }> => e.kind === "rollover" && e.who === "lane" && e.key === key && e.at >= at);
   if (!row) {
+    // a holder that ended after the move but before its record (killed, or its owner report failed hard) still moved the
+    // lane: the registry says where it is
+    const now = (await deps.registry.read(key))?.pane;
+    if (now && now !== from && !deps.alive(holder.pid)) {
+      emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: moved -> ${now} (pid ${holder.pid} ended before its rollover record; the watch log has its lines)`);
+      return { code: 0, to: now };
+    }
     emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: unknown: pid ${holder.pid} ${deps.alive(holder.pid) ? "still runs" : "ended without a rollover record"}; the watch log has its lines`);
     return { code: 3 };
   }
