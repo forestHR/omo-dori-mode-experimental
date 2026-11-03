@@ -306,6 +306,7 @@ for (const exitsOn of ["SIGTERM", "SIGKILL", "never"] as const) {
     expect(sigs).toEqual([
       "SIGTERM -12",
       ...(exitsOn === "SIGTERM" ? [] : ["SIGKILL -12"]),
+      ...(exitsOn === "never" ? ["SIGKILL 12", "SIGKILL 13"] : []),
       "SIGSTOP 11",
       ...(exitsOn === "never" ? ["SIGSTOP 12", "SIGSTOP 13"] : []),
     ]);
@@ -314,6 +315,35 @@ for (const exitsOn of ["SIGTERM", "SIGKILL", "never"] as const) {
     expect(printed.some((line) => line.startsWith("HANDOVER_OLD_MONITORS_END_FAIL"))).toBe(exitsOn === "never");
   });
 }
+
+test("kills a captured reader in another group after its monitor root exits", async () => {
+  // Given: shell job control puts the reader in a separate group that ignores the shell group's signals.
+  const base = await setup();
+  const command = `set -m; trap '' HUP TERM; ${INBOX_CMD} & wait`;
+  let table = TREE.map((p) => p.pid === 12 ? { ...p, cmd: `bash -c "${command}"` } : p);
+  writeManifest("old-sid", [monitor("inbox", command, { runtime: { pid: 12 } })]);
+  live.add(12);
+  sim.arm = [{ description: "inbox", command, pid: 201 }];
+  const deps: HandoverDeps = {
+    ...base,
+    procs: async () => table,
+    signal: (pid, sig) => {
+      if (pid === -12 && sig === "SIGKILL") {
+        table = table.filter((p) => p.pid !== 12).map((p) => p.pid === 13 ? { ...p, ppid: 1 } : p);
+      }
+      if (pid === 13 && sig === "SIGKILL") table = table.filter((p) => p.pid !== 13);
+      return base.signal(pid, sig);
+    },
+  };
+  // When
+  const result = await handover(deps, { approvedBy: APPROVED, title: "lead2" });
+  // Then: the reparented reader is gone before the agent freezes, despite escaping its original process group.
+  expect(result).toMatchObject({ code: 0, to: NEW });
+  expect(table.some((p) => p.pid === 13)).toBe(false);
+  expect(sigs).toEqual(["SIGTERM -12", "SIGKILL -12", "SIGKILL 13", "SIGSTOP 11"]);
+  expect(readFrozen(state.dir)).toMatchObject([{ agentPid: 11, pids: [11] }]);
+  expect(printed).toContain("HANDOVER_OLD_MONITORS_ENDED 1 (12)");
+});
 
 test("leaves old monitor chains running when lead verification rolls back", async () => {
   // Given

@@ -19,7 +19,7 @@ export const endOldMonitors = async (deps: Deps, facts: Facts, spare: readonly n
         && facts.monitors.some((m) => m.command && sameCommand(m.command, e.command ?? "", deps.home))
         && table.some((p) => p.pid === pid && !ended(p)) ? [pid] : [];
     }))];
-    const chains = roots.map((pid) => ({ pid, pids: [pid, ...descendants(table, pid).filter((p) => !ended(p)).map((p) => p.pid)] }));
+    const chains = roots.map((pid) => ({ pid, pids: [pid, ...descendants(table, pid).filter((p) => allowed.has(p.pid) && !ended(p)).map((p) => p.pid)] }));
     for (const c of chains) deps.signal(-c.pid, "SIGTERM");
     // Allow shell traps to release resources; neither TERM nor KILL delivery alone proves a chain exited.
     if (chains.length) await deps.clock.sleep(250);
@@ -27,6 +27,13 @@ export const endOldMonitors = async (deps: Deps, facts: Facts, spare: readonly n
     const left = chains.filter((c) => c.pids.some((pid) => live.has(pid)));
     for (const c of left) deps.signal(-c.pid, "SIGKILL");
     if (left.length) {
+      await deps.clock.sleep(250);
+      live = new Set((await deps.procs()).filter((p) => !ended(p)).map((p) => p.pid));
+    }
+    // Job control can move a reader to another group; retain the captured pids even after their parent exits.
+    const survivors = [...new Set(chains.flatMap((c) => c.pids))].filter((pid) => live.has(pid));
+    for (const pid of survivors) deps.signal(pid, "SIGKILL");
+    if (survivors.length) {
       await deps.clock.sleep(250);
       live = new Set((await deps.procs()).filter((p) => !ended(p)).map((p) => p.pid));
     }
