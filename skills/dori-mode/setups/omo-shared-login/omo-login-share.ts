@@ -33,6 +33,7 @@ function parseArgs(argv: string[]): { positional: string[]; flags: Flags } {
 	const flags: Flags = {};
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
+		if (arg === undefined) continue;
 		if (!arg.startsWith("--")) {
 			positional.push(arg);
 			continue;
@@ -141,7 +142,7 @@ async function refreshAhead(lib: Awaited<ReturnType<typeof senpi>>, state: Json,
 				const cause = error?.cause ?? error;
 				const rejected = lib.failure.isGrantRejected(cause);
 				if (rejected) state.rejectedGrants[key] = grant;
-				failures.push({ key, rejected, message: String(cause?.message ?? cause).split("\n")[0].slice(0, 160) });
+				failures.push({ key, rejected, message: (String(cause?.message ?? cause).split("\n")[0] ?? "").slice(0, 160) });
 			}
 		}
 	}
@@ -271,7 +272,7 @@ async function sync(flags: Flags) {
 	};
 	if (!flags["no-alert"]) {
 		for (const failure of ahead.failures) {
-			const [providerId, slotName] = failure.key.split("/");
+			const [providerId = "", slotName] = failure.key.split("/");
 			await alert(
 				state,
 				`needs_login:${failure.key}`,
