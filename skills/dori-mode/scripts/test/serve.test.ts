@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { join } from "node:path";
 
 import { keep, type Running, serveLoops, taskArgv } from "../src/serve.ts";
 import { fakeClock } from "./fakes.ts";
@@ -41,5 +42,5 @@ test("a loop that ran 10 minutes before it exited starts again after the first p
 
 test("the loops are the sweeps of dori-lanes.sh, the listener and the session watcher; the logon task runs dori serve", () => {
   expect(serveLoops("bun", "cli.ts", "sw.ts").map((l) => l.argv.slice(1).join(" "))).toEqual(["cli.ts watch", "cli.ts freshness --loop 2", "cli.ts dead-panes --loop 5", "cli.ts guard --loop 1", "cli.ts state-git loop", "cli.ts inbound discord", "sw.ts"]);
-  expect(taskArgv("C:\\b\\bun.exe", "C:\\d\\cli.ts", "C:\\s").slice(-1)[0]).toBe('"C:\\b\\bun.exe" "C:\\d\\cli.ts" serve --log "C:\\s/serve.log"');
+  expect(taskArgv("C:\\b\\bun.exe", "C:\\d\\cli.ts", "C:\\s").slice(-1)[0]).toBe(`"C:\\b\\bun.exe" "C:\\d\\cli.ts" serve --log "${join("C:\\s", "serve.log")}"`);
 });

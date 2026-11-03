@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { agentLine } from "../src/herdr.ts";
+import { agentPath } from "../src/aoe.ts";
 import { AGENT, procTable, WIN_PROCS } from "../src/session-id.ts";
-import type { Runner } from "../src/run.ts";
+import { run, type Runner } from "../src/run.ts";
 
 test("Windows process discovery recognizes omo executables and bundle paths", async () => {
   // Given a Win32_Process response including a process without a command line.
@@ -28,4 +29,23 @@ test("Windows agent lines quote PowerShell arguments and environment assignments
   const line = agentLine(argv, { A: "1", GPU: undefined }, "win32");
   // Then PowerShell receives separate quoted words after the call operator.
   expect(line).toBe("$env:A = '1'; Remove-Item Env:GPU -ErrorAction SilentlyContinue; & 'C:\\h\\omo.exe' '--model' 'it''s'");
+});
+
+test.skipIf(process.platform !== "win32")("Windows process discovery finds the calling Bun process natively", async () => {
+  // Given the real PowerShell process adapter.
+  // When Win32_Process is queried.
+  const table = await procTable(run);
+  // Then this test process has its real command line and parent.
+  const self = table.find((processInfo) => processInfo.pid === process.pid);
+  expect(self?.ppid).toBe(process.ppid);
+  expect(self?.cmd.toLowerCase()).toContain("bun");
+}, 30_000);
+
+test.skipIf(process.platform !== "win32")("Windows launch preserves the caller's native PATH", () => {
+  // Given the caller's semicolon-separated executable search path.
+  const path = process.env.PATH ?? "";
+  // When preparing a native omo executable.
+  const actual = agentPath("omo");
+  // Then no Unix node or colon-separated PATH lookup is required.
+  expect(actual).toBe(path);
 });
