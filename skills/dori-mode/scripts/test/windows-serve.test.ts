@@ -47,14 +47,19 @@ const taskFixture = () => {
     async query() {
       const output = await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command", `
         $task = Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction Stop
-        @{ limit = $task.Settings.ExecutionTimeLimit; execute = $task.Actions[0].Execute; arguments = $task.Actions[0].Arguments } | ConvertTo-Json -Compress
+        @{ limit = $task.Settings.ExecutionTimeLimit; execute = $task.Actions[0].Execute; arguments = $task.Actions[0].Arguments;
+           user = [string]$task.Triggers[0].UserId; me = [Security.Principal.WindowsIdentity]::GetCurrent().Name;
+           noBatteryStart = [bool]$task.Settings.DisallowStartIfOnBatteries; batteryStop = [bool]$task.Settings.StopIfGoingOnBatteries } | ConvertTo-Json -Compress
       `]);
       const value: unknown = JSON.parse(output);
       if (typeof value !== "object" || value === null ||
           !("limit" in value) || typeof value.limit !== "string" ||
           !("execute" in value) || typeof value.execute !== "string" ||
-          !("arguments" in value) || typeof value.arguments !== "string") throw new TypeError("Invalid registered task settings");
-      return { limit: value.limit, execute: value.execute, arguments: value.arguments };
+          !("arguments" in value) || typeof value.arguments !== "string" ||
+          !("user" in value) || typeof value.user !== "string" || !("me" in value) || typeof value.me !== "string" ||
+          !("noBatteryStart" in value) || typeof value.noBatteryStart !== "boolean" ||
+          !("batteryStop" in value) || typeof value.batteryStop !== "boolean") throw new TypeError("Invalid registered task settings");
+      return { limit: value.limit, execute: value.execute, arguments: value.arguments, user: value.user, me: value.me, noBatteryStart: value.noBatteryStart, batteryStop: value.batteryStop };
     },
     async [Symbol.asyncDispose]() {
       try {
@@ -97,6 +102,17 @@ test.skipIf(process.platform !== "win32")("review 2 registers an unlimited super
   await task.register();
   // Then Task Scheduler stores PT0S rather than its finite default.
   expect((await task.query()).limit).toBe("PT0S");
+}, 40_000);
+
+test.skipIf(process.platform !== "win32")("review 1 of #306 the logon trigger is this user's, and the task runs and keeps running on battery", async () => {
+  // Given the production registration of an actual Windows task.
+  await using task = taskFixture();
+  await task.register();
+  // When its trigger and settings are read back.
+  const got = await task.query();
+  // Then the trigger is scoped to the registering user and battery power neither blocks nor stops it.
+  expect(got.user.toLowerCase().split("\\").pop()).toBe(got.me.toLowerCase().split("\\").pop());
+  expect({ noBatteryStart: got.noBatteryStart, batteryStop: got.batteryStop }).toEqual({ noBatteryStart: false, batteryStop: false });
 }, 40_000);
 
 test.skipIf(process.platform !== "win32")("review 2 registered action preserves quoted instance paths without inherited environment", async () => {

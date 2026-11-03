@@ -38,10 +38,10 @@ Configure the bot token and channel in the selected environment file, open the l
 
 ```powershell
 dori serve
-dori serve --only guard --only dead-panes --log C:\dori-logs\serve.log
+dori serve --only watch --only dead-panes --log C:\dori-logs\serve.log
 ```
 
-The log directory is prepared and checked before a child starts. Each loop's output is tagged, and a loop that exits is restarted with bounded backoff.
+The log directory is prepared and checked before a child starts. Each loop's output is tagged, and a loop that exits is restarted with bounded backoff. Each loop starts with the environment of the instance `serve` selected. The host guard is not among the loops on Windows: its sampler reads load, memory and disk with Unix tools.
 
 For logon startup:
 
@@ -49,14 +49,14 @@ For logon startup:
 dori serve --install-task
 ```
 
-This registers the limited-privilege task `Dori serve` with `ExecutionTimeLimit=PT0S` (no execution timeout). Its generated entry point preserves the selected configuration, environment-file and state paths. Registering it again updates that task to the currently selected instance.
+This registers the limited-privilege task `Dori serve` with a logon trigger for the current user only (no elevation needed), `ExecutionTimeLimit=PT0S` (no execution timeout), and battery power allowed both to start it and to keep it running. Its generated entry point preserves the selected configuration, environment-file and state paths. Registering it again updates that task to the currently selected instance.
 
 ## Manual Windows validation
 
 There are no automatic push or PR checks. From this repository, run the workflow by hand:
 
 ```sh
-gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref feat/herdr-windows-serve
+gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref <branch>
 ```
 
 The suite executes native PowerShell quoting, process/session discovery, handover refusals, installer and launcher behavior, real agent skill discovery from outside the checkout, and registered Task Scheduler settings. POSIX fixtures remain in the full Linux suite.

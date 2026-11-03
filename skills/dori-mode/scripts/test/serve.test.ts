@@ -43,7 +43,28 @@ test("a loop that ran 10 minutes before it exited starts again after the first p
 });
 
 test("the loops are the sweeps of dori-lanes.sh, the listener and the session watcher", () => {
-  expect(serveLoops("bun", "cli.ts", "sw.ts").map((l) => l.argv.slice(1).join(" "))).toEqual(["cli.ts watch", "cli.ts freshness --loop 2", "cli.ts dead-panes --loop 5", "cli.ts guard --loop 1", "cli.ts state-git loop", "cli.ts inbound discord", "sw.ts"]);
+  expect(serveLoops("bun", "cli.ts", "sw.ts", "linux").map((l) => l.argv.slice(1).join(" "))).toEqual(["cli.ts watch", "cli.ts freshness --loop 2", "cli.ts dead-panes --loop 5", "cli.ts guard --loop 1", "cli.ts state-git loop", "cli.ts inbound discord", "sw.ts"]);
+});
+
+test("on native Windows the host guard, whose sampler needs Unix tools, is not among the loops", () => {
+  expect(serveLoops("bun", "cli.ts", "sw.ts", "win32").map((l) => l.tag)).toEqual(["watch", "freshness", "dead-panes", "state-git", "inbound", "session-watch"]);
+});
+
+test("a supervised child gets the environment as it is when it starts, not as serve started", async () => {
+  // Given a variable serve sets after it started (as resolving the instance and loading its env file do).
+  const name = `SERVE_ENV_TEST_${process.pid}`;
+  process.env[name] = "chosen instance";
+  try {
+    // When a loop child starts.
+    const child = spawnLoop([process.execPath, "--eval", `console.log(process.env[${JSON.stringify(name)}] ?? "unset")`]);
+    const lines: string[] = [];
+    for await (const line of child.lines) lines.push(line);
+    await child.exited;
+    // Then it sees that value.
+    expect(lines).toEqual(["chosen instance"]);
+  } finally {
+    delete process.env[name];
+  }
 });
 
 const roots: string[] = [];

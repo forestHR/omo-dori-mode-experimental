@@ -12,11 +12,13 @@ import type { Clock } from "./run.ts";
 // started again after a pause that doubles while it keeps failing (2 s up to 5 min, back to 2 s once it ran 10 min).
 export type Loop = { readonly tag: string; readonly argv: readonly string[] };
 
-export const serveLoops = (bun: string, cli: string, sessionWatch: string): Loop[] => [
+// The host guard samples load, memory and disk with Unix tools (host-guard.ts); on native Windows it would read made-up
+// values, so it is left out there until it has a Windows sampler.
+export const serveLoops = (bun: string, cli: string, sessionWatch: string, platform: string = process.platform): Loop[] => [
   { tag: "watch", argv: [bun, cli, "watch"] },
   { tag: "freshness", argv: [bun, cli, "freshness", "--loop", "2"] },
   { tag: "dead-panes", argv: [bun, cli, "dead-panes", "--loop", "5"] },
-  { tag: "guard", argv: [bun, cli, "guard", "--loop", "1"] },
+  ...(platform === "win32" ? [] : [{ tag: "guard", argv: [bun, cli, "guard", "--loop", "1"] }]),
   { tag: "state-git", argv: [bun, cli, "state-git", "loop"] },
   { tag: "inbound", argv: [bun, cli, "inbound", "discord"] },
   { tag: "session-watch", argv: [bun, sessionWatch] },
@@ -78,7 +80,8 @@ const linesOf = async function* (streams: readonly ReadableStream<Uint8Array>[])
 };
 
 export const spawnLoop = (argv: readonly string[]): Running => {
-  const p = Bun.spawn([...argv], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  // the environment as it is now (the instance serve resolved and its env file), not as this process started
+  const p = Bun.spawn([...argv], { stdout: "pipe", stderr: "pipe", stdin: "ignore", env: { ...process.env } });
   return { lines: linesOf([p.stdout, p.stderr]), exited: p.exited };
 };
 
@@ -106,8 +109,10 @@ exit $LASTEXITCODE
   const registration = [
     "$ErrorActionPreference = 'Stop'",
     `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${data(`-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${entry}"`)}`,
-    "$trigger = New-ScheduledTaskTrigger -AtLogOn",
-    "$settings = New-ScheduledTaskSettingsSet",
+    // a logon trigger for this user only: an all-users trigger needs an elevated caller
+    "$trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)",
+    // keep supervising on a laptop that runs on battery
+    "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
     "$settings.ExecutionTimeLimit = 'PT0S'",
     `Register-ScheduledTask -TaskName ${data(name)} -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null`,
   ].join("; ");
