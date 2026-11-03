@@ -20,6 +20,7 @@ import { StartRefused } from "./backlog.ts";
 import { relatedLines, relatedThreads, type RelatedThread } from "./related-thread.ts";
 import { addedLine, checkedLedger, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
 import { join } from "node:path";
+import type { BudgetLimits } from "./supervision.ts";
 
 export type LaunchInput = {
   readonly key: string;
@@ -28,6 +29,9 @@ export type LaunchInput = {
   readonly done: string;
   // the work thread: <adapter>:<id> of the thread the work continues in, or NEW_THREAD for one launch opens in this Dori's channel
   readonly thread?: string;
+  // lane caps over the config's (launch --wall-minutes N|none --token-limit N|none --cost-limit N|none) and extra activity files
+  readonly budget?: BudgetLimits;
+  readonly activityPaths?: readonly string[];
   // why the lane has no work thread (dori launch --no-thread "<reason>"): only a lane the owner did not ask for
   readonly noThread?: string;
   // why --thread new opens a new thread though related open threads were shown (dori launch --why-new "<reason>")
@@ -297,6 +301,7 @@ export const footer = (lane: Lane, leadPane: string, backend: Backend = "herdr",
   `- Heavy browser, CPU or build test bundles go through dori heavy <label> --kind browser|cpu --sync <every folder or file the command reads or writes> -- <command>, not a hand-made core lock: the less busy PC runs it and its output, files and exit code come back here (HEAVY_LOCAL <why> means it stayed here; add the path it names to --sync).`,
   ...(lane.goal ? [`- Goal (owner words): "${lane.goal}". At each stage change (a new phase, a pivot, before a big step) run dori intent-check ${lane.key} --direction "<what you do now>" --next "<next step>" (a reviewer model reads it against the owner's words) and say in your report how the step serves this goal.`] : []),
   ...(lane.challengeBefore?.length ? [`- Before ${lane.challengeBefore.map((s) => `"${s}"`).join(" or ")}: write the plan to a file and run dori challenge ${lane.key} --plan <file> (a model of another family reviews it); answer its reasons in your next report. A done claim is refused until a challenge is on record.`] : []),
+  `- After each finished step run dori checkpoint ${lane.key} --step <unique step> --result <result> --evidence <path or link> [--remote-effect <receipt of a push, merge or deploy it did>] (one flag per receipt). On resume run dori checkpoints ${lane.key} before any work and never repeat a recorded remote effect; after a crash between a remote action and its checkpoint, read the live remote state first.`,
   `- What you learn goes to one place: a standing instruction of the owner to the lead in a [REPORT] for the directive ledger, a lesson, fact or how the work went into your omo memory, and the report stays the record (references/done-protocol.md).`,
   ...(gated.length ? [`- A PR in ${gated.join(", ")} merges only through the review gate: in a clean checkout of the PR's head run dori review <repo>#<N> (it runs the tests there first, then a reviewer of another model family; VERDICT: CLEAR is needed; a PR with GitHub checks or auto-merge is refused as unsupported), then dori merge <repo>#<N>, which merges only that exact head (--match-head-commit). A commit pushed after the review needs dori review again; a PR merged with plain gh pr merge makes claim-done refuse (MERGE_GATE_MISSING).`] : []),
   `- When done: dori claim-done ${lane.key} --evidence "<merge SHA, closed issue, version>"${hasThread(lane) ? ` --summary "<2 to 5 plain lines for the owner, in his language: what changed, what is left, when it reaches where it is used; no paths, hashes or codes>" (your one result post: the close posts it in the work thread; if you already posted your result there yourself in the last 30 minutes, the close posts nothing more, so never post it twice; without --summary and a post the close has a model write one from your last report and REPORT.md)` : ""}. See references/done-protocol.md.`,
@@ -435,6 +440,7 @@ const draftLane = (deps: FlowDeps, input: LaunchInput): Lane => ({
   // the brief as an absolute path: the audit, intent-check and freshness read it from another directory than the lead's
   key: input.key, title: input.title, thread: input.thread ?? "none", brief: resolve(input.brief), done: input.done, cwd: input.cwd ?? deps.config.defaultCwd, model: input.model ?? deps.config.defaultModel,
   ...(input.tags?.length ? { tags: input.tags } : {}), ...intentFields(input), openedAt: iso(deps.clock),
+  ...(input.budget && Object.keys(input.budget).length ? { budget: input.budget } : {}), ...(input.activityPaths?.length ? { activityPaths: input.activityPaths } : {}),
 });
 
 export type Rendered = {

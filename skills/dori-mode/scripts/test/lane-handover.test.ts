@@ -397,6 +397,9 @@ test("moves the lane: same cwd, model and thinking, registry and cards repointed
   expect(sent(w).some((t) => t.startsWith("You are the demo lane in a new session") && t.includes(r.note ?? "?"))).toBe(true);
   const now = await readLane(deps);
   expect(now).toMatchObject({ pane: NEW, session: "new-sid", thread: "discord:12345678", brief: lane().brief });
+  // the outgoing session found in the old pane stays on the lane (the registry had none, as for an adopted lane), so its
+  // cost still counts (supervision.ts laneSessionUsage)
+  expect(now.priorSessions).toEqual(["old-sid"]);
   expect(new QuestionStore(join(state.dir, "discord")).get("Q1")).toMatchObject({ tmux: NEW });
   expect(printed).toContain(`HANDOVER_STATUS_OK ${NEW} claude-opus-5-5 thinking high`);
   expect(printed).toContain(`HANDOVER_MONITORS_OK 2 in ${NEW} (session new-sid)`);
@@ -634,7 +637,7 @@ const killedRun = async (deps: LaneHandoverDeps, pid: number) => {
   await deps.registry.patch("demo", { pane: NEW });
   new QuestionStore(join(state.dir, "discord")).retarget({ tmux: OLD }, { tmux: NEW });
   mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
-  writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid, at: "2026-10-11T16:20:00Z", from: OLD, to: NEW, note: "/x.md", chains: [{ pid: 15, cmd: "bash -c sleep 7200; echo chain-done", pids: [15, 16] }] }));
+  writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid, at: "2026-10-11T16:20:00Z", from: OLD, to: NEW, note: "/x.md", chains: [{ pid: 15, cmd: "bash -c sleep 7200; echo chain-done", pids: [15, 16] }], fromSession: "old-sid", cwd: CWD }));
 };
 
 test("a run killed midway (crash, reboot) is repaired by the next run: old session alive -> back to it, new one closed", async () => {
@@ -667,6 +670,8 @@ test("a killed run whose old session is already gone keeps the lane on the new o
   // Then
   expect(r.code).toBe(3);
   expect(printed).toContain(`HANDOVER_RECOVERED demo kept on ${NEW}: the old session ${OLD} is gone`);
+  // the recovery records the lane's sessions like a finished move: the new one, and the outgoing one kept for its cost
+  expect(await readLane(deps)).toMatchObject({ session: "new-sid", priorSessions: ["old-sid"] });
   // the new session is released, and told whether the old chains still run (here they do: no restart)
   expect(sent(w).some((t) => t.startsWith(`[LEAD] HANDOVER_COMMITTED: the handover was interrupted after the old session ${OLD} closed`))).toBe(true);
   expect(printed).toContain("HANDOVER_CHAIN_SURVIVED demo 15; the new session was told not to restart them");
@@ -1338,6 +1343,8 @@ test("when the old session ends during the checks, the new one stays the lane in
   expect(r).toMatchObject({ code: 1, to: NEW });
   expect(printed.find((l) => l.startsWith("HANDOVER_OLD_GONE demo"))).toBeDefined();
   expect((await readLane(deps)).pane).toBe(NEW);
+  // the move is committed, so the lane's sessions are too: its cost counts the old session and the new one
+  expect(await readLane(deps)).toMatchObject({ session: "new-sid", priorSessions: ["old-sid"] });
   expect(stoppedIds()).toEqual([]);
   expect(sent(w).some((x) => x.startsWith("[LEAD] HANDOVER_COMMITTED: the old session ended during the checks"))).toBe(true);
 });

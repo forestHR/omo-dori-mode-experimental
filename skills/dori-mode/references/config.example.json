@@ -39,6 +39,16 @@
     "diskFreeMinGb": 50,
     "panesMax": 20
   },
+  "supervision": {
+    "defaults": { "wallMinutes": null, "tokens": null, "costUsd": null },
+    "lanes": { "long-train": { "wallMinutes": 720, "costUsd": 50 } },
+    "hungAfterMinutes": 20,
+    "staleAfterMinutes": 20,
+    "usageArgv": [],
+    "recordCostArgv": [],
+    "activityPaths": [],
+    "gitActivity": true
+  },
   "hooks": {
     "threadReply": [
       "my-messenger",

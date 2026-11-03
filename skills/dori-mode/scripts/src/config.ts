@@ -6,6 +6,7 @@ import { run } from "./run.ts";
 import type { RelatedSettings } from "./related-thread.ts";
 import type { BackupSettings } from "./state-backup.ts";
 import type { StateGitSettings } from "./state-git.ts";
+import { defaultSupervision, type SupervisionSettings, supervisionProblem } from "./supervision.ts";
 
 // stateGit.backup defaults (src/state-backup.ts); here so loading the config does not load git or the backup code
 export const BACKUP_DEFAULTS: BackupSettings = {
@@ -489,6 +490,8 @@ export type DoriConfig = {
   // dori state-git: this Dori's state in local git, committed by dori-lanes (src/state-git.ts)
   readonly stateGit: StateGitSettings;
   readonly backlog: BacklogSettings;
+  // lane caps, hung calls and the cost record (src/supervision.ts): caps off by default, a cap or a hung call is told to the lead
+  readonly supervision: SupervisionSettings;
   readonly instances: readonly InstanceRef[];
 };
 
@@ -599,6 +602,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   stateGit: { dirs: [], everyMin: 10, maxFileKb: 512, timeoutSec: 60, timeZone: "", backup: BACKUP_DEFAULTS },
   mergeGate: { repos: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
   backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", pairRepairPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" },
+  supervision: defaultSupervision(),
   instances: [],
 });
 
@@ -765,8 +769,10 @@ export const loadConfig = async (path = configPath(), home = homedir(), warn: (l
   const migrated = migrateOldKeys((await file.exists()) ? ((await file.json()) as Raw) : {});
   for (const w of migrated.warnings) warn(`${w} (${path})`);
   const raw = migrated.raw as Partial<DoriConfig>;
-  const merged: DoriConfig = { ...base, ...raw, update: { ...base.update, ...raw.update }, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, discord: { ...base.discord, ...raw.discord }, stuck: { ...base.stuck, ...raw.stuck }, reviewers: { ...base.reviewers, ...raw.reviewers }, mergeGate: { ...base.mergeGate, ...raw.mergeGate }, scorecard: { ...base.scorecard, ...raw.scorecard }, signals: { ...base.signals, ...raw.signals }, explore: { ...base.explore, ...raw.explore }, autoSignals: { ...base.autoSignals, ...raw.autoSignals, intentCheck: { ...base.autoSignals.intentCheck, ...raw.autoSignals?.intentCheck } }, handover: { ...base.handover, ...raw.handover }, related: { ...base.related, ...raw.related }, stateGit: { ...base.stateGit, ...raw.stateGit, backup: { ...base.stateGit.backup, ...raw.stateGit?.backup } }, heavyQueue: { ...base.heavyQueue, ...raw.heavyQueue }, backlog: { ...base.backlog, ...raw.backlog } };
+  const merged: DoriConfig = { ...base, ...raw, update: { ...base.update, ...raw.update }, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, discord: { ...base.discord, ...raw.discord }, stuck: { ...base.stuck, ...raw.stuck }, reviewers: { ...base.reviewers, ...raw.reviewers }, mergeGate: { ...base.mergeGate, ...raw.mergeGate }, scorecard: { ...base.scorecard, ...raw.scorecard }, signals: { ...base.signals, ...raw.signals }, explore: { ...base.explore, ...raw.explore }, autoSignals: { ...base.autoSignals, ...raw.autoSignals, intentCheck: { ...base.autoSignals.intentCheck, ...raw.autoSignals?.intentCheck } }, handover: { ...base.handover, ...raw.handover }, supervision: { ...base.supervision, ...raw.supervision }, related: { ...base.related, ...raw.related }, stateGit: { ...base.stateGit, ...raw.stateGit, backup: { ...base.stateGit.backup, ...raw.stateGit?.backup } }, heavyQueue: { ...base.heavyQueue, ...raw.heavyQueue }, backlog: { ...base.backlog, ...raw.backlog } };
   if (merged.backlog.pairRepairPattern && merged.backlog.writeNeedsOwnerLink) warn(`CONFIG_BACKLOG_REPAIR_EXEMPT backlog.pairRepairPattern and backlog.writeNeedsOwnerLink are both on: #dori-pair repair requests start without an owner message link, because the owner's standing rule that faults of the Dori base go to the maintenance Dori is their approval (${path})`);
+  const supervisionBad = supervisionProblem((raw as { supervision?: unknown }).supervision);
+  if (supervisionBad) throw new ConfigError(`${path}: invalid ${supervisionBad}`);
   const heavyProblem = heavyQueueProblem(merged.heavyQueue);
   if (heavyProblem) throw new ConfigError(`${path}: ${heavyProblem}`);
   if (!OWNER_SPEECHES.includes(merged.discord.ownerSpeech)) throw new ConfigError(`${path}: discord.ownerSpeech must be "" (follow discord.locale), "casual" or "polite", not ${JSON.stringify(merged.discord.ownerSpeech)}`);

@@ -1,6 +1,8 @@
 import { mkdirSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
+import type { BudgetLimits } from "./supervision.ts";
+
 export const LANE_KEY = /^[a-z0-9][a-z0-9._-]{1,60}$/;
 
 // A lane's work thread: <adapter>:<id>, or "none" for a lane without one. Discord ids are numeric snowflakes.
@@ -67,6 +69,8 @@ export type Lane = {
   readonly tab?: string;
   readonly session?: string;
   readonly sessionVia?: string;
+  // the sessions this lane had before its current one, oldest first (a handover adds the outgoing one)
+  readonly priorSessions?: readonly string[];
   readonly brief: string;
   readonly done: string;
   // every change of the Done line after launch (dori done-set): the line before and after, and why
@@ -129,6 +133,11 @@ export type Lane = {
   // the last dori intent-check: when, up to which report, by which reviewer, what it found (finding: the first finding, for
   // the re-read the lead may send)
   readonly intentCheck?: { readonly at: string; readonly lastReportAt: string; readonly model: string; readonly kinds: readonly string[]; readonly finding?: string; readonly rereadAt?: string };
+  // lane caps of this lane over the config's (dori launch --wall-minutes/--token-limit/--cost-limit, dori caps), extra files
+  // whose change counts as activity (launch --activity-path), and the last supervision failure freshness printed (once)
+  readonly budget?: BudgetLimits;
+  readonly activityPaths?: readonly string[];
+  readonly supervisionError?: string;
   readonly receipt?: unknown;
   // the last LANE_DIED for this pane (lane-death.ts): reason for the lead, why for the log, told once the lead had it
   readonly died?: LaneDied;
@@ -177,6 +186,12 @@ export class Registry {
   // temp file + rename so a concurrent reader never sees a half-written lane
   async write(lane: Lane): Promise<void> {
     mkdirSync(this.dir, { recursive: true });
+    // A lane's sessions are history: whatever path changes its session (a handover, dori sync --write, a revive), the
+    // outgoing one is kept in priorSessions, so its cost counts every session it had (supervision.ts laneSessionUsage)
+    const before = await this.read(lane.key).catch(() => null);
+    const outgoing = before?.session && before.session !== lane.session ? [before.session] : [];
+    const prior = [...new Set([...(before?.priorSessions ?? []), ...(lane.priorSessions ?? []), ...outgoing])].filter((s) => s !== lane.session);
+    if (prior.length) lane = { ...lane, priorSessions: prior };
     const tmp = `${this.path(lane.key)}.${process.pid}.tmp`;
     await Bun.write(tmp, JSON.stringify(lane, null, 1));
     renameSync(tmp, this.path(lane.key));

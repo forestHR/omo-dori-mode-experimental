@@ -104,7 +104,7 @@ footer はレーンに `[REPORT] <key> | <milestone|blocker|question|done> | <te
 ["tmux", "send-keys", "-t", "=aoe_Dori_0a1b2c3d:", "Enter"]
 ```
 
-`dori freshness` はまずリードの画面から報告を読み、次にレーンの画面を見ます。新しい報告は沈黙のタイマーをリセットします。既定では 15 分後に声をかけ、20 分後に `hooks.threadReply` で所有者の言葉の短い状況一行(`discord.quietText`)を投稿し、それぞれ沈黙の期間につき 1 回実行します。レーンの報告そのものはリードの画面に送り、リードが人の言葉でまとめます。`discord.postRawReports: true` なら以前のように報告をそのまま投稿します。
+`dori freshness` はまずリードの画面から報告を読み、次にレーンの画面を見ます。新しい報告は沈黙のタイマーをリセットします。既定では 15 分後に声をかけ、20 分後に `hooks.threadReply` で所有者の言葉の短い状況一行(`discord.quietText`)を投稿し、それぞれ沈黙の期間につき 1 回実行します。レーンの報告そのものはリードの画面に送り、リードが人の言葉でまとめます。`discord.postRawReports: true` なら以前のように報告をそのまま投稿します。 レーンの上限と止まったように見える呼び出しも確認します(`supervision`。上限は既定でオフ)。上限に達するか呼び出しが止まったように見えると、リードに一度だけ知らせ、レーンを止めたりレーンに入力したりはしません。`close` はレーンの `COST` を表示します。
 
 aoe では `dori watch` が、working または not-done のレーンが人を待って止まると `LANE_BLOCKED <key> <waiting|error|question|idle> <pane>` を出力します。`aoe ps --json` と画面を合わせて判断し、ターンの実行中は出力しません。idle は 45 秒続く必要があり、モニター、wake source、実行中や予約済みの goal を待つ状態は idle ではありません。セッション自身が始めた切り離し済みの eval セル、バックグラウンド bash セッション、バックグラウンド task を待つ状態も idle ではなく、監視ログに静かな `BG_WAITING` 行だけを残し、`blockedWaitMin`(既定 60 分)を過ぎると `LANE_BLOCKED` になります。閉じると aoe セッションを停止してゴミ箱に移し、完全削除はしません。
 
@@ -174,6 +174,7 @@ watcher はレーンを閉じるときに、シェルを通さずこの確認を
 | `dori guard [--loop MIN]` | 負荷、メモリ、ディスク、pane 数の警告 |
 | `dori fix-attempt <key> --metric M --hypothesis H` | レーンに頼んだ修正を 1 回数える。レーンはそうした報告に `(fix: M / H)` を付け、同じ指標・同じ仮説で 3 回目になると `SAME_FIX_3` が根本原因の調査に切り替えるよう知らせる。記録の前に、その指標で既に試した仮説(`PRIOR_FIX`)を表示する |
 | `dori checkpoint <key> --step ID --result TEXT --evidence PATH [--remote-effect RECEIPT]...` / `dori checkpoints <key>` | レーンが終えた手順を一度ずつ、行ったリモート操作(push、merge)の受領記録とともに書き、再開前に読み戻す。再起動したレーンが push や merge を繰り返さない。同じ手順を別の内容で書くか、別の手順が既に持つ受領記録を書くと拒否 |
+| `dori caps <key> [--wall-minutes N\|none] [--token-limit N\|none] [--cost-limit N\|none]` | レーンの経過時間(分)・トークン・費用の上限(既定はオフ。`launch` も同じフラグを受け取る)。上限に達すると `freshness` がリードに一度知らせ(`LANE_CAP`)、レーンは止めない。フラグを付けるとそのレーンの上限を設定 |
 | `dori signals [--lane K \| --cwd DIR \| --tag T]` | ある作業領域で過去のレーンが何を試し、どうなったか: 番号付きの修正試行と根本原因調査への切り替え(`[REPORT]` 行とリードの再指示からも読む)、指標ごとのタグ付き修正、理由付きの完了申告の却下、再送・催促の数、結果、領域の却下率・手戻り、警告。レーンに再指示する前に読む |
 | `dori scorecard [--date D] [--post]` | 記録だけから出す 1 日のトークン成績表(モデル呼び出しなし): 検証済み完了あたりのコストと完了申告の却下率を並べて、手戻りの多いレーン上位、最初の返信の中央値/p90、リードのコンテキスト税。リードが読むため `<stateDir>/scorecard/<日付>.json` と `latest.md` に保存、`--post` で Discord にも送る(既定はオフ。毎日保存する systemd timer は Discord + aoe セットアップにある) |
 | `dori heavy <label> [--mem 70G] -- <cmd>` | 負荷が低いときにビルド・テスト・GPU ジョブをメモリ上限付きの専用 scope で実行（超えたらそのジョブだけ止まり、レーンは残る）。実行中のジョブがあれば GPU・メモリ・CPU がそれぞれ 10% 以上残るときだけ同時に実行 |

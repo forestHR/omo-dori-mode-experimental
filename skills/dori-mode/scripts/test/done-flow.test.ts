@@ -42,7 +42,7 @@ test("five quiet minutes after a claim the lane is closed, its thread marked don
   expect(await watchTick(at(T0 + 4 * MIN))).toEqual(["LANE_DONE_CLAIMED demo-lane w:p1 merged acme/app#1 abc123"]);
   expect(closedVia()).toHaveLength(0);
   const lines = await watchTick(at(T0 + 5 * MIN + 1));
-  expect(lines).toEqual(["CLOSE_SUMMARY demo-lane from the lane", expect.stringMatching(/^LANE_CLOSED demo-lane /)]);
+  expect(lines).toEqual(["CLOSE_SUMMARY demo-lane from the lane", "COST demo-lane tokens=unknown costUsd=unknown", expect.stringMatching(/^LANE_CLOSED demo-lane /)]);
   // the lane's pane is all its tab holds, so the tab closes (aoe.ts closeAoeSession for a herdr pane)
   expect(closedVia()).toEqual([["herdr", "tab", "close", "w:t-p1"]]);
   // the owner's thread gets the lane's summary for him; the claim's evidence stays in the lane's record

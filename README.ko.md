@@ -104,7 +104,7 @@ footer는 레인이 `[REPORT] <key> | <milestone|blocker|question|done> | <text>
 ["tmux", "send-keys", "-t", "=aoe_Dori_0a1b2c3d:", "Enter"]
 ```
 
-`dori freshness`는 리드 화면에서 먼저 보고를 읽고, 없으면 레인 화면을 봅니다. 새 보고는 무응답 시간을 초기화합니다. 기본값으로 15분 뒤 알림을 보내고 20분 뒤 `hooks.threadReply`로 소유자 말투의 짧은 상태 한 줄(`discord.quietText`)을 올리며, 무응답 구간마다 한 번씩 실행합니다. 레인의 보고 원문은 리드 화면으로 보내 리드가 사람 말로 정리하게 하고, `discord.postRawReports: true`면 예전처럼 원문을 올립니다.
+`dori freshness`는 리드 화면에서 먼저 보고를 읽고, 없으면 레인 화면을 봅니다. 새 보고는 무응답 시간을 초기화합니다. 기본값으로 15분 뒤 알림을 보내고 20분 뒤 `hooks.threadReply`로 소유자 말투의 짧은 상태 한 줄(`discord.quietText`)을 올리며, 무응답 구간마다 한 번씩 실행합니다. 레인의 보고 원문은 리드 화면으로 보내 리드가 사람 말로 정리하게 하고, `discord.postRawReports: true`면 예전처럼 원문을 올립니다. 레인 상한과 멈춘 듯한 호출도 봅니다(`supervision`, 상한은 기본값 꺼짐). 상한에 닿거나 호출이 멈춘 듯하면 리드에게 한 번 알리고, 레인을 멈추거나 레인에 입력하지는 않습니다. `close`는 레인의 `COST`를 출력합니다.
 
 aoe에서 `dori watch`는 working 또는 not-done 레인이 사람을 기다리며 멈추면 `LANE_BLOCKED <key> <waiting|error|question|idle> <pane>`을 출력합니다. `aoe ps --json`과 화면을 함께 확인하며, 턴이 실행 중이면 출력하지 않습니다. idle은 45초간 지속돼야 하고, 모니터나 wake source, 진행 중이거나 예약된 goal을 기다리는 경우는 idle이 아닙니다. 세션이 직접 띄운 분리된 eval 셀, 백그라운드 bash 세션, 백그라운드 task를 기다리는 경우도 idle이 아니며, 감시 로그에 조용한 `BG_WAITING` 줄만 남고 `blockedWaitMin`(기본 60분)이 지나면 `LANE_BLOCKED`가 됩니다. 닫을 때는 aoe 세션을 멈추고 휴지통으로 옮기며 영구 삭제하지 않습니다.
 
@@ -175,6 +175,7 @@ watcher는 레인을 닫을 때 셸 없이 이 확인을 직접 다시 돌리고
 | `dori guard [--loop MIN]` | 부하, 메모리, 디스크, pane 수 경고 |
 | `dori fix-attempt <key> --metric M --hypothesis H` | 레인에 시킨 수정 한 번을 셈; 레인은 그런 보고에 `(fix: M / H)`를 붙이고, 같은 지표·같은 가설로 세 번째가 되면 `SAME_FIX_3`이 근본 원인 조사로 바꾸라고 알림; 기록하기 전에 그 지표에 이미 시도한 가설 목록(`PRIOR_FIX`)을 먼저 출력 |
 | `dori checkpoint <key> --step ID --result TEXT --evidence PATH [--remote-effect RECEIPT]...` / `dori checkpoints <key>` | 레인이 끝낸 단계를 한 번씩, 한 원격 일(push, merge)의 영수증과 함께 적고, 다시 시작할 때 먼저 읽어서 재시작한 레인이 push나 merge를 되풀이하지 않게 함; 같은 단계를 다른 내용으로 적거나 다른 단계가 이미 가진 영수증을 적으면 거절 |
+| `dori caps <key> [--wall-minutes N\|none] [--token-limit N\|none] [--cost-limit N\|none]` | 레인의 벽시계 분·토큰·비용 상한(기본값 꺼짐, `launch`도 같은 플래그를 받음); 상한에 닿으면 `freshness`가 리드에게 한 번 알리고(`LANE_CAP`) 레인은 멈추지 않음; 플래그를 주면 그 레인의 상한을 정함 |
 | `dori signals [--lane K \| --cwd DIR \| --tag T]` | 한 작업 영역의 지난 레인들이 무엇을 시도했고 어떻게 됐는지: 번호 붙은 수정 시도와 근본 원인 조사로의 전환(`[REPORT]` 줄과 리드의 재지시에서도 읽음), 지표별 태그 수정, 이유가 붙은 완료 주장 거부, 재지시·독촉 수, 결과, 영역의 거부율·재작업, 경고. 레인에 재지시하기 전에 읽는다 |
 | `dori scorecard [--date D] [--post]` | 기록만으로 내는 하루 토큰 성적표(모델 호출 없음): 검증 완료당 비용과 완료 주장 거부율을 나란히, 재작업 상위 레인, 첫 답글 중앙값/p90, 리드 컨텍스트 세금; 리드가 읽도록 `<stateDir>/scorecard/<날짜>.json`과 `latest.md`에 저장, `--post`는 디스코드에도 보냄(기본 꺼짐; 매일 저장하는 systemd timer는 Discord + aoe 설정에 있음) |
 | `dori heavy <label> [--mem 70G] -- <cmd>` | 부하가 낮을 때 빌드·테스트·GPU 일을 메모리 상한이 걸린 자기 scope에서 실행(넘치면 그 일만 꺼지고 레인은 그대로), 이미 도는 일이 있으면 GPU·메모리·CPU가 각각 10% 이상 남을 때만 같이 실행 |

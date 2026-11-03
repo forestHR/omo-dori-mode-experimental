@@ -21,6 +21,7 @@ import { watchLog } from "./watch-log.ts";
 import { checkDone, type SignalIo } from "./done-signals.ts";
 import { gateMissing } from "./merge-gate.ts";
 import { ownerSummary } from "./close-summary.ts";
+import { CostRecordBusy, laneSessionUsage, Supervision } from "./supervision.ts";
 
 export type FlowDeps = {
   readonly run: Runner;
@@ -419,6 +420,18 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
       cleanup.push(`thread not set done: ${why}`);
     }
   }
+  // the lane's cost, recorded once (src/supervision.ts close), after every point that can still refuse the close: a refused
+  // close leaves the lane working, and its later close takes the reading then. A reading or hook that fails is printed and
+  // never keeps a verified lane open.
+  try {
+    const cost = await new Supervision({ stateDir: deps.config.stateDir, run: deps.run, clock: deps.clock, sessionUsage: laneSessionUsage(deps.run, deps.config.sessionsDir) }, deps.config.supervision).close(lane);
+    lines.push(`COST ${lane.key} tokens=${cost.tokens ?? "unknown"} costUsd=${cost.costUsd ?? "unknown"}`);
+  } catch (e) {
+    // Another close (the watcher and a manual close at once) is taking the lane's reading, maybe through its live pane:
+    // this one tears nothing down, so that reading is not lost and the other close finishes the lane.
+    if (e instanceof CostRecordBusy) return { closed: false, lines: [...lines, ...warnings, `CLOSE_IN_PROGRESS ${lane.key}: ${e.message}; the other close finishes the lane`] };
+    lines.push(`COST ${lane.key} not recorded: ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}`);
+  }
   // an aoe session or a herdr pane is closed by its own backend (the pane id says which; a herdr pane's tab goes only when
   // the pane is all it holds); a lane of another herdr agent keeps the tab/pane close it had
   if (lane.pane && omoPane(deps.config, lane.pane)) {
@@ -466,13 +479,16 @@ const settle = async (deps: FlowDeps, lane: Lane, evidence: string): Promise<str
   // the claim's summary is read by closeLane itself; an explicit summary there would post even when the result is in the thread
   const result = await closeLane(deps, verified, note);
   if (!result.closed) {
+    // a manual close got there first and finishes the lane: nothing to tell the lane
+    const busy = result.lines.find((l) => l.startsWith("CLOSE_IN_PROGRESS "));
+    if (busy) return [busy];
     const current = (await deps.registry.read(lane.key)) ?? verified;
     // no summary, or it did not go out: the lead gets the line, and the lane (still idle in its session) is told how to claim again
     const gate = result.lines.find((l) => l.startsWith("CLOSE_SUMMARY_MISSING ") || l.startsWith("CLOSE_SUMMARY_NOT_SENT "));
     if (gate) return [gate, await objectDone(deps, current, [`${gate.startsWith("CLOSE_SUMMARY_MISSING ") ? "no summary for the owner's thread" : "the summary did not reach the owner's thread"} (${gate.split(": ").slice(1).join(": ").slice(0, 300)}); claim again with dori claim-done ${lane.key} --evidence \"...\" --summary \"<2 to 5 plain lines in the owner's language: what changed, what is left, when it reaches where it is used>\"`])];
     return [await objectDone(deps, current, result.lines.filter((l) => l.startsWith("SIGNAL NOT")))];
   }
-  return [...result.lines.filter((l) => l.startsWith("CLOSE_SUMMARY ") || l.startsWith("THREAD_MISSING ") || l.startsWith("THREAD_DONE_WARN ") || l.startsWith("THREAD_STATUS_WARN ")), `LANE_CLOSED ${lane.key} ${result.lines.at(-1)?.split(" ").slice(2).join(" ") ?? ""}`];
+  return [...result.lines.filter((l) => l.startsWith("CLOSE_SUMMARY ") || l.startsWith("COST ") || l.startsWith("THREAD_MISSING ") || l.startsWith("THREAD_DONE_WARN ") || l.startsWith("THREAD_STATUS_WARN ")), `LANE_CLOSED ${lane.key} ${result.lines.at(-1)?.split(" ").slice(2).join(" ") ?? ""}`];
 };
 
 export const watchTick = async (deps: FlowDeps): Promise<string[]> => {

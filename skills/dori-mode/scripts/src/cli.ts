@@ -10,6 +10,7 @@ import { isHerdrPane } from "./herdr.ts";
 import { reviveHerdr } from "./herdr-sessions.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { CheckpointError, Checkpoints } from "./checkpoints.ts";
+import { type BudgetLimits, laneLimits } from "./supervision.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
@@ -86,6 +87,7 @@ const USAGE = `dori <command> [options]
                                        a pane whose agent runs is left alone (REVIVE_ALREADY_RUNNING)
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" --thread REF|new [--why-new "<reason>"] | --no-thread "<reason>" [--model M] [--cwd DIR] [--tag T ...] [--done-weak-ok]
          [--goal "owner words"] [--challenge-before STEP ...] [--use-gpu] [--ui] [--dry-run]
+         [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none] [--activity-path FILE ...]
                                        every lane opens with a work thread (the owner's long work gets one): --thread REF
                                        for the open thread the work continues in, --thread new to open one named T in this
                                        Dori's own channel (DORI_DISCORD_CHANNEL; THREAD_OPENED, then the lane's first
@@ -180,6 +182,10 @@ const USAGE = `dori <command> [options]
                                        the same step again with the same data is a no-op, with other data it is refused;
                                        one --remote-effect per receipt (a push, a merge), each recorded under one step only
   checkpoints <key>                    print the lane's finished steps (JSON); read them before resuming remote work
+  caps <key> [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none]
+                                       print the lane's caps (supervision.defaults, then supervision.lanes.<key>, then its own);
+                                       with flags, set its own (none: off). At a cap freshness tells the lead once (LANE_CAP);
+                                       the lane is never stopped or told
   claim-done [<key>] --evidence TEXT [--summary TEXT] [--posted ID|LINK] [--post-summary]
                                        key defaults to the lane registered for this pane (the tmux session it runs in, else
                                        $HERDR_PANE_ID); --summary: 2 to 5 plain lines for the owner's thread in his language.
@@ -546,6 +552,7 @@ const flags = parseArgs({
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
+    "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
     "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
   },
 });
@@ -598,6 +605,20 @@ if (flags.values.help) {
   console.log(helpFor(command));
   process.exit(0);
 }
+// --wall-minutes N|none, --token-limit N|none, --cost-limit N|none: a number >= 0 is a cap, none turns it off, an absent
+// flag leaves the cap below it; a bad value is refused, so a typo cannot turn a cap off
+const budgetOpts = (): BudgetLimits => {
+  const out: Record<string, number | null> = {};
+  for (const [flag, name] of [["wall-minutes", "wallMinutes"], ["token-limit", "tokens"], ["cost-limit", "costUsd"]] as const) {
+    const v = flags.values[flag];
+    if (v === undefined) continue;
+    const text = typeof v === "string" ? v.trim() : "";
+    if (text === "none") out[name] = null;
+    else if (text !== "" && Number.isFinite(Number(text)) && Number(text) >= 0) out[name] = Number(text);
+    else die(`--${flag} takes a number >= 0 or none, not ${JSON.stringify(v)}`, 2);
+  }
+  return out;
+};
 const loopMin = Number(opt("loop") ?? 0);
 const heavyDeps = (load: () => Promise<number>): SlotDeps => ({
   dir: `${config.stateDir}/heavy`,
@@ -936,7 +957,7 @@ try {
       process.exitCode = await applyUpdate({ config, configPath: configPath(), git: run, systemctl: run, clock: realClock, send: (pane, text) => sendVerified(run, realClock, config, pane, text), print: (line) => console.log(line) }, { pull: Boolean(flags.values.pull), dryRun: Boolean(flags.values["dry-run"]) }) ? 0 : 1;
       break;
     case "launch": {
-      const input = { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: threadOpt(), noThread: noThreadOpt(), whyNew: whyNewOpt(), model: opt("model"), cwd: opt("cwd"), tags: tags(), doneWeakOk: Boolean(flags.values["done-weak-ok"]), goal: opt("goal"), challengeBefore: many("challenge-before"), useGpu: Boolean(flags.values["use-gpu"]), ui: Boolean(flags.values.ui), waive };
+      const input = { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: threadOpt(), noThread: noThreadOpt(), whyNew: whyNewOpt(), model: opt("model"), cwd: opt("cwd"), tags: tags(), doneWeakOk: Boolean(flags.values["done-weak-ok"]), goal: opt("goal"), challengeBefore: many("challenge-before"), useGpu: Boolean(flags.values["use-gpu"]), ui: Boolean(flags.values.ui), waive, budget: budgetOpts(), activityPaths: many("activity-path") };
       const noGoal = goalWarning(input);
       if (noGoal) console.log(noGoal);
       // LAUNCH_NO_THREAD / LAUNCH_THREAD_IS_CHANNEL / LAUNCH_RELATED_THREAD: nothing opened, exit 4 like a missing directive
@@ -2180,6 +2201,17 @@ try {
         step: need("step"), result: need("result"), evidence: [need("evidence")], remoteEffects: many("remote-effect"),
       }, realClock.now());
       console.log(JSON.stringify(result));
+      break;
+    }
+    case "caps": {
+      const l = (key ? await deps.registry.read(key) : undefined) ?? die(`usage: dori caps <key> [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none]; no registered lane ${JSON.stringify(key ?? "")}`, 2);
+      const set = budgetOpts();
+      if (Object.keys(set).length) await deps.registry.patch(l.key, { budget: { ...l.budget, ...set } });
+      const now = (await deps.registry.read(l.key)) ?? l;
+      const caps = laneLimits(config.supervision, now);
+      const show = (v: number | null): string => (v === null ? "off" : String(v));
+      console.log(`CAPS ${l.key} wallMinutes=${show(caps.wallMinutes)} tokens=${show(caps.tokens)} costUsd=${show(caps.costUsd)} (its own: ${JSON.stringify(now.budget ?? {})})`);
+      if (Object.keys(set).length) console.log(`CAPS_SET ${l.key}: the next freshness sweep reads them; a cap reached tells the lead once, again only after the cap changes`);
       break;
     }
     case "checkpoints": {

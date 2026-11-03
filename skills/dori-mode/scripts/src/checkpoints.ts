@@ -60,6 +60,41 @@ const ownerOf = (lock: string): LockOwner | null => {
   }
 };
 
+/**
+ * Take a lock and return its release. The lock is a flock on the lock file held by this open file: another holder, in this
+ * process or another, is refused with the owner record (pid, host, time) the holder wrote. The release removes the lock
+ * file while still holding it, so a taker that opened the old file finds it no longer at the path once it gets the flock,
+ * and opens the path again. Also used for the one-time cost record of a lane (src/supervision.ts).
+ */
+export const takeLock = (lock: string, now: number, what: string, key: string): (() => void) => {
+  const record = JSON.stringify({ pid: process.pid, host: hostname(), at: new Date(now).toISOString(), nonce: randomUUID() } satisfies LockOwner);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const fd = openSync(lock, "a+", 0o600);
+    if (libc.symbols.flock(fd, LOCK_EX | LOCK_NB) !== 0) {
+      closeSync(fd);
+      const owner = ownerOf(lock);
+      const since = owner ? Date.parse(owner.at) : NaN;
+      throw new CheckpointError(`${what} locked: ${key} (${owner ? `pid ${owner.pid}` : "no owner record"}${Number.isFinite(since) ? `, ${Math.max(0, Math.round((now - since) / 1000))} s old` : ""})`);
+    }
+    const named = statSync(lock, { throwIfNoEntry: false });
+    if (!named || named.ino !== fstatSync(fd).ino) {
+      closeSync(fd); // a release removed (or replaced) the file between our open and our flock
+      continue;
+    }
+    ftruncateSync(fd, 0);
+    writeSync(fd, record);
+    fsyncSync(fd);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      rmSync(lock, { force: true });
+      closeSync(fd);
+    };
+  }
+  throw new CheckpointError(`${what} locked: ${key} (the lock file changed while taking it; retry)`);
+};
+
 const flush = (path: string): void => {
   const fd = openSync(path, "r");
   try {
@@ -99,42 +134,11 @@ export class Checkpoints {
     });
   }
 
-  /**
-   * Take the journal's writer lock and return its release. The lock is a flock on <journal>.lock held by this open file:
-   * another writer, in this process or another, is refused with the owner record (pid, host, time) the holder wrote. The
-   * release removes the lock file while still holding it, so a writer that opened the old file finds it no longer at the
-   * path once it gets the flock, and opens the path again.
-   */
+  /** Take the journal's writer lock (takeLock on <journal>.lock) and return its release. */
   lock(key: string, now: number): () => void {
     const path = this.path(key);
     mkdirSync(dirname(path), { recursive: true });
-    const lock = `${path}.lock`;
-    const record = JSON.stringify({ pid: process.pid, host: hostname(), at: new Date(now).toISOString(), nonce: randomUUID() } satisfies LockOwner);
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const fd = openSync(lock, "a+", 0o600);
-      if (libc.symbols.flock(fd, LOCK_EX | LOCK_NB) !== 0) {
-        closeSync(fd);
-        const owner = ownerOf(lock);
-        const since = owner ? Date.parse(owner.at) : NaN;
-        throw new CheckpointError(`checkpoint writer locked: ${key} (${owner ? `pid ${owner.pid}` : "no owner record"}${Number.isFinite(since) ? `, ${Math.max(0, Math.round((now - since) / 1000))} s old` : ""})`);
-      }
-      const named = statSync(lock, { throwIfNoEntry: false });
-      if (!named || named.ino !== fstatSync(fd).ino) {
-        closeSync(fd); // a release removed (or replaced) the file between our open and our flock
-        continue;
-      }
-      ftruncateSync(fd, 0);
-      writeSync(fd, record);
-      fsyncSync(fd);
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        rmSync(lock, { force: true });
-        closeSync(fd);
-      };
-    }
-    throw new CheckpointError(`checkpoint writer locked: ${key} (the lock file changed while taking it; retry)`);
+    return takeLock(`${path}.lock`, now, "checkpoint writer", key);
   }
 
   write(key: string, input: CheckpointInput, now: number): { checkpoint: Checkpoint; unchanged: boolean } {
