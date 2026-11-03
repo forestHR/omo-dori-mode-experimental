@@ -13,6 +13,7 @@ import { windowsHandoverRefusal } from "./windows-handover.ts";
 import { fileLog, installTaskRefusal, serve, serveLoops, spawnLoop, TASK_NAME, taskArgv } from "./serve.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { CheckpointError, Checkpoints } from "./checkpoints.ts";
+import { isLessonOutcome, LessonError, Lessons } from "./lessons.ts";
 import { type BudgetLimits, laneLimits } from "./supervision.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
@@ -286,7 +287,13 @@ const USAGE = `dori <command> [options]
                                        what earlier lanes tried and how it went: numbered fix attempts and the root-cause
                                        switch, tagged fixes by metric, rejected done claims, re-sends, nudges, outcome,
                                        warnings; no option = one SIGNALS line per open lane. Read it before re-instructing
-  close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK]
+  lesson add <key> --rule TEXT --evidence PATH [--cwd DIR]
+                                       keep a rule the lane learned about its repo (the lane's cwd); the next launch there
+                                       puts it in the brief under "Lessons for this repo"
+  lesson list [--cwd DIR]              current lessons, newest first; a damaged journal line is a LESSON_WARNING
+  lesson mark <id> --outcome pending|helped|no-effect|harmful|encoded
+                                       only pending and helped ones reach new briefs
+  close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK] [--lesson TEXT [--evidence PATH]]
                                        close now (Done signals must read back live); a lane with a work thread first posts
                                        its summary for the owner there (--summary, the claim's, else one a model writes from
                                        its last report and REPORT.md): none is CLOSE_SUMMARY_MISSING, a post that failed is
@@ -565,6 +572,7 @@ const flags = parseArgs({
     answer: { type: "string" }, repo: { type: "string", multiple: true }, since: { type: "string" }, until: { type: "string" }, backtest: { type: "boolean" },
     static: { type: "boolean" }, dir: { type: "string", multiple: true }, "no-thread": { type: "string" }, "why-new": { type: "string" },
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
+    rule: { type: "string" }, outcome: { type: "string" }, lesson: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
@@ -1298,7 +1306,10 @@ try {
       if (summary !== undefined) postable(summary, `close --summary ${key ?? ""}`);
       const bad = summary === undefined ? undefined : plainSummaryProblem(summary, config.discord.locale, config.discord.ownerSpeech);
       if (bad) die(`SUMMARY_REFUSED ${key ?? ""}: ${bad}; write it for the owner in plain words`, 2);
-      const r = await closeLane(deps, await lane(key ?? die("close needs a lane key")), opt("note") ?? "closed by the lead", summary, postedId());
+      const target = await lane(key ?? die("close needs a lane key"));
+      // --lesson: kept after a successful close, its evidence the Done line unless --evidence names one; never blocks the close
+      const rule = opt("lesson");
+      const r = await closeLane(deps, target, opt("note") ?? "closed by the lead", summary, postedId(), rule === undefined ? undefined : { rule, evidence: opt("evidence") ?? target.done });
       for (const line of r.lines) console.log(line);
       process.exit(r.closed ? 0 : 2);
     }
@@ -2250,6 +2261,34 @@ try {
       if (r.failed) process.exit(1);
       break;
     }
+    case "lesson": {
+      const lessons = new Lessons(config.stateDir);
+      switch (key) {
+        case "add": {
+          const laneKey = flags.positionals[1] ?? die("usage: dori lesson add <key> --rule TEXT --evidence PATH [--cwd DIR]");
+          // a closed lane may still add what it learned, so the registry is read directly, not through lane()
+          const target = (await deps.registry.read(laneKey)) ?? die(`no registered lane "${laneKey}"`);
+          console.log(JSON.stringify(lessons.add({ lane: laneKey, cwd: opt("cwd") ?? target.cwd ?? config.defaultCwd, rule: need("rule"), evidence: need("evidence") }, realClock.now())));
+          break;
+        }
+        case "list": {
+          const read = lessons.read(opt("cwd"));
+          for (const problem of read.problems) console.error(`LESSON_WARNING ${problem}`);
+          console.log(JSON.stringify(read.lessons, null, 2));
+          break;
+        }
+        case "mark": {
+          const id = flags.positionals[1] ?? die("usage: dori lesson mark <id> --outcome pending|helped|no-effect|harmful|encoded");
+          const outcome = need("outcome");
+          if (isLessonOutcome(outcome)) console.log(JSON.stringify(lessons.mark(id, outcome)));
+          else die("--outcome must be pending, helped, no-effect, harmful or encoded");
+          break;
+        }
+        default:
+          die("usage: dori lesson add|list|mark");
+      }
+      break;
+    }
     case "checkpoint": {
       const target = await lane(key ?? die("checkpoint needs a lane key"));
       // parseArgs takes one value per flag; a second bare receipt would otherwise be dropped and its effect repeated later.
@@ -2285,6 +2324,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError) die(e.message);
+  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError || e instanceof LessonError) die(e.message);
   throw e;
 }

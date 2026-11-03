@@ -20,9 +20,10 @@ import { laneArea, loadTree, treeSection } from "./explore.ts";
 import { watchLog } from "./watch-log.ts";
 import { StartRefused } from "./backlog.ts";
 import { relatedLines, relatedThreads, type RelatedThread } from "./related-thread.ts";
-import { addedLine, checkedLedger, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
+import { addedLine, checkedLedger, headingAt, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
 import { join } from "node:path";
 import type { BudgetLimits } from "./supervision.ts";
+import { Lessons } from "./lessons.ts";
 
 export type LaunchInput = {
   readonly key: string;
@@ -436,6 +437,40 @@ export const treeContext = async (deps: FlowDeps, draft: Lane): Promise<string |
   return treeSection(trees, deps.config.explore.treeLines, `dori tree --lane ${draft.key}`);
 };
 
+// The repo's lessons (src/lessons.ts, dori lesson add / close --lesson): up to 8 current rules earlier lanes in the same cwd
+// learned, newest first. A rule the brief already says word for word (a directive of the ledger, the lead's own text) is
+// left out, so the owner's words are not said twice. A damaged journal line is a LESSON_WARNING, never a stopped launch.
+const LESSONS_HEADING = "## Lessons for this repo (written by dori launch)";
+
+// The lessons block an earlier launch wrote into this brief: its heading line and the lines under it up to a blank line or
+// the next heading (a rule is one line, so the block has no blank line inside).
+export const withoutLessons = (brief: string): string => {
+  let text = brief;
+  for (let at = headingAt(text, LESSONS_HEADING); at >= 0; at = headingAt(text, LESSONS_HEADING)) {
+    const rest = text.slice(at);
+    const end = rest.search(/\n(?:[ \t]*\n|## )/);
+    text = text.slice(0, at) + (end < 0 ? "" : rest.slice(end + 1));
+  }
+  return text;
+};
+
+export const repoLessons = (deps: Pick<FlowDeps, "config">, cwd: string, brief: string): { readonly section?: string; readonly warnings: string[] } => {
+  const { lessons, problems } = new Lessons(deps.config.stateDir).forRepo(cwd);
+  const flat = (s: string): string => s.replace(/\s+/g, " ").trim();
+  const said = flat(brief);
+  const fresh = lessons.filter((l) => !said.includes(flat(l.rule)));
+  const warnings = problems.map((p) => `LESSON_WARNING ${p}`);
+  if (!fresh.length) return { warnings };
+  return {
+    warnings,
+    section: [
+      LESSONS_HEADING,
+      "Rules earlier lanes in this repo learned, newest first. They are lane lessons, not the owner's directives. Follow them; when one helped or got in the way, say so in a report (the lead marks it: dori lesson mark <id> --outcome helped|no-effect|harmful|encoded).",
+      ...fresh.map((l) => `- [${l.outcome}; ${l.lane}; ${l.id}] ${l.rule}`),
+    ].join("\n"),
+  };
+};
+
 const draftLane = (deps: FlowDeps, input: LaunchInput): Lane => ({
   ...(input.noThread?.trim() ? { noThread: input.noThread.trim() } : {}),
   ...(input.whyNew?.trim() ? { whyNew: input.whyNew.trim() } : {}),
@@ -456,11 +491,13 @@ export type Rendered = {
 };
 
 // The brief as the lane will read it: the lead's text with the eight steps, the UI steps for UI work and the directives of
-// the ledger in scope it lacks, then Past signals, the hypothesis tree, and the footer.
+// the ledger in scope it lacks, then the repo's lessons, Past signals, the hypothesis tree, and the footer.
 export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<Rendered> => {
   const briefFile = Bun.file(input.brief);
   if (!(await briefFile.exists())) throw new LaunchError(`brief not found: ${input.brief}`);
-  const raw = (await briefFile.text()).replace(/\s*$/, "");
+  // a brief launched before carries the lessons launch wrote then (one maybe retired since): only that block is cut and made
+  // anew; text added after the footer since (backlog's read-only rule, an owner's answer) stays as it is
+  const raw = withoutLessons(await briefFile.text()).replace(/\s*$/, "");
   const cwd = input.cwd ?? deps.config.defaultCwd;
   const ledger = launchLedger(deps);
   const ctx = scopeContext(raw, ledger, { ui: input.ui, repo: ledger.entries.length ? await laneRepo(deps, cwd) : "" });
@@ -476,8 +513,9 @@ export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<R
   const steps = stepsLine(input.key, eight);
   const hint = uiWarning(input, raw, ledger, ui);
   const added = addedLine(input.key, plan);
-  const lines = [...(hint ? [hint] : []), ...(added ? [added] : []), ...waivedLines(input.key, plan)];
-  return { draft, ...(steps ? { steps } : {}), lines, missing: missingLines(input.key, plan), text: `${ui ? withUiSteps(lead, await uiSteps()) : lead}\n${past ? `${past}\n` : ""}${tree ? `${tree}\n` : ""}${footer(draft, deps.config.leadPane, deps.config.backend, Object.keys(deps.config.mergeGate.repos))}` };
+  const lessons = repoLessons(deps, draft.cwd ?? deps.config.defaultCwd, lead);
+  const lines = [...(hint ? [hint] : []), ...(added ? [added] : []), ...waivedLines(input.key, plan), ...lessons.warnings];
+  return { draft, ...(steps ? { steps } : {}), lines, missing: missingLines(input.key, plan), text: `${ui ? withUiSteps(lead, await uiSteps()) : lead}\n${lessons.section ? `${lessons.section}\n` : ""}${past ? `${past}\n` : ""}${tree ? `${tree}\n` : ""}${footer(draft, deps.config.leadPane, deps.config.backend, Object.keys(deps.config.mergeGate.repos))}` };
 };
 
 // The first lines of the lead's brief (headings and blank lines left out), for the thread's first message.

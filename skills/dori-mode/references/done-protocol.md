@@ -26,7 +26,7 @@ If the lead has paused your lane (`dori pause`, e.g. while it waits on the owner
 
 ## What you learned
 
-Before you claim, put each thing where it belongs, once: a standing instruction of the owner that the lane met goes to the lead in a `[REPORT]` for the directive ledger (not only into memory); a lesson, a fact or how the work went goes into your omo memory with the report's path; the report itself stays in `~/.dori/qa` as the record.
+Before you claim, put each thing where it belongs, once: a standing instruction of the owner that the lane met goes to the lead in a `[REPORT]` for the directive ledger (not only into memory); a lesson, a fact or how the work went goes into your omo memory with the report's path; a trap of this repo the next lane here would hit again goes into the `[REPORT]` too, as one line the lead keeps with `dori close --lesson` (or you with `dori lesson add <key> --rule ... --evidence <path>`), so the next brief in this repo carries it; the report itself stays in `~/.dori/qa` as the record.
 
 ## Reporting honestly
 

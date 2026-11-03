@@ -26,6 +26,7 @@ import { laneDirectiveWords } from "./directive-audit.ts";
 import { ackFile, launchOf, LEAD_UNDERSTOOD_HEADINGS, manifestPath, type MonitorSpec, openGoal, readManifest, sameCommand } from "./handover.ts";
 import { type LaneFacts, type LaneHandoverDeps, missingFrom, UNDERSTOOD_HEADINGS } from "./lane-handover.ts";
 import { launchLedger } from "./launch.ts";
+import { beforeGenerated } from "./directives.ts";
 import { sendVerified } from "./panes.ts";
 import { covered, fillGaps, flat, type Missing, quoted, section, words as wordsIn } from "./restatement.ts";
 import { type Candidate, inboxMessages, leadLines, type OwnerProof, ownerQuotes, QUOTE, readRollovers, type Said, userLines } from "./rollover.ts";
@@ -410,7 +411,7 @@ export const auditHandover = async (deps: LaneHandoverDeps, c: Committed, opts: 
   if (candidates.length) {
     const classify = opts.classify ?? reviewerClassify(deps);
     const state = [lane?.lastReport ?? "", section(summaryText, "In progress"), section(summaryText, "Next step"), section(restated(), "Next step")].filter(Boolean).join(" | ").replace(/\s+/g, " ").slice(0, 1500);
-    const r = await classify(candidates, { who: c.who, key: c.key, title: lane?.title ?? laneFacts?.lane.title ?? "", goal: lane?.goal ?? laneFacts?.lane.goal ?? "", state, model: lane?.model ?? config.defaultModel, reports: reportsIn(oldLog, c.key).slice(-60).map((x) => `- ${x.at.slice(0, 16)} ${x.text.slice(0, 350)}`).join("\n"), has: [restated(), readText(brief).split(/\n## (?:Past signals|Hypothesis tree|Lane footer) \(written by dori launch\)/)[0] ?? "", ...ledger].join("\n").replace(/\n{3,}/g, "\n\n") });
+    const r = await classify(candidates, { who: c.who, key: c.key, title: lane?.title ?? laneFacts?.lane.title ?? "", goal: lane?.goal ?? laneFacts?.lane.goal ?? "", state, model: lane?.model ?? config.defaultModel, reports: reportsIn(oldLog, c.key).slice(-60).map((x) => `- ${x.at.slice(0, 16)} ${x.text.slice(0, 350)}`).join("\n"), has: [restated(), beforeGenerated(readText(brief)), ...ledger].join("\n").replace(/\n{3,}/g, "\n\n") });
     if (!r.verdicts) emit(`HANDOVER_AUDIT_UNSORTED ${c.key} ${c.stamp}: ${candidates.length} items only the old conversation held were not sorted (${r.error ?? "no answer"}); none is recorded`);
     sortedBy = r.model ?? "";
     (r.verdicts ?? []).forEach((v, i) => {

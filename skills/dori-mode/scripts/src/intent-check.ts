@@ -12,6 +12,7 @@ import { iso } from "./run.ts";
 import { watchLog } from "./watch-log.ts";
 import { blockTexts, laneDirectiveWords } from "./directive-audit.ts";
 import { launchLedger } from "./launch.ts";
+import { beforeGenerated } from "./directives.ts";
 import { leadSessionFiles } from "./lead-sessions.ts";
 
 // dori intent-check: at each stage change a lane states its direction and next step, and a model of another family than
@@ -39,8 +40,8 @@ const MAX_ITEM = 1_500;
 
 const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)} [cut]` : s);
 
-// the sections dori launch appends (past signals, the tree, the footer) are not the owner's words
-export const briefForCheck = (brief: string): string => cut(brief.split(/\n## (?:Past signals|Hypothesis tree|Lane footer) \(written by dori launch\)/)[0] ?? brief, MAX_BRIEF);
+// the sections dori launch appends (lessons, past signals, the tree, the footer) are not the owner's words
+export const briefForCheck = (brief: string): string => cut(beforeGenerated(brief), MAX_BRIEF);
 
 const OWNER_WORDS = /discord(?:app)?\.com\/channels\/\d+\/\d+\/\d+|원문|verbatim/i;
 
