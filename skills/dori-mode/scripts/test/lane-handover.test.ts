@@ -1514,19 +1514,20 @@ const BROWSER = { pid: 727236, ppid: 11, cmd: "/home/oriclaw/.cache/ms-playwrigh
 // every process of the pane's terminal session (sid 10, the pane's shell) as herdr ends them all when it closes the tab
 const inSession = (t: Proc[]): Proc[] => t.map((p) => ({ ...p, sid: p.pid === 40 ? 40 : p.pid === 41 ? 41 : 10 }));
 
-test("omo-ai's own daemons and a headless browser left behind are no local chains: the lane moves without a ready mark, the browser listed as a leftover", async () => {
-  // Given
+test("omo-ai's own daemons are no local chains, and a headless browser the agent left is one the ready mark covers: nothing tells an idle browser from a working one", async () => {
+  // Given: ZzangDori herdr-switch 09:11:36Z, refused for the memory run supervisor and a headless chrome
   const deps = await setup();
   table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), SUPERVISOR, LSP, BROWSER];
   // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
-  // Then
-  expect(printed.filter((l) => l.startsWith("HANDOVER_REFUSED"))).toEqual([]);
-  expect(r.code).toBe(0);
-  const note = readFileSync(r.note ?? "", "utf8");
-  expect(note).toContain("## Local chains of the old session (0)");
-  expect(note).toContain("## Leftovers of the old session (1)");
-  expect(note).toContain("- 727236: `/home/oriclaw/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell");
+  const refused = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  ready(deps, [BROWSER.pid]);
+  const covered = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
+  // Then: only the browser holds the move (a driver can still be downloading after its cell returned: review 318 challenge)
+  expect(refused.code).toBe(2);
+  expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 727236 /home/oriclaw/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-");
+  expect(covered.code).toBe(0);
+  const note = readFileSync(covered.note ?? "", "utf8");
+  expect(note).toContain("## Local chains of the old session (1)");
   expect(note).not.toContain("memory-run-supervisor");
   expect(note).not.toContain("lsp-daemon");
 });
@@ -1545,24 +1546,17 @@ test("a headless browser a chain started is part of that chain, and a real chain
   const named = await laneHandover(deps, "demo", "aoe_lead_x", OK);
   table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 72, ppid: 11, cmd: "firefox --headless --screenshot /tmp/shot.png https://x" }];
   const batch = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // a driver flag beside a batch job does not make it idle (review 318 round 3)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 74, ppid: 11, cmd: "firefox --headless --marionette --screenshot /tmp/shot.png https://x" }];
+  const mixed = await laneHandover(deps, "demo", "aoe_lead_x", OK);
   // Then
-  expect([r.code, wrapped.code, named.code, batch.code]).toEqual([2, 2, 2, 2]);
+  expect([r.code, wrapped.code, named.code, batch.code, mixed.code]).toEqual([2, 2, 2, 2, 2]);
   const refused = printed.filter((l) => l.startsWith("HANDOVER_REFUSED"));
   expect(refused[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 15 bash -c sleep 7200; echo chain-done. ");
   expect(refused[1]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 70 bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh. ");
   expect(refused[2]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 71 bash -c cat /g/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js; ./long-job.sh. ");
   expect(refused[3]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 72 firefox --headless --screenshot /tmp/shot.png https://x. ");
-});
-
-test("a browser a driver left, named by its quoted Windows path, is a leftover too", async () => {
-  // Given
-  const deps = await setup();
-  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 73, ppid: 11, cmd: '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --headless=new --remote-debugging-pipe --user-data-dir=C:\\t\\p' }];
-  // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
-  // Then
-  expect(r.code).toBe(0);
-  expect(readFileSync(r.note ?? "", "utf8")).toContain("## Leftovers of the old session (1)");
+  expect(refused[4]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 74 firefox --headless --marionette --screenshot /tmp/shot.png https://x. ");
 });
 
 test("a job that left the pane's process tree but stays in its terminal session dies with it: it is a local chain the ready mark covers, not a detached job", async () => {

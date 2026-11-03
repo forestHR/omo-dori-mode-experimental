@@ -98,8 +98,6 @@ export type LaneFacts = {
   readonly todos: readonly string[];
   readonly goal?: string;
   readonly chains: readonly Job[];
-  // headless browsers the old session left (localChains): they end with it and hold no work; absent: none
-  readonly leftovers?: readonly Job[];
   readonly detached: readonly Job[];
   // work the old session's monitors started (pid: the monitor's process, pids: the work under it); absent: none
   readonly work?: readonly Job[];
@@ -212,22 +210,12 @@ const words = (cmd: string, n: number): string[] => {
   }
   return out;
 };
-const exeName = (cmd: string): string => (words(cmd, 1)[0] ?? "").split(/[\\/]/).pop() ?? "";
 // the omo-ai daemon itself: bun or node running a script of the plugin, never a command line that only names that path
 const omoDaemon = (cmd: string): boolean => {
   const [exe = "", script = ""] = words(cmd, 2);
   return /^(?:bun|node)(?:\.exe)?$/i.test(exe.split(/[\\/]/).pop() ?? "") && /omo-ai[\\/]plugin[\\/](?:extensions|runtime)[\\/]/.test(script);
 };
 const infra = (cmd: string): boolean => INFRA.test(cmd) || omoDaemon(cmd);
-// A headless browser the agent or its kernel started itself (a browser-driving cell's, left after the cell ended): no work
-// of its own dies with it (a cell still driving it is a running eval cell, a script driving it is that script's chain), so
-// it is a leftover the note lists, not a chain. It refused ZzangDori's tournament-public and herdr-switch moves on 2026-11-03.
-// Its executable decides, never a word elsewhere on the line (a shell that runs a browser and then more steps is a chain),
-// and only a browser a driver controls (playwright's or puppeteer's pipe or port) is idle once its driver ended: a browser
-// doing a job of its own (--screenshot, --print-to-pdf, --dump-dom) is work.
-const BROWSER = /^(?:chrome-headless-shell|headless_shell|chrome|chromium|chromium-browser|google-chrome|msedge|firefox|MiniBrowser)(?:\.exe)?$/i;
-const DRIVEN = /(?:^|\s)--?(?:remote-debugging-pipe|remote-debugging-port(?:=\S*)?|juggler-pipe|marionette|inspector-pipe)(?=\s|$)/;
-const leftover = (cmd: string): boolean => BROWSER.test(exeName(cmd)) && DRIVEN.test(cmd);
 // another session's processes: an agent, the herdr server (started from a lane, it carries that lane's environment) and
 // everything under them
 const HERDR_SERVER = /(?:^|[\\/\s])herdr(?:\.exe)?\s+server\b/;
@@ -292,11 +280,11 @@ export const agentStartOf = async (run: Runner, agent: Proc, platform: string = 
 // setsid sleep, and a nohup job of omo's bash tool, whose session leader had already ended, survived). Those jobs count as
 // local chains too: 27 of 27 "detached jobs" the notes said would keep running were dead after the close. Only a job in
 // another session survives and stays a detached job. The session is known only where the process table has it (Linux).
-export const localChains = (table: readonly Proc[], shellPid: number, monitorPids: readonly number[], exclude: ReadonlySet<number> = new Set()): { readonly agent?: Proc; readonly chains: Job[]; readonly leftovers: Job[]; readonly tree: Set<number> } => {
+export const localChains = (table: readonly Proc[], shellPid: number, monitorPids: readonly number[], exclude: ReadonlySet<number> = new Set()): { readonly agent?: Proc; readonly chains: Job[]; readonly tree: Set<number> } => {
   const tree = descendants(table, shellPid);
   const agent = tree.find((p) => AGENT.test(p.cmd) && !ended(p));
   const ids = new Set([shellPid, ...tree.map((p) => p.pid)]);
-  if (!agent) return { chains: [], leftovers: [], tree: ids };
+  if (!agent) return { chains: [], tree: ids };
   const session = new Set([...ancestors(table, agent.pid)].filter((pid) => ids.has(pid)));
   const kernels = new Set(table.filter((p) => p.ppid === agent.pid && KERNEL.test(p.cmd)).map((p) => p.pid));
   const sids = new Set(table.filter((p) => ids.has(p.pid) && (p.sid ?? 0) > 0).map((p) => p.sid));
@@ -306,7 +294,7 @@ export const localChains = (table: readonly Proc[], shellPid: number, monitorPid
   const roots = table.filter((p) => ((session.has(p.ppid) || kernels.has(p.ppid)) && !session.has(p.pid) && !kernels.has(p.pid)) || (stray.has(p.pid) && !stray.has(p.ppid)))
     .filter((p) => !ended(p) && !infra(p.cmd) && !monitorPids.includes(p.pid) && !exclude.has(p.pid))
     .map((p) => ({ pid: p.pid, cmd: p.cmd, pids: [p.pid, ...descendants(table, p.pid).filter((d) => !ended(d)).map((d) => d.pid)] }));
-  return { agent, chains: roots.filter((c) => !leftover(c.cmd)), leftovers: roots.filter((c) => leftover(c.cmd)), tree: new Set([...ids, ...stray]) };
+  return { agent, chains: roots, tree: new Set([...ids, ...stray]) };
 };
 
 // Why an automatic rollover leaves a lane to the lead: a tag in handover.trainingTags, or a live monitor watching a training
@@ -449,9 +437,6 @@ export const renderLaneNote = (f: LaneFacts, at: string, stateDir: string): stri
   ...(f.work?.length
     ? [`## Work the old session's monitors started (${f.work.length})`, "It runs under a monitor of the old session (marked LAUNCHES_WORK under Monitors), so the handover keeps that session frozen instead of closing it, its monitors left running, and closes it once this work ended. Do not start it again; follow it with the watch-only monitors of step 1.", ...f.work.map((j) => `- monitor ${j.pid} "${j.cmd.slice(0, 120)}": ${(j.pids ?? []).join(", ")}`), ""]
     : []),
-  ...(f.leftovers?.length
-    ? [`## Leftovers of the old session (${f.leftovers.length})`, "Headless browsers the old session left behind with nothing driving them; they end when it closes and no work goes with them. Start your own when you need one.", ...f.leftovers.map(job), ""]
-    : []),
   `## Detached jobs (${f.detached.length})`,
   ...(f.detached.length ? ["They run in a terminal session of their own, outside the old pane, so closing it does not end them; the handover does not touch them. Check on them, do not start them twice.", ...f.detached.map(job)] : ["none"]),
   "",
@@ -568,7 +553,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   }
   const table = await deps.procs();
   const shell = await tmuxPanePid(deps.run, lane.pane);
-  const { agent, chains, leftovers, tree } = localChains(table, shell, monitorPids);
+  const { agent, chains, tree } = localChains(table, shell, monitorPids);
   if (!agent) return refuse(`no omo agent process under pane ${lane.pane} (shell pid ${shell || "?"})`);
   const jobs = monitorWork(entries, table, now, deps.alive, deps.home);
   const marked = detachedJobs(table, tree, session, old.id, deps.envOf);
@@ -639,7 +624,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const leadWords = leadLines(userLines(oldLog), Date.parse(since) || 0);
   const facts: LaneFacts = {
     lane, from: { pane: lane.pane, aoeId: old.id, session, title: old.title, cwd: old.path }, cwd: real, model: splitModel(model).base, thinking, ...(shown.contextPct !== undefined ? { contextPct: shown.contextPct } : {}), ...(shown.account ? { account: shown.account } : {}),
-    monitors, todos: session ? openTodos(sessionDir, session) : [], goal: session ? openGoal(sessionDir, session) : undefined, chains, ...(leftovers.length ? { leftovers } : {}), detached, ...(jobs.length ? { work: jobs } : {}), ...(ready ? { ready } : {}), laneNote, signals, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}),
+    monitors, todos: session ? openTodos(sessionDir, session) : [], goal: session ? openGoal(sessionDir, session) : undefined, chains, detached, ...(jobs.length ? { work: jobs } : {}), ...(ready ? { ready } : {}), laneNote, signals, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}),
     agentPid: agent.pid, ...(logOf(sessionDir, session) ? { oldLog: logOf(sessionDir, session) } : {}),
     ownerMessages: ownerMessagesFor({ inbox: deps.inbox ?? "", ownerIds: deps.ownerIds ?? [], oldLog: logOf(sessionDir, session), thread: lane.thread.startsWith("discord:") ? lane.thread.slice("discord:".length) : undefined, since, guild: process.env.DORI_DISCORD_GUILD?.trim() }),
     ...(leadWords.length ? { leadWords } : {}),
@@ -649,7 +634,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const note = join(dir, `${key}-${stamp}.md`);
   writeFileSync(note, renderLaneNote(facts, at, config.stateDir));
   writeFileSync(join(dir, `${key}-${stamp}.json`), JSON.stringify(facts, null, 1));
-  emit(`HANDOVER_NOTE ${note}: ${monitors.length} monitors, ${facts.todos.length} todos, goal ${facts.goal ? "yes" : "no"}, ${chains.length} local chains, ${leftovers.length} leftovers, ${detached.length} detached jobs, ${tasks.length} background tasks, ${leadWords.length} lead instructions, context ${shown.contextPct ?? "?"}%, compactions ${signals.compactions ?? "?"}, age ${signals.ageH ?? "?"} h, ready ${ready ? ready.at : "no"}`);
+  emit(`HANDOVER_NOTE ${note}: ${monitors.length} monitors, ${facts.todos.length} todos, goal ${facts.goal ? "yes" : "no"}, ${chains.length} local chains, ${detached.length} detached jobs, ${tasks.length} background tasks, ${leadWords.length} lead instructions, context ${shown.contextPct ?? "?"}%, compactions ${signals.compactions ?? "?"}, age ${signals.ageH ?? "?"} h, ready ${ready ? ready.at : "no"}`);
   if (jobs.length) emit(`HANDOVER_MONITOR_WORK ${key} ${jobs.length}: ${jobs.map((j) => `monitor ${j.pid} "${j.cmd.slice(0, 60)}" runs ${(j.pids ?? []).join(",")}`).join("; ")}; the old session is frozen, not closed, until it ends`);
   const title = titleFor(old.title, stamp);
   if (opts.dryRun) {
