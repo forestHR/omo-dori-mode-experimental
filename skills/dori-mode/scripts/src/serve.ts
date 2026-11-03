@@ -90,7 +90,7 @@ export const fileLog = (file: string, clock: Clock): ((line: string) => void) =>
 
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
-export const taskArgv = (bun: string, cli: string, stateDir: string): string[] => {
+export const taskArgv = (bun: string, cli: string, stateDir: string, name: string = TASK_NAME): string[] => {
   const state = resolve(stateDir);
   const entry = join(state, "serve-task.ps1");
   mkdirSync(state, { recursive: true });
@@ -109,7 +109,7 @@ exit $LASTEXITCODE
     "$trigger = New-ScheduledTaskTrigger -AtLogOn",
     "$settings = New-ScheduledTaskSettingsSet",
     "$settings.ExecutionTimeLimit = 'PT0S'",
-    `Register-ScheduledTask -TaskName ${data(TASK_NAME)} -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null`,
+    `Register-ScheduledTask -TaskName ${data(name)} -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null`,
   ].join("; ");
   return ["powershell", "-NoProfile", "-NonInteractive", "-Command", registration];
 };

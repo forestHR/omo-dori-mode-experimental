@@ -33,7 +33,7 @@ const taskFixture = () => {
   try {
     process.env.DORI_CONFIG = config;
     process.env.DORI_ENV_FILE = envFile;
-    argv = taskArgv(process.execPath, cli, state).map((part) => part.replaceAll(TASK_NAME, name));
+    argv = taskArgv(process.execPath, cli, state, name);
   } finally {
     if (previousConfig === undefined) delete process.env.DORI_CONFIG;
     else process.env.DORI_CONFIG = previousConfig;
