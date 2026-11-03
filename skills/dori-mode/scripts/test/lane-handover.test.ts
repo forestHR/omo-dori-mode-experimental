@@ -1537,9 +1537,14 @@ test("a headless browser a chain started is part of that chain, and a real chain
   table = [...baseTable(), SUPERVISOR, { ...BROWSER, ppid: 15 }];
   // When
   const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // a shell whose command names the browser and then more steps is a chain: the executable decides (review 318)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 70, ppid: 11, cmd: "bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh" }];
+  const wrapped = await laneHandover(deps, "demo", "aoe_lead_x", OK);
   // Then
-  expect(r.code).toBe(2);
-  expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 15 bash -c sleep 7200; echo chain-done. ");
+  expect([r.code, wrapped.code]).toEqual([2, 2]);
+  const refused = printed.filter((l) => l.startsWith("HANDOVER_REFUSED"));
+  expect(refused[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 15 bash -c sleep 7200; echo chain-done. ");
+  expect(refused[1]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 70 bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh. ");
 });
 
 test("a job that left the pane's process tree but stays in its terminal session dies with it: it is a local chain the ready mark covers, not a detached job", async () => {
@@ -1599,6 +1604,10 @@ test("what carries the lane's session in its environment but belongs to other se
   table = [...baseTable(), ...foreign];
   const env = deps.envOf;
   const marked: LaneHandoverDeps = { ...deps, envOf: (pid) => ([50, 51, 52].includes(pid) ? "PI_SESSION_ID=old-sid" : env(pid)) };
+  // an earlier note already took them for the lane's (review 318): they are not carried on either
+  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
+  writeFileSync(join(state.dir, "handover", "lanes", "demo-20261010-120000.json"), JSON.stringify({ detached: foreign.map((p) => ({ pid: p.pid, cmd: p.cmd })), chains: [] }));
+  for (const p of foreign) live.add(p.pid);
   ready(deps, [15]);
   // When
   const r = await laneHandover(marked, "demo", "aoe_lead_x", { dryRun: true });

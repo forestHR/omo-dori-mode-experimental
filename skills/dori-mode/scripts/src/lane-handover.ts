@@ -203,7 +203,13 @@ const INFRA = /\bmcp\b|--internal-rpc-host-supervisor|--mode rpc|claude-agent-sd
 // A headless browser the agent or its kernel started itself (a browser-driving cell's, left after the cell ended): no work
 // of its own dies with it (a cell still driving it is a running eval cell, a script driving it is that script's chain), so
 // it is a leftover the note lists, not a chain. It refused ZzangDori's tournament-public and herdr-switch moves on 2026-11-03.
-const LEFTOVER = /chrome-headless-shell|chromium_headless_shell|\b(?:chrome|chromium|msedge|firefox|MiniBrowser)\S*\s(?:.*\s)?--headless\b/;
+// Its executable decides, never a word elsewhere on the line: a shell that runs a browser and then more steps is a chain.
+const SHELL_BROWSER = /^(?:chrome-headless-shell|headless_shell)(?:\.exe)?$/i;
+const BROWSER = /^(?:chrome|chromium|chromium-browser|google-chrome|msedge|firefox|MiniBrowser)(?:\.exe)?$/i;
+const leftover = (cmd: string): boolean => {
+  const exe = (cmd.trim().split(/\s+/)[0] ?? "").split(/[\\/]/).pop() ?? "";
+  return SHELL_BROWSER.test(exe) || (BROWSER.test(exe) && /\s--headless(?:=\S*)?(?=\s|$)/.test(cmd));
+};
 // another session's processes: an agent, the herdr server (started from a lane, it carries that lane's environment) and
 // everything under them
 const HERDR_SERVER = /(?:^|[\\/\s])herdr(?:\.exe)?\s+server\b/;
@@ -282,7 +288,7 @@ export const localChains = (table: readonly Proc[], shellPid: number, monitorPid
   const roots = table.filter((p) => ((session.has(p.ppid) || kernels.has(p.ppid)) && !session.has(p.pid) && !kernels.has(p.pid)) || (stray.has(p.pid) && !stray.has(p.ppid)))
     .filter((p) => !ended(p) && !INFRA.test(p.cmd) && !monitorPids.includes(p.pid) && !exclude.has(p.pid))
     .map((p) => ({ pid: p.pid, cmd: p.cmd, pids: [p.pid, ...descendants(table, p.pid).filter((d) => !ended(d)).map((d) => d.pid)] }));
-  return { agent, chains: roots.filter((c) => !LEFTOVER.test(c.cmd)), leftovers: roots.filter((c) => LEFTOVER.test(c.cmd)), tree: new Set([...ids, ...stray]) };
+  return { agent, chains: roots.filter((c) => !leftover(c.cmd)), leftovers: roots.filter((c) => leftover(c.cmd)), tree: new Set([...ids, ...stray]) };
 };
 
 // Why an automatic rollover leaves a lane to the lead: a tag in handover.trainingTags, or a live monitor watching a training
@@ -302,12 +308,16 @@ export const trainingMark = (lane: Lane, monitors: readonly MonitorSpec[], h: { 
 export const detachedJobs = (table: readonly Proc[], tree: ReadonlySet<number>, session: string, aoeId: string, envOf: (pid: number) => string): Job[] => {
   const marks = [...(session ? [`PI_SESSION_ID=${session}`] : []), ...(aoeId ? [`/${aoeId}/session_id`] : [])];
   if (!marks.length) return [];
-  const others = table.filter((p) => !tree.has(p.pid) && (AGENT.test(p.cmd) || HERDR_SERVER.test(p.cmd)));
-  const foreign = new Set([...others.map((p) => p.pid), ...others.flatMap((p) => descendants(table, p.pid).map((d) => d.pid))]);
+  const foreign = foreignPids(table, tree);
   return table.filter((p) => !tree.has(p.pid) && !foreign.has(p.pid) && p.pid !== process.pid).flatMap((p) => {
     const env = envOf(p.pid);
     return env && marks.some((m) => env.split("\n").some((line) => line === m || line.endsWith(m))) ? [{ pid: p.pid, cmd: p.cmd }] : [];
   });
+};
+
+export const foreignPids = (table: readonly Proc[], tree: ReadonlySet<number>): Set<number> => {
+  const others = table.filter((p) => !tree.has(p.pid) && (AGENT.test(p.cmd) || HERDR_SERVER.test(p.cmd)));
+  return new Set([...others.map((p) => p.pid), ...others.flatMap((p) => descendants(table, p.pid).map((d) => d.pid))]);
 };
 
 // Jobs an earlier handover of the lane listed (detached, or chains that outlived their session) that still run: their
@@ -546,7 +556,8 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const marked = detachedJobs(table, tree, session, old.id, deps.envOf);
   // a pid in the pane's own tree is no detached job, even when an earlier note listed it (as a chain, before the session's
   // own launcher shell and eval kernel stopped counting as chains)
-  const detached = [...marked, ...carried(dir, key, deps.alive, new Set([...marked.map((d) => d.pid), ...chains.flatMap((c) => c.pids ?? [c.pid]), ...monitorPids, ...tree]))];
+  // nor is another session's process an earlier note took for one (a herdr server the lane started, its panes' agents)
+  const detached = [...marked, ...carried(dir, key, deps.alive, new Set([...marked.map((d) => d.pid), ...chains.flatMap((c) => c.pids ?? [c.pid]), ...monitorPids, ...tree, ...foreignPids(table, tree)]))];
   const model = opts.model || lane.model || config.defaultModel;
   const screen = await captureTmux(deps.run, lane.pane);
   const shown = statusLine(screen, model);
