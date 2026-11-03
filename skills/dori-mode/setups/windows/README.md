@@ -55,6 +55,8 @@ This registers the limited-privilege task `Dori serve` with a logon trigger for 
 
 Lane checkpoints (`dori checkpoint`) are refused on native Windows for now: the journal's durability flushes need handles Windows cannot flush, so the step is refused before anything is written. The cost-record lock that closing a lane takes works natively.
 
+Hooks in `config.json` that name `dori` (for example `threadReply`) run this CLI with Bun directly on Windows, since Bun cannot start `dori.ps1`; a hook that fails is logged as `post-failed`, not as posted. `dori serve --install-task` refuses `--only` and `--log`: the task always runs every loop with the default log.
+
 ## Manual Windows validation
 
 There are no automatic push or PR checks. From this repository, run the workflow by hand:

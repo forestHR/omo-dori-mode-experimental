@@ -168,3 +168,16 @@ if ($LASTEXITCODE -ne 0) { throw "launcher failed: $LASTEXITCODE" }`);
   expect(((await Bun.file(capture).json()) as { argv: string[] }).argv).toEqual(["instance-probe", `hello&echo x>${marker}`, "a|b", 'say "hi"', "", "two words"]);
   expect(existsSync(marker)).toBe(false);
 }, 90_000);
+
+test.skipIf(process.platform !== "win32")("review 3 of #306 a hook naming dori runs through the installed runner without PowerShell", async () => {
+  // Given an installation and a CLI probe in it.
+  using f = await installFixture();
+  await f.shell(f.install);
+  const capture = prepareInstanceProbe(f);
+  // When the installed runner runs a hook argv that names dori, as freshness runs threadReply.
+  const runTs = join(f.home, "src", "skills", "dori-mode", "scripts", "src", "run.ts");
+  const out = await command([process.execPath, "-e", `const { run } = await import(${JSON.stringify(runTs)}); const r = await run(["dori", "instance-probe", "a&b | c", ""]); console.log(JSON.stringify(r.code));`], f.root);
+  // Then it ran the CLI with the arguments as they are.
+  expect(out.trim()).toBe("0");
+  expect(((await Bun.file(capture).json()) as { argv: string[] }).argv).toEqual(["instance-probe", "a&b | c", ""]);
+}, 90_000);

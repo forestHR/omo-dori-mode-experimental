@@ -80,7 +80,7 @@ export const scrubForThread = (line: string, home: string): string =>
     .replace(/`/g, "'")
     .trim();
 
-export type SweepAct = { readonly kind: "nudged" | "nudge-failed" | "posted" | "no-report" | "stuck" | "research_started" | "research_not_started" | "rollover_due" | "rollover_auto" | "rollover_audit" | "audit_summary" | "lead_compaction_stuck" | "directive_audit" | "directive_links" | "lane_cap" | "stalled" | "usage_unknown" | "supervision_error" | "ready_resume"; readonly lane: string; readonly detail: string };
+export type SweepAct = { readonly kind: "nudged" | "nudge-failed" | "posted" | "post-failed" | "no-report" | "stuck" | "research_started" | "research_not_started" | "rollover_due" | "rollover_auto" | "rollover_audit" | "audit_summary" | "lead_compaction_stuck" | "directive_audit" | "directive_links" | "lane_cap" | "stalled" | "usage_unknown" | "supervision_error" | "ready_resume"; readonly lane: string; readonly detail: string };
 
 export type RolloverHooks = {
   // the length signals of the session in a pane: context use, compactions, age
@@ -466,7 +466,12 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
       // the report is the lane's note to the lead; the owner gets a plain status line and the lead the note to retell
       const words = deps.config.discord;
       const text = words.postRawReports ? `Progress (from the lane's last report): ${scrubForThread(known, home)}` : words.quietText.replaceAll("{min}", String(silentMin));
-      await deps.run(fill(hook, { thread: lane.thread, text, key: lane.key }));
+      const replied = await deps.run(fill(hook, { thread: lane.thread, text, key: lane.key }));
+      // a hook that failed posted nothing: say so, and leave the lane due so the next sweep tries again
+      if (replied.code !== 0) {
+        acts.push({ kind: "post-failed", lane: lane.key, detail: `threadReply hook exit ${replied.code}: ${(replied.err || replied.out).slice(0, 160)}` });
+        continue;
+      }
       await deps.registry.patch(lane.key, { lastAutoReplyAt: now });
       let lead = "";
       if (!words.postRawReports) {

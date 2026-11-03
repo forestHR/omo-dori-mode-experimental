@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { fileLog, keep, type Running, serve, serveLoops, spawnLoop } from "../src/serve.ts";
+import { fileLog, installTaskRefusal, keep, linesOf, type Running, serve, serveLoops, spawnLoop } from "../src/serve.ts";
+import { commandArgv } from "../src/run.ts";
 import { fakeClock } from "./fakes.ts";
 
 // dori serve keeps each loop up where no systemd does (native Windows): a loop that exits starts again after a pause that
@@ -123,4 +124,28 @@ test("review 1 serve refuses an unusable log directory before any child starts",
   } finally {
     await exited;
   }
+});
+
+test("a character whose bytes span two output chunks reaches the log whole", async () => {
+  const bytes = new TextEncoder().encode("상태 한글 ok\n");
+  const stream = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(bytes.slice(0, 4)); c.enqueue(bytes.slice(4)); c.close(); } });
+  const lines: string[] = [];
+  for await (const line of linesOf([stream])) lines.push(line);
+  expect(lines).toEqual(["상태 한글 ok"]);
+});
+
+test("--install-task with --only or --log is refused, not registered without them", () => {
+  expect(installTaskRefusal(["watch"], undefined)).toStartWith("SERVE_TASK_REFUSED");
+  expect(installTaskRefusal([], "C:\\logs\\serve.log")).toStartWith("SERVE_TASK_REFUSED");
+  expect(installTaskRefusal([], undefined)).toBeUndefined();
+});
+
+test("on native Windows a hook naming dori runs this CLI with this Bun, the arguments as they are; elsewhere it runs as named", () => {
+  const argv = ["dori", "thread", "reply", "chat:1", "a & b | \"c\""];
+  const win = commandArgv(argv, "win32");
+  expect(win[0]).toBe(process.execPath);
+  expect(win[1]?.endsWith("cli.ts")).toBe(true);
+  expect(win.slice(2)).toEqual(argv.slice(1));
+  expect(commandArgv(argv, "linux")).toEqual(argv);
+  expect(commandArgv(["gh", "pr"], "win32")).toEqual(["gh", "pr"]);
 });

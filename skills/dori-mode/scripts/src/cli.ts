@@ -10,7 +10,7 @@ import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
 import { isHerdrPane } from "./herdr.ts";
 import { reviveHerdr } from "./herdr-sessions.ts";
 import { windowsHandoverRefusal } from "./windows-handover.ts";
-import { fileLog, serve, serveLoops, spawnLoop, TASK_NAME, taskArgv } from "./serve.ts";
+import { fileLog, installTaskRefusal, serve, serveLoops, spawnLoop, TASK_NAME, taskArgv } from "./serve.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { CheckpointError, Checkpoints } from "./checkpoints.ts";
 import { type BudgetLimits, laneLimits } from "./supervision.ts";
@@ -1908,6 +1908,8 @@ try {
       const cli = fileURLToPath(import.meta.url);
       const sessionWatch = fileURLToPath(new URL("../../setups/discord-aoe/session-watch.ts", import.meta.url));
       if (flags.values["install-task"]) {
+        const refused = installTaskRefusal((Array.isArray(flags.values.only) ? flags.values.only : []).map(String), opt("log"));
+        if (refused) die(refused);
         const argv = taskArgv(process.execPath, cli, config.stateDir);
         const r = await run(argv);
         console.log(r.code === 0 ? `SERVE_TASK_INSTALLED "${TASK_NAME}" at logon` : `SERVE_TASK_FAIL ${(r.err || r.out).slice(0, 200)}`);

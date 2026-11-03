@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 export type Ran = { readonly code: number; readonly out: string; readonly err: string };
 // env: variables set for this one command on top of the process environment; an undefined value removes the variable
 // preserveOutput: stdout as printed, not trimmed (git status -z starts with a status column that may be a space)
@@ -10,8 +12,14 @@ export type Runner = (argv: readonly string[], opts?: RunOptions) => Promise<Ran
 export const childEnv = (argv: readonly string[], env: Readonly<Record<string, string | undefined>>): Record<string, string | undefined> =>
   ["aoe", "tmux", "herdr"].includes(argv[0]?.split("/").pop() ?? "") ? Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith("DORI_"))) : { ...env };
 
+// A hook such as ["dori", "thread", "reply", ...] names the dori command. On native Windows that command is dori.ps1,
+// which Bun.spawn cannot start, so the hook runs this CLI with this Bun directly (no shell, the arguments as they are).
+export const commandArgv = (argv: readonly string[], platform: string = process.platform): readonly string[] =>
+  platform === "win32" && argv[0] === "dori" ? [process.execPath, join(import.meta.dir, "cli.ts"), ...argv.slice(1)] : argv;
+
 export const run: Runner = async (argv, opts = {}) => {
   let p: ReturnType<typeof Bun.spawn>;
+  argv = commandArgv(argv);
   try {
     // env: process.env explicitly, or Bun hands the child its start-up environment without what loadEnvFile added from dori.env
     const env = Object.fromEntries(Object.entries(childEnv(argv, opts.env ? { ...process.env, ...opts.env } : process.env)).filter(([, v]) => v !== undefined));

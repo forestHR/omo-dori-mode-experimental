@@ -54,19 +54,22 @@ export const keep = async (loop: Loop, deps: ServeDeps): Promise<void> => {
 export const serve = (loops: readonly Loop[], deps: ServeDeps): Promise<void[]> => Promise.all(loops.map((l) => keep(l, deps)));
 
 // the lines of a child's stdout and stderr, split at line ends
-const linesOf = async function* (streams: readonly ReadableStream<Uint8Array>[]): AsyncIterable<string> {
+export const linesOf = async function* (streams: readonly ReadableStream<Uint8Array>[]): AsyncIterable<string> {
   const queue: string[] = [];
   let wake: (() => void) | undefined;
   let open = streams.length;
   for (const s of streams)
     void (async () => {
       let rest = "";
+      // one decoder per stream: a character whose bytes span two chunks is joined, not replaced
+      const decoder = new TextDecoder();
       for await (const chunk of s) {
-        const parts = (rest + new TextDecoder().decode(chunk)).split(/\r?\n/);
+        const parts = (rest + decoder.decode(chunk, { stream: true })).split(/\r?\n/);
         rest = parts.pop() ?? "";
         queue.push(...parts.filter((p) => p.trim()));
         wake?.();
       }
+      rest += decoder.decode();
       if (rest.trim()) queue.push(rest);
       open--;
       wake?.();
@@ -90,6 +93,10 @@ export const fileLog = (file: string, clock: Clock): ((line: string) => void) =>
   closeSync(openSync(file, "a"));
   return (line) => appendFileSync(file, `${new Date(clock.now()).toISOString().slice(0, 19)}Z ${line}\n`);
 };
+
+// The logon task always runs every loop with the default log; --only or --log with --install-task is refused, not dropped.
+export const installTaskRefusal = (only: readonly string[], log: string | undefined): string | undefined =>
+  only.length || log ? "SERVE_TASK_REFUSED --install-task registers every loop with the default log; run it without --only and --log" : undefined;
 
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
