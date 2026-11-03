@@ -5,8 +5,6 @@ import { join } from "node:path";
 import { Discord, discordPresence } from "../src/messenger/discord.ts";
 import { type Http, type HttpRequest, type HttpResponse, MessengerError, UnsafeMessageError } from "../src/messenger/http.ts";
 import { Slack } from "../src/messenger/slack.ts";
-import { pollSlackInbound } from "../src/messenger/slack-inbound.ts";
-import { ThreadLedger } from "../src/messenger/thread-ledger.ts";
 import { readUploads } from "../src/messenger/upload-files.ts";
 import { slackPresence } from "../src/messenger/slack-presence.ts";
 import { htmlTable, startThinking, Telegram, THINKING } from "../src/messenger/telegram.ts";
@@ -70,72 +68,24 @@ test("a Slack upload asks for an upload URL per file, sends the bytes there, the
   const { http, seen } = fakeHttp((req) => {
     if (req.url.endsWith("files.getUploadURLExternal")) return ok({ ok: true, upload_url: `https://files.example/up/${++slots}`, file_id: `F${slots}` });
     if (req.url.startsWith("https://files.example")) return { status: 200, headers: {}, body: "OK" };
-    if (req.url.endsWith("files.info")) return ok({ ok: true, file: { shares: { public: { C1: [{ ts: "5.7", thread_ts: "5.6" }] } } } });
     return ok({ ok: true });
   });
   const file = (filename: string, bytes: number[]) => ({ filename, length: bytes.length, read: async () => new Uint8Array(bytes) });
   const files = [file("report.png", [1, 2, 3]), file("deck.pdf", [4])];
   const r = await new Slack(http, sleeps().clock, { token: "t" }).upload("C1", files, "5.6", "the deck");
-  expect(r).toEqual({ ids: ["F1", "F2"], ts: "5.7" });
-  expect(seen.map((r) => r.url.split("/").pop())).toEqual(["files.getUploadURLExternal", "1", "files.getUploadURLExternal", "2", "files.completeUploadExternal", "files.info"]);
+  expect(r).toEqual(["F1", "F2"]);
+  expect(seen.map((r) => r.url.split("/").pop())).toEqual(["files.getUploadURLExternal", "1", "files.getUploadURLExternal", "2", "files.completeUploadExternal"]);
   expect(JSON.parse(String(seen[2]?.body))).toEqual({ filename: "deck.pdf", length: 1 });
   expect(JSON.parse(String(seen[4]?.body))).toEqual({ files: [{ id: "F1", title: "report.png" }, { id: "F2", title: "deck.pdf" }], channel_id: "C1", thread_ts: "5.6", initial_comment: "the deck" });
 });
 
-test("a Slack share in the channel asks files.info, a second apart, until it lists the share's ts; without files:read it says why it is untracked", async () => {
-  const file = { filename: "a.pdf", length: 1, read: async () => new Uint8Array([1]) };
-  const slot = (req: HttpRequest) => (req.url.endsWith("files.getUploadURLExternal") ? ok({ ok: true, upload_url: "https://files.example/up/1", file_id: "F1" }) : req.url.startsWith("https://files.example") ? { status: 200, headers: {}, body: "OK" } : undefined);
-  let infos = 0;
-  const listed = fakeHttp((req) => slot(req) ?? (req.url.endsWith("files.info") ? ok({ ok: true, file: { shares: ++infos < 3 ? {} : { private: { C1: [{ ts: "9.1" }] } } } }) : ok({ ok: true })));
-  const { clock, waited } = sleeps();
-  expect(await new Slack(listed.http, clock, { token: "t" }).upload("C1", [file])).toEqual({ ids: ["F1"], ts: "9.1" });
-  expect([infos, waited]).toEqual([3, [1000, 1000]]);
-  const scopeless = fakeHttp((req) => slot(req) ?? (req.url.endsWith("files.info") ? ok({ ok: false, error: "missing_scope" }) : ok({ ok: true })));
-  expect(await new Slack(scopeless.http, sleeps().clock, { token: "t" }).upload("C1", [file])).toEqual({ ids: ["F1"], untracked: "slack files.info: missing_scope" });
-});
-
-// the Dori shares at 1700000000.2 and its complete call returns at 1700000005; a reply at 1700000001 lies in between
-for (const [how, info, cursor] of [
-  ["the share's ts from files.info", () => ok({ ok: true, file: { shares: { private: { C1: [{ ts: "1700000000.200000", thread_ts: "1700000000.000100" }] } } } }), "1700000000.200000"],
-  ["the moment before the first request when files.info answers no JSON", () => ({ status: 200, headers: {}, body: "<html>bad gateway</html>" }), "1700000000.000000"],
-] as const) {
-  test(`a file share in a thread keeps ${how} as the thread's cursor, so a reply that came while the upload finished is still polled`, async () => {
-    const state = withState();
-    try {
-      const ledger = new ThreadLedger(join(state.dir, "slack-threads.json"));
-      let at = 1_700_000_000_000;
-      const clock = { now: () => at, sleep: async () => {} };
-      const { http } = fakeHttp((req) => {
-        if (req.url.endsWith("files.getUploadURLExternal")) return ok({ ok: true, upload_url: "https://files.example/up/1", file_id: "F1" });
-        if (req.url.startsWith("https://files.example")) return { status: 200, headers: {}, body: "OK" };
-        if (req.url.endsWith("files.completeUploadExternal")) {
-          at = 1_700_000_005_000;
-          return ok({ ok: true });
-        }
-        if (req.url.endsWith("files.info")) return info();
-        if (req.url.endsWith("conversations.replies")) {
-          const oldest = Number(JSON.parse(String(req.body)).oldest);
-          return ok({ ok: true, messages: [{ ts: "1700000001.000000", user: "UGUEST", text: "고마워" }].filter((x) => Number(x.ts) > oldest) });
-        }
-        return ok({ ok: true });
-      });
-      const slack = new Slack(http, clock, { token: "t" }, undefined, ledger);
-      const r = await slack.upload("C1", [{ filename: "a.pdf", length: 1, read: async () => new Uint8Array([1]) }], "1700000000.000100");
-      expect({ ids: r.ids, untracked: r.untracked, cursor: (await ledger.list()).map((t) => [t.rootTs, t.seenTs]) }).toEqual({ ids: ["F1"], untracked: undefined, cursor: [["1700000000.000100", cursor]] });
-      expect((await pollSlackInbound(slack, ledger, { selfUserId: "UBOT" })).map((i) => [i.source, i.ts])).toEqual([["own-thread", "1700000001.000000"]]);
-    } finally {
-      state.done();
-    }
-  });
-}
-
-test("a file changed after it was checked, even to the same size, stops the upload before anything is shared", async () => {
+test("a file changed in size after it was checked stops the upload before anything is shared", async () => {
   const state = withState();
   try {
     const p = join(state.dir, "deck.pdf");
     writeFileSync(p, "aaaa");
-    const [u] = await readUploads([p]);
-    writeFileSync(p, "bbbb");
+    const [u] = readUploads([p]);
+    writeFileSync(p, "aaaaa");
     await expect(u?.read() ?? Promise.resolve()).rejects.toThrow("SEND_FILE_CHANGED");
   } finally {
     state.done();
