@@ -84,6 +84,8 @@ omo-login-share code '<what the owner pasted>'                         # Anthrop
   Anthropic (the code Anthropic shows), browser login for ChatGPT (the final page
   address). pi-ai expects the option id back; `bun test` in this folder checks
   that against the installed pi-ai without contacting either service.
+  `login-method.d.ts` only gives tsc its types (`bunx tsc --noEmit -p .` in
+  `scripts/` checks this folder too); install.sh does not ship it.
 - A login that cannot finish (no link, wrong code, 30 minutes without a code)
   sends `[ALERT] ... 로그인이 끝나지 못함: <reason>` to the lead under `--notify`,
   with the command to try again.
