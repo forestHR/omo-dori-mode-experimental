@@ -452,7 +452,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     // a run refused while the lane was busy keeps the options it was given (the note as an absolute path): a ready mark
     // starts it again with them (freshness readyResume)
     const request: RolloverRequest = { ...(opts.note ? { note: resolve(opts.note) } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}), ...(opts.keepOld ? { keepOld: true } : {}), ...(opts.verifyMin ? { verifyMin: opts.verifyMin } : {}) };
-    if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), ...(Object.keys(request).length ? { request } : {}) } : {}) });
+    if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), request } : {}) });
     return { code: 2 };
   };
   if (!omoSession(config)) return refuse("dori handover --lane needs omo as the agent (backend aoe, or herdr with agentCommand omo)");

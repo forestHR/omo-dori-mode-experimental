@@ -291,19 +291,23 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
   if (handoverRunning(stateDir, "lane", key, hooks.alive ?? pidAlive)) return [];
   const now = deps.clock.now();
   const min = deps.config.handover.readyMin;
-  const stale = now - markAt > min * 60_000;
+  // a refusal logged before its options were kept (no request) is not started again: it could drop --keep-old and close
+  // the old session; the lead runs it again
+  const why = !asked.request ? "the request was logged before its options were kept, so a start now could drop them (--keep-old, --note, --model)" : now - markAt > min * 60_000 ? `the ready mark is older than ${min} min` : "";
   const by = (asked.approvedBy ?? "").trim();
   mkdirSync(join(stateDir, "handover", "lanes"), { recursive: true });
-  writeFileSync(claimed, `${JSON.stringify({ readyAt: mark.at, at: new Date(now).toISOString(), request: asked.at, approvedBy: by, result: stale ? "skipped" : "started" })}\n`);
+  writeFileSync(claimed, `${JSON.stringify({ readyAt: mark.at, at: new Date(now).toISOString(), request: asked.at, approvedBy: by, result: why ? "skipped" : "started" })}\n`);
   const log = (line: string): SweepAct[] => {
     watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line });
     return [{ kind: "ready_resume", lane: key, detail: line.slice(line.indexOf(" ", line.indexOf(" ") + 1) + 1) }];
   };
-  if (stale) {
+  if (why) {
     const lead = deps.config.leadPane;
-    const text = `[DORI] ${key}: the handover you asked for at ${asked.at} was not started again: the lane marked ready at ${mark.at}, more than handover.readyMin (${min} min) ago. Ask the lane to run dori handover ready ${key} --note <file> again (the handover then starts by itself), or run it again yourself.`;
+    const text = asked.request
+      ? `[DORI] ${key}: the handover you asked for at ${asked.at} was not started again: the lane marked ready at ${mark.at}, more than handover.readyMin (${min} min) ago. Ask the lane to run dori handover ready ${key} --note <file> again (the handover then starts by itself), or run it again yourself.`
+      : `[DORI] ${key}: the lane marked ready at ${mark.at} after the handover you asked for at ${asked.at}, but that request was logged before its options were kept, so it was not started again. Run dori handover --lane ${key} again with the same approval and options now.`;
     const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, text) : false;
-    return log(`HANDOVER_READY_RESUME_SKIPPED ${key} skipped: the ready mark of ${mark.at} in ${pane} is older than ${min} min, so the request of ${asked.at} (refused ${asked.blocked}) is not started again; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
+    return log(`HANDOVER_READY_RESUME_SKIPPED ${key} skipped: the ready mark of ${mark.at} in ${pane} follows the request of ${asked.at} (refused ${asked.blocked}), not started again: ${why}; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
   }
   const r = await hooks.resume(key, by, asked.request ?? {});
   if (!r.started) rmSync(claimed, { force: true });

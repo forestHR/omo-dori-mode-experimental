@@ -1545,8 +1545,8 @@ test("a lead's handover refused while the lane was busy starts again once, with 
     await deps.registry.patch("demo", { lastReplyAt: clock.at });
     return (await freshnessTick(deps, "/home/test", hooks)).filter((a) => a.kind === "ready_resume").map((a) => `${a.lane} ${a.detail.split(":")[0]}`);
   };
-  const refused = (min: number, approvedBy: string, blocked?: "work" | "busy", from = OLD) =>
-    appendRollover(state.dir, { kind: "rollover", who: "lane", at: new Date(T0 + min * 60_000).toISOString(), key: "demo", from, approvedBy, signals: {}, steps: [], result: "refused", reasons: ["a turn is running"], ...(blocked ? { blocked } : {}) });
+  const refused = (min: number, approvedBy: string, blocked?: "work" | "busy", from = OLD, legacy = false) =>
+    appendRollover(state.dir, { kind: "rollover", who: "lane", at: new Date(T0 + min * 60_000).toISOString(), key: "demo", from, approvedBy, signals: {}, steps: [], result: "refused", reasons: ["a turn is running"], ...(blocked ? { blocked, ...(legacy ? {} : { request: {} }) } : {}) });
   const at = (min: number) => new Date(T0 + min * 60_000).toISOString();
   // When / Then: a ready mark with no request before it starts nothing
   ready(deps, [], at(1));
@@ -1596,7 +1596,15 @@ test("a lead's handover refused while the lane was busy starts again once, with 
   expect(await tick(64)).toEqual([]);
   expect(resumes).toHaveLength(3);
   expect(sent(w).filter((t) => t.startsWith("[DORI] demo: the handover you asked for"))).toHaveLength(1);
-  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUME_SKIPPED demo skipped: the ready mark of ${at(32)} in ${OLD} is older than 30 min`);
+  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUME_SKIPPED demo skipped: the ready mark of ${at(32)} in ${OLD} follows the request of ${at(31)} (refused busy), not started again: the ready mark is older than 30 min`);
+  // a refusal logged by an older version (no request: its --keep-old or --note unknown) is never started again; the lead
+  // hears of it once and runs it again
+  refused(65, LEAD_OK, "busy", OLD, true);
+  ready(deps, [], at(66));
+  expect(await tick(67)).toEqual(["demo skipped"]);
+  expect(await tick(68)).toEqual([]);
+  expect(resumes).toHaveLength(3);
+  expect(sent(w).filter((t) => t.includes("that request was logged before its options were kept"))).toHaveLength(1);
 });
 
 test("the lead's refusal of a busy lane says that the lane's ready mark starts it again, and that start is given the options the refused run was given", async () => {
@@ -1605,6 +1613,10 @@ test("the lead's refusal of a busy lane says that the lane's ready mark starts i
   const cwd = process.cwd();
   process.chdir(state.dir);
   writeFileSync(join(state.dir, "lead-note.md"), "keep the old one open\n");
+  // a refusal with no options still logs them (empty), so it is told apart from one an older version logged
+  await laneHandover(base, "demo", "aoe_lead_x", { approvedBy: "lead:STUCK rung 4 on loss after research" });
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "refused", blocked: "work", request: {} });
+  printed.length = 0;
   // When: the lane's chain 15 would die
   const r = await laneHandover(base, "demo", "aoe_lead_x", { approvedBy: "lead:STUCK rung 4 on loss after research", note: "lead-note.md", model: "anthropic/claude-x", thinking: "high", keepOld: true, verifyMin: 9 }).finally(() => process.chdir(cwd));
   // Then
