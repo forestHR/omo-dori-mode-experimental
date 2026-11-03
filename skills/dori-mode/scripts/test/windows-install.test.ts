@@ -101,15 +101,15 @@ test.skipIf(process.platform !== "win32").each(["chosen home", "설치-試験"] 
   });
 }, 60_000);
 
-// The account's script policy, set for a test and put back after it (the installer must see a known starting policy).
+// The account's pwsh script policy (the one dori.ps1 runs under), set for a test and put back after it (the installer must see a known starting policy).
 const withPolicy = async (policy: string, body: () => Promise<void>) => {
-  const before = (await command(["powershell", "-NoProfile", "-Command", "[string](Get-ExecutionPolicy -Scope CurrentUser)"])).trim();
-  await command(["powershell", "-NoProfile", "-Command", `Set-ExecutionPolicy -ExecutionPolicy ${policy} -Scope CurrentUser -Force`]);
+  const before = (await command(["pwsh", "-NoProfile", "-Command", "Remove-Item Env:PSExecutionPolicyPreference -ErrorAction SilentlyContinue; [string](Get-ExecutionPolicy -Scope CurrentUser)"])).trim();
+  await command(["pwsh", "-NoProfile", "-Command", `Remove-Item Env:PSExecutionPolicyPreference -ErrorAction SilentlyContinue; Set-ExecutionPolicy -ExecutionPolicy ${policy} -Scope CurrentUser -Force`]);
   try { await body(); } finally {
-    await command(["powershell", "-NoProfile", "-Command", `Set-ExecutionPolicy -ExecutionPolicy ${before} -Scope CurrentUser -Force`]);
+    await command(["pwsh", "-NoProfile", "-Command", `Remove-Item Env:PSExecutionPolicyPreference -ErrorAction SilentlyContinue; Set-ExecutionPolicy -ExecutionPolicy ${before} -Scope CurrentUser -Force`]);
   }
 };
-const currentUserPolicy = async () => (await command(["powershell", "-NoProfile", "-Command", "[string](Get-ExecutionPolicy -Scope CurrentUser)"])).trim();
+const currentUserPolicy = async () => (await command(["pwsh", "-NoProfile", "-Command", "Remove-Item Env:PSExecutionPolicyPreference -ErrorAction SilentlyContinue; [string](Get-ExecutionPolicy -Scope CurrentUser)"])).trim();
 
 test.skipIf(process.platform !== "win32")("review 2 of #306 a script policy already RemoteSigned is left alone and nothing is asked", async () => {
   using f = await installFixture();

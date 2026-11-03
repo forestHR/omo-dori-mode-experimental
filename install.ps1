@@ -98,8 +98,20 @@ AddUserPath $binDir
 # otherwise the installer says what it would change and why and asks, and changes nothing without a yes. A run that
 # cannot ask (-NonInteractive) changes nothing either. Without the change Dori still runs through pwsh -File.
 Step "script policy for the dori command"
-$policies = Get-ExecutionPolicy -List
-$policyOf = { param($scope) [string]($policies | Where-Object { $_.Scope -eq $scope }).ExecutionPolicy }
+# The policy that matters is pwsh's (dori.ps1 runs in pwsh 7, which keeps its own CurrentUser policy), so it is read and
+# set through pwsh; the command goes as -EncodedCommand so no quoting is lost on the way.
+# A Process-scope policy this installer was started with (-ExecutionPolicy Bypass) reaches the child as
+# PSExecutionPolicyPreference; it is dropped there so the child reads and sets the account's own policy.
+function InPwsh($script) {
+  $full = "Remove-Item Env:PSExecutionPolicyPreference -ErrorAction SilentlyContinue; $script"
+  Native "pwsh" @("-NoProfile", "-NonInteractive", "-EncodedCommand", [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($full)))
+}
+$policies = @{}
+foreach ($line in (InPwsh 'Get-ExecutionPolicy -List | ForEach-Object { "{0}={1}" -f $_.Scope, $_.ExecutionPolicy }')) {
+  $scope, $value = "$line".Trim() -split "=", 2
+  if ($scope) { $policies[$scope] = $value }
+}
+$policyOf = { param($scope) $(if ($policies[$scope]) { $policies[$scope] } else { "Undefined" }) }
 $locked = @("MachinePolicy", "UserPolicy") | Where-Object { (& $policyOf $_) -ne "Undefined" } | Select-Object -First 1
 $current = @("MachinePolicy", "UserPolicy", "CurrentUser", "LocalMachine") | ForEach-Object { & $policyOf $_ } | Where-Object { $_ -ne "Undefined" } | Select-Object -First 1
 if (-not $current) { $current = "Restricted" }
@@ -112,17 +124,17 @@ if (@("RemoteSigned", "Unrestricted", "Bypass") -contains $current) {
   $answer = $null
   if ($canAsk) {
     Write-Host "The dori command is a PowerShell script, and this account's script policy is $current, which does not run it."
-    Write-Host "Proposed change: $setCommand"
+    Write-Host "Proposed change (in pwsh): $setCommand"
     Write-Host "RemoteSigned runs scripts made on this PC; scripts downloaded from the internet still need a signature. Only your account changes."
     Write-Host -NoNewline "Change it now? [y/N] "
     $answer = [Console]::In.ReadLine()
   }
   if ($answer -match '^\s*(y|yes)\s*$') {
-    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+    InPwsh 'Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force' | Out-Null
     Write-Host "EXECUTION_POLICY_SET RemoteSigned for CurrentUser"
   } else {
     Write-Host "EXECUTION_POLICY_UNCHANGED $current$(if ($locked) { " (set by $locked; ask your administrator)" })"
-    if (-not $locked) { Write-Host "To allow the dori command later: $setCommand" }
+    if (-not $locked) { Write-Host "To allow the dori command later, run in pwsh: $setCommand" }
     Write-Host "Until then run Dori with: $fallback"
   }
 }
