@@ -320,12 +320,13 @@ const USAGE = `dori <command> [options]
                                        content; restore "yesterday 21:00" (stateGit.timeZone) commits first, so it can
                                        be undone; loop is what dori-lanes runs every stateGit.everyMin minutes
   send <slack|telegram|discord> --to TARGET --text TEXT | --text-file FILE [--thread ID] [--edit ID] [--status working|done] [--no-typing] [--ping USER_ID] [--reply ID] [--again]
-  send slack --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread TS] [--again]
+  send slack --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread TS]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN);
                                        --file (slack, up to 10, 1 GB each) uploads the files and shares them as one message
                                        with the text, in the thread with --thread (SENT <file ids>); a missing, empty or too
                                        big file is refused before anything is sent (SEND_FILE_MISSING|REFUSED|TOO_BIG, exit 2);
-                                       shared once per call, never retried or repeat-checked: a failure exits non-zero
+                                       shared once per call, never retried or repeat-checked: a failure exits non-zero;
+                                       the watcher's eyes stay on (a text answer takes them off)
                                        --text-file posts the file's text (real line breaks) the same way as --text. A text
                                        with a literal \n and no real line break outside code is refused before anything is
                                        sent (SEND_LITERAL_NEWLINE, exit 2; also thread reply|wait|done|open --first, ask,
@@ -1679,12 +1680,10 @@ try {
         if (edit) await slack.edit(to, edit, text);
         else {
           let posted: { channel: string; ts: string } | undefined;
-          // files are shared once per call and never by the repeat check: a failure exits non-zero and a person calls again
-          if (uploads.length) {
-            console.log(`SENT ${(await slack.upload(to, uploads, thread, text || undefined)).join(",")}`);
-            // completeUploadExternal names no message ts; the share is newer than every message before this moment
-            posted = { channel: to, ts: (Date.now() / 1000).toFixed(6) };
-          } else await once(async () => (posted = await slack.post(to, text, thread)).ts);
+          // files are shared once per call and never by the repeat check: a failure exits non-zero and a person calls again.
+          // The eyes stay: completeUploadExternal names no message ts to tell which messages the share answered.
+          if (uploads.length) console.log(`SENT ${(await slack.upload(to, uploads, thread, text || undefined)).join(",")}`);
+          else await once(async () => (posted = await slack.post(to, text, thread)).ts);
           // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off
           if (posted && process.env.DORI_SLACK_TOKEN?.startsWith("xoxb-")) {
             const files = { inbox: process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"), uneyed: join(config.stateDir, "slack-uneyed.log") };

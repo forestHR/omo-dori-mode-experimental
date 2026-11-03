@@ -334,7 +334,7 @@ test("send slack --file uploads every file to its own URL, then shares them as o
   try {
     writeFileSync(join(state.dir, "deck.pdf"), "pdf bytes");
     writeFileSync(join(state.dir, "demo.mp4"), "video");
-    // the owner's message the watcher put eyes on: the files answer it in its thread, so the eyes come off as for a text
+    // the owner's message the watcher put eyes on: the share names no message ts, so its eyes stay for a text answer
     mkdirSync(join(state.dir, "discord"));
     writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${JSON.stringify({ scope: "slack", id: "1700000000.000001", channel_id: "C1", reply_thread: "1700000000.000001", addressed: "mention" })}\n`);
     const r = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "deck.pdf"), "--file", join(state.dir, "demo.mp4"), "--text", "AX-MVP 발표자료", "--thread", "1700000000.000001"]);
@@ -345,14 +345,16 @@ test("send slack --file uploads every file to its own URL, then shares them as o
         { path: "/api/files.getUploadURLExternal", body: { filename: "demo.mp4", length: 5 } },
         { path: "/up/2", body: "video" },
         { path: "/api/files.completeUploadExternal", body: { files: [{ id: "F1", title: "deck.pdf" }, { id: "F2", title: "demo.mp4" }], channel_id: "C1", thread_ts: "1700000000.000001", initial_comment: "AX-MVP 발표자료" } },
-        { path: "/api/reactions.remove", body: { channel: "C1", timestamp: "1700000000.000001", name: "eyes" } },
       ],
     });
-    // a file alone needs no text, and a text-only send still posts a message
+    // a file alone needs no text; the eyes stay through both shares, and a text answer after them takes them off
     const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
-    const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--text", "글만"]);
-    expect({ bare: bare.out, share: calls[8]?.body, text: text.out, post: calls.at(-1) }).toEqual({
-      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", post: { path: "/api/chat.postMessage", body: { channel: "C1", text: "글만" } },
+    const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--thread", "1700000000.000001", "--text", "자료 올렸어"]);
+    expect({ bare: bare.out, share: calls[7]?.body, text: text.out, after: calls.slice(8) }).toEqual({
+      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", after: [
+        { path: "/api/chat.postMessage", body: { channel: "C1", text: "자료 올렸어", thread_ts: "1700000000.000001" } },
+        { path: "/api/reactions.remove", body: { channel: "C1", timestamp: "1700000000.000001", name: "eyes" } },
+      ],
     });
   } finally {
     server.stop(true);
