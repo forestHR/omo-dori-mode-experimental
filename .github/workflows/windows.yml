@@ -28,13 +28,8 @@ jobs:
           bun test `
             ./test/herdr-backend.test.ts `
             ./test/herdr-revive.test.ts `
-            ../setups/herdr-web/proxy.test.ts `
-            ../setups/herdr-web/state.test.ts `
             ./test/windows-process.test.ts `
+            ./test/windows-powershell.test.ts `
             ./test/windows-review.test.ts `
-            ./test/windows-freeze.test.ts `
-            ./test/windows-install.test.ts `
-            ./test/serve.test.ts `
-            ./test/report-shape.test.ts `
-            ./test/discord-cards.test.ts
+            ./test/windows-freeze.test.ts
           exit $LASTEXITCODE

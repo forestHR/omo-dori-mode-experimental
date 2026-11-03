@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import type { Clock, Runner } from "./run.ts";
+import { powershellLiteral } from "./powershell.ts";
 import { AGENT, type Proc, procTable, topAgent } from "./session-id.ts";
 
 // herdr's side of the session primitives in aoe.ts (dori-mode on herdr, as upstream runs it; ported here for the move of
@@ -71,9 +72,8 @@ export const shellQuote = (arg: string): string => (/^[\w./:@=+,-]+$/.test(arg) 
 // command goes after the call operator &, words in single quotes ('' for a quote), and the variables are set before it.
 export const agentLine = (argv: readonly string[], env: Readonly<Record<string, string | undefined>> = {}, platform: string = process.platform): string => {
   if (platform === "win32") {
-    const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
-    const vars = Object.entries(env).map(([k, v]) => (v === undefined ? `Remove-Item Env:${k} -ErrorAction SilentlyContinue; ` : `$env:${k} = ${q(v)}; `)).join("");
-    return `${vars}& ${argv.map(q).join(" ")}`;
+    const vars = Object.entries(env).map(([k, v]) => (v === undefined ? `Remove-Item Env:${k} -ErrorAction SilentlyContinue; ` : `$env:${k} = ${powershellLiteral(v)}; `)).join("");
+    return `${vars}& ${argv.map(powershellLiteral).join(" ")}`;
   }
   const unset = Object.entries(env).flatMap(([k, v]) => (v === undefined ? ["-u", k] : []));
   const set = Object.entries(env).flatMap(([k, v]) => (v === undefined ? [] : [`${k}=${v}`]));

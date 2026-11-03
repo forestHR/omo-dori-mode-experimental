@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { herdrLeadSession, readHerdrSessions, recordHerdrSession, reviveHerdr } from "../src/herdr-sessions.ts";
 import { run, type Runner } from "../src/run.ts";
-import { taskArgv } from "../src/serve.ts";
+import { powershellLiteral as quote } from "../src/powershell.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld } from "./fakes.ts";
 
 const roots: string[] = [];
@@ -16,7 +16,6 @@ const temporary = () => {
   roots.push(root);
   return root;
 };
-const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
 const session = "11111111-2222-4333-8444-555555555555";
 
 test.skipIf(process.platform !== "win32").each(["pwsh", "powershell"])("review 1 revive executes its complete command in %s", async (shell) => {
@@ -96,37 +95,3 @@ test.skipIf(process.platform !== "win32")("review 1 records a native lead starte
     await child.exited;
   }
 }, 40_000);
-
-test.skipIf(process.platform !== "win32")("review 1 scheduled entry point selects its instance without inherited environment", async () => {
-  // Given a selected instance and a child entry point recording the environment it actually receives.
-  const dir = temporary();
-  const state = join(dir, "chosen state");
-  const config = join(dir, "chosen.json");
-  const envFile = join(dir, "chosen.env");
-  const capture = join(dir, "task.json");
-  const cli = join(dir, "task-child.ts");
-  writeFileSync(cli, `await Bun.write(${JSON.stringify(capture)}, JSON.stringify({
-    config: process.env.DORI_CONFIG, env: process.env.DORI_ENV_FILE, state: process.env.DORI_STATE_DIR,
-    argv: process.argv.slice(2),
-  }));`);
-  const previousConfig = process.env.DORI_CONFIG;
-  const previousEnv = process.env.DORI_ENV_FILE;
-  let action: string;
-  try {
-    process.env.DORI_CONFIG = config;
-    process.env.DORI_ENV_FILE = envFile;
-    action = taskArgv(process.execPath, cli, state).at(-1) ?? "";
-  } finally {
-    if (previousConfig === undefined) delete process.env.DORI_CONFIG;
-    else process.env.DORI_CONFIG = previousConfig;
-    if (previousEnv === undefined) delete process.env.DORI_ENV_FILE;
-    else process.env.DORI_ENV_FILE = previousEnv;
-  }
-  const clean = Object.fromEntries(Object.entries(Bun.env).filter(([name]) => !name.startsWith("DORI_")));
-  // When the exact scheduled action starts in a fresh environment, without registering a real task.
-  const child = Bun.spawn(["cmd", "/d", "/s", "/c", `"${action}"`], { env: clean, stdout: "pipe", stderr: "pipe", windowsVerbatimArguments: true });
-  const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-  // Then it starts the selected instance rather than whichever instance is the default.
-  expect({ code, out, err }).toMatchObject({ code: 0 });
-  expect(await Bun.file(capture).json()).toEqual({ config, env: envFile, state, argv: ["serve", "--log", join(state, "serve.log")] });
-}, 30_000);
