@@ -31,5 +31,7 @@ jobs:
             ./test/windows-process.test.ts `
             ./test/windows-powershell.test.ts `
             ./test/windows-review.test.ts `
+            ./test/windows-shell.test.ts `
+            ./test/windows-executable.test.ts `
             ./test/windows-freeze.test.ts
           exit $LASTEXITCODE

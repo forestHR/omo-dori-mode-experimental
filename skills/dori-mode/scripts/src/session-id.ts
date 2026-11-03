@@ -4,20 +4,21 @@ import { basename, join } from "node:path";
 import { tmuxPanePid } from "./aoe.ts";
 import type { Backend } from "./config.ts";
 import type { Runner } from "./run.ts";
+import { isAgentCommand } from "./executable.ts";
 
 // stat: the ps state letters ("S", "R+", "Z" for a zombie); absent when the table was built without it
-export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string; readonly startedAt?: string };
+export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string; readonly startedAt?: string; readonly executable?: string };
 export type SessionHit = { readonly id: string; readonly via: "argv" | "child-env" | "start-time" | "none"; readonly pid?: number };
 
 // omo on Linux and macOS (senpi's bundle under bun, or the omo command), and on Windows (the same bundle path with
 // backslashes, or omo.exe / omo-windows-x64.exe, quoted as Win32_Process shows a command line with spaces in its path)
-export const AGENT = /senpi[\\/]dist[\\/]bundle[\\/]cli\.js|(^|[\\/"])omo(-windows-[a-z0-9]+)?(\.exe)?"?(\s|$)/i;
+export const AGENT = { test: isAgentCommand } as const;
 const ENV_ID = /(?:^|\s)PI_SESSION_ID=([0-9a-f-]{36})(?:\s|$)/;
 export const SESSION_FILE = /^(\d{4}-\d\d-\d\dT\d\d)-(\d\d)-(\d\d)-(\d{3})Z_([0-9a-f-]{36})\.jsonl$/;
 const START_WINDOW_MS = 180_000;
 
 // Windows has no ps: its process table comes from Win32_Process (pid, parent, command line; no state letters)
-export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,@{Name='StartedAt';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')}}} | ConvertTo-Json -Compress"];
+export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath,@{Name='StartedAt';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')}}} | ConvertTo-Json -Compress"];
 
 export const winProcs = (json: string): Proc[] => {
   try {
@@ -28,6 +29,7 @@ export const winProcs = (json: string): Proc[] => {
         pid: r.ProcessId,
         ppid: "ParentProcessId" in r && typeof r.ParentProcessId === "number" ? r.ParentProcessId : 0,
         cmd: "CommandLine" in r && typeof r.CommandLine === "string" ? r.CommandLine : "",
+        ...("ExecutablePath" in r && typeof r.ExecutablePath === "string" ? { executable: r.ExecutablePath } : {}),
         ...("StartedAt" in r && typeof r.StartedAt === "string" ? { startedAt: r.StartedAt } : {}),
         stat: "",
       }];

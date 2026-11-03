@@ -18,7 +18,7 @@ const temporary = () => {
 };
 const session = "11111111-2222-4333-8444-555555555555";
 
-test.skipIf(process.platform !== "win32").each(["pwsh", "powershell"])("review 1 revive executes its complete command in %s", async (shell) => {
+test.skipIf(process.platform !== "win32").each(["pwsh"])("review 1 revive executes its complete command in %s", async (shell) => {
   // Given a stopped lead and a real PowerShell process whose omo function records its invocation.
   const dir = temporary();
   const capture = join(dir, "agent.json");

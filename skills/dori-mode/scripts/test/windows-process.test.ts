@@ -28,7 +28,7 @@ test("Windows agent lines quote PowerShell arguments and environment assignments
   // When the pane command is built.
   const line = agentLine(argv, { A: "1", GPU: undefined }, "win32");
   // Then PowerShell receives separate quoted words after the call operator.
-  expect(line).toBe("$env:A = '1'; Remove-Item Env:GPU -ErrorAction SilentlyContinue; & 'C:\\h\\omo.exe' '--model' 'it''s'");
+  expect(line).toBe("$PSNativeCommandArgumentPassing = 'Standard'; $env:A = '1'; Remove-Item Env:GPU -ErrorAction SilentlyContinue; & 'C:\\h\\omo.exe' '--model' 'it''s'");
 });
 
 test.skipIf(process.platform !== "win32")("Windows process discovery finds the calling Bun process natively", async () => {

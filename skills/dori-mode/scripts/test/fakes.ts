@@ -141,10 +141,13 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   if (cmd === "gh" && a1 === "pr") return ok(JSON.stringify({ state: w.prState, headRefOid: "f".repeat(40), mergedAt: w.prState === "MERGED" ? "2026-01-01T11:00:00Z" : null, mergeCommit: w.prState === "MERGED" ? { oid: "abc1234567890" } : null }));
   if (cmd === "gh" && a1 === "issue") return ok(JSON.stringify({ state: w.issueState }));
   if (cmd === "notify") return ok();
-  if (cmd === "powershell" && argv.includes("-Command")) return ok(JSON.stringify(w.ps.split("\n").flatMap((line) => {
+  if (cmd === "pwsh" && argv.includes("$PSVersionTable.PSVersion.ToString()")) return ok("7.4.0");
+  if (cmd === "powershell" && argv.includes("-Command")) return ok(JSON.stringify([
+    { ProcessId: 4000, ParentProcessId: 1, CommandLine: "pwsh.exe", ExecutablePath: "pwsh" },
+    ...w.ps.split("\n").flatMap((line) => {
     const row = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
-    return row ? [{ ProcessId: Number(row[1]), ParentProcessId: Number(row[2]), CommandLine: row[3] ?? "" }] : [];
-  })));
+    return row && Number(row[1]) !== 4000 ? [{ ProcessId: Number(row[1]), ParentProcessId: Number(row[2]), CommandLine: row[3] ?? "" }] : [];
+  })]));
   if (cmd === "ps" && a1 === "-A") return ok(argv.some((a) => a.includes("stat=")) ? w.ps.replace(/^(\s*\d+\s+\d+)\s+/gm, "$1 S ") : w.ps);
   if (cmd === "ps" && argv.includes("lstart=")) return ok(w.agentStart);
   return { code: 1, out: "", err: `unexpected ${argv.join(" ")}` };

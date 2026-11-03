@@ -34,7 +34,7 @@ test("a herdr lead whose agent is gone is named stopped with the session recorde
   expect(ran.slice(0, 4)).toEqual(["herdr", "pane", "run", "w1:p1"]);
   // the checked PATH goes first (a herdr pane takes the server's environment), then the recorded session and model
   expect(ran[4]).toMatch(process.platform === "win32"
-    ? /^Clear-Host; \$env:PATH = '[^']+'; & 'omo' '--session-id' '11111111-2222-4333-8444-555555555555' '--model' 'm\/x'$/
+    ? /^Clear-Host; \$PSNativeCommandArgumentPassing = 'Standard'; \$env:PATH = '[^']+'; & 'omo' '--session-id' '11111111-2222-4333-8444-555555555555' '--model' 'm\/x'$/
     : /^clear && env PATH=\S+ omo --session-id 11111111-2222-4333-8444-555555555555 --model m\/x$/);
   expect(typed).toEqual(["[DORI] back"]);
   expect(await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p9", "", async () => true)).toStartWith("REVIVE_FAIL w1:p9: no omo session recorded");

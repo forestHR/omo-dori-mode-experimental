@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
 
 import { captureTmux, listAoePanes, liveSessions, paneLife, QUESTION_MARK, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
@@ -8,6 +7,7 @@ import { herdrResult, isHerdrPane } from "./herdr.ts";
 import { replacementOf } from "./frozen.ts";
 import type { Clock, Runner } from "./run.ts";
 import { procTable, topAgent } from "./session-id.ts";
+import { isOmoExecutable } from "./executable.ts";
 import { type PaneKeys, submitText, type Submitted } from "./submit.ts";
 import { watchLog } from "./watch-log.ts";
 
@@ -119,7 +119,7 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
 // evidence of delivery. A herdr Dori whose agentCommand is no omo keeps the bare herdr keys.
 // Whether dori drives omo in this session the aoe way: every tmux session (also under a herdr config while the Dori
 // moves), and the herdr panes of a Dori whose agentCommand is omo.
-export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || basename(config.agentCommand[0] ?? "") === "omo";
+export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || isOmoExecutable(config.agentCommand[0] ?? "");
 export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
 
 const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): PaneKeys => {
