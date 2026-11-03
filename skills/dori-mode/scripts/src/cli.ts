@@ -367,7 +367,7 @@ const USAGE = `dori <command> [options]
                                        put a card's buttons back / forget a settled question; a card still open (the
                                        owner answered in text) folds into its record with TEXT as the answer
   handover --approved-by REF [--note FILE] [--title T] [--model M] [--keep-old] [--no-monitors] [--minutes N] [--dry-run]
-                                       move the lead to a new session (backend aoe): write a note (open lanes, the old
+                                       move the lead to a new session (omo on aoe or herdr): write a note (open lanes, the old
                                        session's running monitors, open question cards, todos, timers, the owner's
                                        messages of the last 24 h from the inbox, the old log's path, --note: the old lead's
                                        summary under the headings of handover --template), open the new session on it,

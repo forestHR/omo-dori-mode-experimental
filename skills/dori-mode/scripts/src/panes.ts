@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 
-import { captureTmux, listAoePanes, liveSessions, paneLife, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
+import { captureTmux, listAoePanes, liveSessions, paneLife, QUESTION_MARK, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
 import type { Backend, DoriConfig } from "./config.ts";
-import { isHerdrPane } from "./herdr.ts";
+import { herdrResult, isHerdrPane } from "./herdr.ts";
 import { replacementOf } from "./frozen.ts";
 import type { Clock, Runner } from "./run.ts";
 import { procTable, topAgent } from "./session-id.ts";
@@ -126,7 +126,15 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
   const herdr = isHerdrPane(pane);
   if (!omoPane(config, pane))
     return {
-      type: async (text) => ((await run(["herdr", "pane", "send-text", pane, text])).code === 0 ? undefined : "herdr send-text failed"),
+      // upstream #66/#70: a pane whose agent ended leaves its shell, which would run the text as a command, and an agent
+      // herdr reports blocked shows a confirmation the text would answer; neither gets anything
+      type: async (text) => {
+        const got = (await herdrResult(run, ["pane", "get", pane]))?.pane as { agent?: string; agent_status?: string } | undefined;
+        if (!got) return `PANE_GONE: there is no herdr pane ${pane}; nothing was typed`;
+        if (!got.agent) return `PANE_DEAD: no agent runs in ${pane} (only its shell, which would run the text); nothing was typed`;
+        if (got.agent_status === "blocked") return `PANE_BLOCKED: the agent in ${pane} waits on a confirmation the text would answer; nothing was typed`;
+        return (await run(["herdr", "pane", "send-text", pane, text])).code === 0 ? undefined : "herdr send-text failed";
+      },
       enter: async () => { await run(["herdr", "pane", "send-keys", pane, "enter"]); },
       read: () => readScreen(run, config.backend, pane),
     };
@@ -140,6 +148,8 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
       if (!life.live) return life.how === "gone" ? `PANE_GONE: there is no ${where} (it ended, or the name is wrong); nothing was typed` : `PANE_DEAD: the program in ${pane} exited (${life.status < 0 ? "no agent runs in it" : `status ${life.status}`}); nothing was typed`;
       const stopped = await stoppedAgent(run, pane);
       if (stopped) return `the agent in the pane is stopped (pid ${stopped}, frozen): nothing would read the text, so it was not typed`;
+      // upstream #70: an omo question open in a herdr pane would take the text as its answer
+      if (herdr && QUESTION_MARK.test(await captureTmux(run, pane))) return `PANE_BLOCKED: a question is open in ${pane} (Ask user); the text would answer it, so nothing was typed`;
       if (!(await waitForPrompt(run, clock, pane, 10, 1_000))) return "no ❯ prompt in the pane";
       for (const part of sendChunks(text)) if ((await send(part)).code !== 0) return herdr ? "herdr send-text failed" : "tmux send-keys failed";
       return undefined;

@@ -3,10 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { closeAoeSession, envMismatch, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
+import { closeAoeSession, envMismatch, herdrAgentArgv, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
 import { agentLine, openHerdrSession } from "../src/herdr.ts";
 import { readScreen } from "../src/panes.ts";
-import { shellPidOf } from "../src/session-id.ts";
+import { resolveSession, shellPidOf, topAgent } from "../src/session-id.ts";
+import { agentTree } from "../src/frozen.ts";
+import { agentAlive, localChains } from "../src/lane-handover.ts";
 import { closeLane } from "../src/done-flow.ts";
 import { launchLane } from "../src/launch.ts";
 import { submitToPane } from "../src/panes.ts";
@@ -168,4 +170,47 @@ test("a herdr launch of an agent that is no omo needs no node: it starts with th
     if (nvm === undefined) delete process.env.NVM_DIR;
     else process.env.NVM_DIR = nvm;
   }
+});
+
+test("the agent of a herdr lane keyed mcp-fix (its prompt on the command line) is found for handover, freeze and its session", async () => {
+  const table = [
+    { pid: 4000, ppid: 1, cmd: "-bash", stat: "S" },
+    { pid: 4001, ppid: 4000, cmd: "omo --session-id 11111111-2222-4333-8444-555555555555 --model m ulw. Read the lane brief at /tmp/mcp.md. You are the mcp-fix lane", stat: "S" },
+    { pid: 4002, ppid: 4001, cmd: "bun /x/mcp-server.js", stat: "S" },
+  ];
+  expect(topAgent(table, 4000)?.pid).toBe(4001);
+  expect(localChains(table, 4000, []).agent?.pid).toBe(4001);
+  expect(agentTree(table, 4000, 999).agent?.pid).toBe(4001);
+  const run: Runner = async (argv) => ({ code: 0, out: argv[2] === "process-info" ? JSON.stringify({ result: { process_info: { shell_pid: 4000 } } }) : "", err: "" });
+  expect((await resolveSession("w1:p1", "/tmp", table, { run, sessionsDir: dir, backend: "herdr" })).id).toBe("11111111-2222-4333-8444-555555555555");
+});
+
+test("upstream #66/#70 on herdr: an omo pane with a question open, and a bare-agent pane with only its shell or a blocked agent, get nothing", async () => {
+  const deps = omo();
+  world.screens = { "w1:p1": "Ask user · Which one?\n❯ " };
+  const q = await submitToPane(deps.run, deps.clock, deps.config, "w1:p1", "[LEAD] hi");
+  expect((q as { reason: string }).reason).toStartWith("PANE_BLOCKED: a question is open in w1:p1");
+  const bare = omo({ agentCommand: ["claude", "{prompt}"] });
+  const pane = (p: Record<string, unknown>): Runner => async (argv, o) => (argv[2] === "get" ? { code: 0, out: JSON.stringify({ result: { pane: { pane_id: "w1:p2", ...p } } }), err: "" } : fakeRunner(world)(argv, o));
+  const shell = await submitToPane(pane({}), bare.clock, bare.config, "w1:p2", "rm -rf /tmp/x");
+  expect((shell as { reason: string }).reason).toStartWith("PANE_DEAD: no agent runs in w1:p2");
+  const blocked = await submitToPane(pane({ agent: "claude", agent_status: "blocked" }), bare.clock, bare.config, "w1:p2", "yes");
+  expect((blocked as { reason: string }).reason).toStartWith("PANE_BLOCKED: the agent in w1:p2 waits on a confirmation");
+  expect(sent(world)).toEqual([]);
+});
+
+test("a handover's new herdr session keeps agentCommand's own options, opens a new session and runs the handover's model and thinking", () => {
+  const argv = herdrAgentArgv(["omo", "--session-dir", "/s", "--model", "{model}", "{prompt}"], "m/x", "high");
+  expect(argv.slice(0, 2)).toEqual(["omo", "--session-id"]);
+  expect(argv[2]).toMatch(/^[0-9a-f-]{36}$/);
+  expect(argv.slice(3)).toEqual(["--session-dir", "/s", "--model", "m/x", "--thinking", "high"]);
+  // a literal model and a thinking of the template give way, in either flag form (a session selector is refused earlier)
+  for (const t of [["omo", "--model", "a/old", "--thinking", "low"], ["omo", "--model=a/old", "--thinking=low"]]) expect(herdrAgentArgv(t, "b/new", "high").slice(3)).toEqual(["--model", "b/new", "--thinking", "high"]);
+});
+
+test("recovery and the verify rollback count a herdr pane with only its shell left as gone, not as the old session to go back to", async () => {
+  world.herdrDead = ["w1:p1"];
+  const run = fakeRunner(world);
+  expect(await agentAlive(run, [], "w1:p1")).toBe(false);
+  expect(await agentAlive(run, [], "w1:p2")).toBe(true);
 });

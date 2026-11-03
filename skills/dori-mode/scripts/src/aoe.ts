@@ -243,12 +243,28 @@ export const agentPath = (tool: string): string => {
   return withPi(node, tool);
 };
 
-export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly backend?: "aoe" | "herdr"; readonly workspace?: string }): Promise<string> => {
+// The command a handover's new herdr session runs: the configured agentCommand with its own options kept (a --session-dir
+// included), the lane prompt left out (it is typed once the agent shows its prompt), a new --session-id after the
+// program, and the handover's --model and --thinking.
+export const herdrAgentArgv = (template: readonly string[], model: string, thinking?: string): string[] => {
+  const [program = "omo", ...rest] = template.filter((a) => !a.includes("{prompt}"));
+  // the handover's --model and --thinking replace the template's; a template with a session selector is refused before
+  // this (handover.ts, lane-handover.ts)
+  const kept: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i] ?? "";
+    if (!/^--(model|thinking)(=|$)/.test(a)) kept.push(a);
+    else if (!a.includes("=") && i + 1 < rest.length && !(rest[i + 1] ?? "").startsWith("-")) i++;
+  }
+  return [program, "--session-id", crypto.randomUUID(), ...kept, "--model", model, ...(thinking ? ["--thinking", thinking] : [])];
+};
+
+export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly backend?: "aoe" | "herdr"; readonly workspace?: string; readonly agentCommand?: readonly string[] }): Promise<string> => {
   const env = opts.env && Object.keys(opts.env).length ? opts.env : undefined;
   const callerPath = process.env.PATH ?? "";
   const path = agentPath(opts.tool);
   if (opts.backend === "herdr") {
-    const argv = [opts.tool, "--session-id", crypto.randomUUID(), "--model", opts.model, ...(opts.thinking ? ["--thinking", opts.thinking] : [])];
+    const argv = herdrAgentArgv(opts.agentCommand ?? [opts.tool, "--model", "{model}"], opts.model, opts.thinking);
     try {
       // a herdr pane takes the server's environment, not this caller's: the checked PATH always goes on its command line
       return (await openHerdrSession(run, clock, { title: opts.title, cwd: opts.cwd, argv, env: { ...env, PATH: path }, ...(opts.workspace ? { workspace: opts.workspace } : {}) })).pane;

@@ -5,9 +5,9 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { aoeSessions, closeAoeSession, sessionFor, tmuxPanePid } from "./aoe.ts";
+import { closeAoeSession, isClosedLine, liveSessions, sessionFor, tmuxPanePid } from "./aoe.ts";
 import type { Runner } from "./run.ts";
-import { AGENT, descendants, ended, type Proc } from "./session-id.ts";
+import { descendants, ended, type Proc, topAgent } from "./session-id.ts";
 
 export type Sig = "SIGSTOP" | "SIGCONT";
 
@@ -71,7 +71,7 @@ export const writeFrozen = (stateDir: string, rec: FrozenRecord): void => {
 // The agent of a pane and every process under it, the agent first. The caller and its ancestors are left out, so a run
 // inside that pane does not stop itself, and so is spare (monitors whose work must go on) with everything under it.
 export const agentTree = (table: readonly Proc[], shellPid: number, self: number, spare: readonly number[] = []): { readonly agent?: Proc; readonly pids: number[] } => {
-  const agent = descendants(table, shellPid).find((p) => AGENT.test(p.cmd) && !/\bmcp\b/.test(p.cmd));
+  const agent = topAgent(table, shellPid);
   if (!agent) return { pids: [] };
   const mine = new Set<number>();
   const parent = new Map(table.map((p) => [p.pid, p.ppid]));
@@ -106,13 +106,13 @@ export const thawFrozen = (deps: Pick<FreezeDeps, "signal">, stateDir: string, p
 // Closes a frozen session: resumed first (a stopped process does not act on the hangup), then stopped and trashed with
 // aoe. Its conversation log is not touched.
 export const closeFrozen = async (deps: FreezeDeps, stateDir: string, rec: FrozenRecord): Promise<string> => {
-  if (!sessionFor(await aoeSessions(deps.run), rec.pane)) {
+  if (!sessionFor(await liveSessions(deps.run), rec.pane)) {
     rmSync(frozenFile(stateDir, rec.pane), { force: true });
     return `HANDOVER_OLD_GONE ${rec.pane}: the frozen session is no longer open; record removed`;
   }
   resume(deps, rec);
   const closed = await closeAoeSession(deps.run, rec.pane);
-  if (!closed.includes("stopped and trashed")) return `HANDOVER_OLD_CLOSE_FAIL ${rec.pane}: ${closed}`;
+  if (!isClosedLine(closed)) return `HANDOVER_OLD_CLOSE_FAIL ${rec.pane}: ${closed}`;
   rmSync(frozenFile(stateDir, rec.pane), { force: true });
   return `HANDOVER_OLD_CLOSED ${closed}${rec.oldLog ? `; its log stays at ${rec.oldLog}` : ""}`;
 };

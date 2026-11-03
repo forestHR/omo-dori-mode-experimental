@@ -16,7 +16,7 @@ import type { Lane } from "../src/registry.ts";
 import type { Proc } from "../src/session-id.ts";
 import { sessionDirFor } from "../src/session-id.ts";
 import { defaultConfig } from "../src/config.ts";
-import { depsFor, fakeClock, launchReadyPath, NEW_AOE_ID, newWorld, sent, withState, type World } from "./fakes.ts";
+import { depsFor, fakeClock, launchReadyPath, NEW_AOE_ID, newWorld, RUNNING, sent, withState, type World } from "./fakes.ts";
 
 const OLD_ID = "1a1a1a1a22223333";
 const OLD = "aoe_demo_1a1a1a1a";
@@ -37,7 +37,7 @@ const RESTATE = "## Goal\n레인에도 적용: ship it\n## Owner's words\nnone\n
 // writes restate over it from scratch (wrote: the files it already wrote once)
 // cancel: what the new session does with a HANDOVER_TASKS_CANCEL line: task_cancel each id (its record turns cancelled), or
 // only ack it
-type Sim = { cancel?: "cancel" | "ack-only"; keepSeed?: boolean; wrote?: string[]; fromNote?: boolean; arm: { description: string; command: string; filter?: string; pid: number }[]; thinking: string; ackPane: string; ack: boolean; restate?: string; supplement: "fix" | "ignore" | "silent"; handled: string[]; account: string; chainSurvives: boolean; grandchildSurvives?: boolean; doubleRun: boolean; restarted: boolean; endsAfterProbe?: number };
+type Sim = { cancel?: "cancel" | "ack-only"; keepSeed?: boolean; wrote?: string[]; fromNote?: boolean; arm: { description: string; command: string; filter?: string; pid: number }[]; thinking: string; ackPane: string; ack: boolean; restate?: string; supplement: "fix" | "ignore" | "silent"; handled: string[]; account: string; chainSurvives: boolean; grandchildSurvives?: boolean; doubleRun: boolean; restarted: boolean; endsAfterProbe?: number; busyFor?: number; probeWhileBusy?: boolean };
 
 let state: { dir: string; done: () => void };
 let w: World;
@@ -78,7 +78,8 @@ const firstMessageSent = () => w.calls.some((c) => c[1] === "send-keys" && c.inc
 // and it acks the probe it receives.
 const simulate = () => {
   if (!firstMessageSent()) return;
-  w.screens[NEW] = status(`claude-opus-5-5 • effort ${sim.thinking}`, "9.0", sim.account);
+  // busyFor: the new session's first turn (reading the note) runs for that many sleeps of the handover
+  w.screens[NEW] = status(`claude-opus-5-5 • effort ${sim.thinking}`, "9.0", sim.account) + ((sim.busyFor ?? 0) > 0 ? `\n${RUNNING}` : "");
   // the new session restarts the chain only when told the old one ended; both copies alive at once is a double run
   if (!sim.restarted && sent(w).some((x) => x.startsWith("[LEAD] HANDOVER_CHAINS_ENDED"))) {
     sim.restarted = true;
@@ -341,6 +342,42 @@ test("launchEnv: a new session tmux did not give it is closed and the old one st
   expect(printed).toContain(`HANDOVER_FAIL demo: new session ${NEW} lacks launchEnv: CUDA_VISIBLE_DEVICES=(unset)`);
   expect(stoppedIds()).toEqual([NEW_AOE_ID]);
   expect((await readLane(deps)).pane).toBe(OLD);
+});
+
+test("the probe waits for the new session's first turn to end, so it comes as a message of its own, not a line typed into that turn", async () => {
+  const deps = await setup();
+  ready(deps, [15]);
+  sim.busyFor = 3;
+  const sleep = deps.clock.sleep;
+  const run = deps.run;
+  const r = await laneHandover({
+    ...deps,
+    // whether the new session's turn still ran at the moment the probe was typed
+    run: async (argv, o) => {
+      if (argv[1] === "send-keys" && argv.includes(`=${NEW}:`) && (argv.at(-1) ?? "").includes("HANDOVER_PROBE") && sim.probeWhileBusy === undefined) sim.probeWhileBusy = (sim.busyFor ?? 0) > 0;
+      return run(argv, o);
+    },
+    clock: { ...deps.clock, sleep: async (ms) => { if (firstMessageSent() && (sim.busyFor ?? 0) > 0) sim.busyFor = (sim.busyFor ?? 0) - 1; await sleep(ms); } },
+  }, "demo", "aoe_lead_x", OK);
+  expect(r).toMatchObject({ code: 0, to: NEW });
+  expect(sim.probeWhileBusy).toBe(false);
+});
+
+test("a first turn that never ends within the verify time gets no probe: the handover fails and goes back", async () => {
+  const deps = await setup();
+  ready(deps, [15]);
+  sim.busyFor = 1_000_000;
+  let probed = false;
+  const run = deps.run;
+  const r = await laneHandover({
+    ...deps,
+    run: async (argv, o) => {
+      if (argv[1] === "send-keys" && argv.includes(`=${NEW}:`) && (argv.at(-1) ?? "").includes("HANDOVER_PROBE")) probed = true;
+      return run(argv, o);
+    },
+  }, "demo", "aoe_lead_x", { ...OK, verifyMin: 1 });
+  expect(r.code).not.toBe(0);
+  expect(probed).toBe(false);
 });
 
 test("moves the lane: same cwd, model and thinking, registry and cards repointed, status, monitors and probe checked, then the old session closes", async () => {
