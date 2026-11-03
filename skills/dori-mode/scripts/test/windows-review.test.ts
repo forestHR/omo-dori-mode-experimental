@@ -64,7 +64,7 @@ test.skipIf(process.platform !== "win32")("review 1 records a native lead starte
     const encoded = "--" + process.cwd().replace(/^[/\\\\]/, "").replace(/[/\\\\:]/g, "-") + "--";
     const dir = join(process.env.TEST_SESSIONS, encoded);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, new Date().toISOString().replace(/:/g, "-") + "_${session}.jsonl"), "{}\\n");
+    writeFileSync(join(dir, new Date().toISOString().replace(/[:.]/g, "-") + "_${session}.jsonl"), "{}\\n");
     process.on("message", () => {});
     process.send("READY");
   `], {
@@ -124,9 +124,9 @@ test.skipIf(process.platform !== "win32")("review 1 scheduled entry point select
   }
   const clean = Object.fromEntries(Object.entries(Bun.env).filter(([name]) => !name.startsWith("DORI_")));
   // When the exact scheduled action starts in a fresh environment, without registering a real task.
-  const child = Bun.spawn(["cmd", "/d", "/s", "/c", action], { env: clean, stdout: "pipe", stderr: "pipe" });
-  const [code, err] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  const child = Bun.spawn(["cmd", "/d", "/s", "/c", `"${action}"`], { env: clean, stdout: "pipe", stderr: "pipe", windowsVerbatimArguments: true });
+  const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   // Then it starts the selected instance rather than whichever instance is the default.
-  expect({ code, err }).toMatchObject({ code: 0 });
+  expect({ code, out, err }).toMatchObject({ code: 0 });
   expect(await Bun.file(capture).json()).toEqual({ config, env: envFile, state, argv: ["serve", "--log", join(state, "serve.log")] });
 }, 30_000);
