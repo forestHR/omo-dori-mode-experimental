@@ -602,6 +602,14 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   // a run that waited for a holder asked for the session it found then: once an interrupted move is repaired (above), a
   // lane in another pane was moved by the holder or a run beside this one, and is not moved again
   if (opts.boundPane && lane.pane !== opts.boundPane) {
+    // the move that won applied its own options: a request that asked to keep the old session (or to close it) and got the
+    // other is a conflict, not a success (plan challenge 14:48Z)
+    const won = readRollovers(config.stateDir).flatMap((r) => (r.kind === "rollover" && r.key === key && r.result.startsWith("done") ? [r] : [])).at(-1);
+    const keptOld = won?.result === "done-kept-old";
+    if (won && keptOld !== !!opts.keepOld) {
+      emit(`HANDOVER_CONFLICT ${key}: the lane moved from ${opts.boundPane} to ${lane.pane} while this run waited, by a run that ${keptOld ? "kept" : "closed"} the old session; this request asked to ${opts.keepOld ? "keep" : "close"} it and is not moved again`);
+      return { code: 2, to: lane.pane };
+    }
     emit(`HANDOVER_ALREADY_MOVED ${key}: the lane moved from ${opts.boundPane} to ${lane.pane} while this run waited; it is not moved again`);
     return { code: 0, to: lane.pane };
   }

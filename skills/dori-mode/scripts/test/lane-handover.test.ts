@@ -1981,6 +1981,9 @@ test("a lead's handover refused while the lane was busy starts again once, with 
   expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUMED demo started: the ready mark of ${at(16)} in ${OLD} follows the request of ${at(12)} (refused work); started again with the same approval "${LEAD_OK}": unit=u1`);
   // the same mark never starts it twice, in this sweep's process or the next one's
   expect(await tick(18)).toEqual([]);
+  // the started run waits for the idle moment holding the lock: never started beside it
+  running.add(78);
+  writeFileSync(join(state.dir, "handover", "lanes", "demo.lock"), JSON.stringify({ pid: 78, at: "x" }));
   expect(await tick(25)).toEqual([]);
   expect(resumes).toHaveLength(1);
   // the restarted run was refused again (work would die): a new mark starts it again, but not while a handover holds the lock
@@ -2651,7 +2654,7 @@ test("review 320 round 5: a holder that repointed the lane and died before its c
   expect(crashLines.some((l) => l.startsWith("HANDOVER_ALREADY_MOVED"))).toBe(false);
 });
 
-test("review 320 round 6: a waiting run that was started and died without another row is started again after its grace, not left waiting for good", async () => {
+test("review 320 round 6: a waiting run that was started and died without another row is started again after its grace with no new ready mark, not left waiting for good", async () => {
   // Given
   const base = await setup();
   const T0 = Date.parse("2026-10-11T16:35:00Z");
@@ -2666,9 +2669,32 @@ test("review 320 round 6: a waiting run that was started and died without anothe
   mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
   ready(0.5);
   await tick(1);
+  await tick(2);
+  const inGrace = resumes.length;
   await tick(5);
-  ready(6);
-  await tick(7);
-  // Then
+  // Then: nothing within the 2 min grace, then started again by the sweep alone (plan challenge 14:48Z)
+  expect(inGrace).toBe(1);
   expect(resumes).toHaveLength(2);
+});
+
+test("plan challenge 14:48Z: a request that waited while another run moved the lane with other options is a conflict, not a success", async () => {
+  // Given
+  const base = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  const deps: LaneHandoverDeps = { ...base, reportOwner: async () => "msg-1", clock: { ...base.clock, sleep: async () => {
+    if (live.has(77)) {
+      await base.registry.patch("demo", { pane: "aoe_demo_moved_2" });
+      appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-10-11T16:36:00Z", key: "demo", from: OLD, to: "aoe_demo_moved_2", approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "done", reasons: [] });
+      live.delete(77);
+    }
+    simulate();
+  } } };
+  mkdirSync(lanes, { recursive: true });
+  writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
+  live.add(77);
+  // When: this request asked to keep the old session; the run that won closed it
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true, keepOld: true });
+  // Then
+  expect(r.code).toBe(2);
+  expect(printed.at(-1)).toBe(`HANDOVER_CONFLICT demo: the lane moved from ${OLD} to aoe_demo_moved_2 while this run waited, by a run that closed the old session; this request asked to keep it and is not moved again`);
 });

@@ -300,10 +300,9 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
   const since = claim?.since && claim.approvedBy === by && claim.result === "started" ? claim.since : claim?.request === asked.at && claim.since ? claim.since : asked.at;
   // a refusal started once (or skipped for good) is done; one still waiting, or skipped for a stale ready mark, is looked at
   // again: a fresh mark or its work ending still starts it (review 320)
-  // a started run that died before it wrote another row (no live run holds the lane, checked below) is started again by a
-  // ready mark newer than its start, once its startup grace has passed (review 320)
-  const fresh = readJson<ReadyMark>(readyFile(stateDir, key));
-  const abandoned = claim?.result === "started" && deps.clock.now() - Date.parse(claim.at ?? "") > STARTED_GRACE_MS && fresh?.pane === pane && Date.parse(fresh.at ?? "") > Date.parse(claim.at ?? "");
+  // a started run that died before it wrote another row (no live run holds the lane, checked below) is started again once
+  // its startup grace has passed, with no new event needed: the request stays decided (review 320, plan challenge 14:48Z)
+  const abandoned = claim?.result === "started" && deps.clock.now() - Date.parse(claim.at ?? "") > STARTED_GRACE_MS;
   if (claim?.request === asked.at && claim.result !== "waiting" && claim.result !== "stale-mark" && !abandoned) return [];
   const alive = hooks.alive ?? pidAlive;
   if (handoverRunning(stateDir, "lane", key, alive)) return [];
