@@ -90,10 +90,13 @@ type Outcome = Extract<RolloverEntry, { kind: "outcome" }>;
 // A lane rollover that committed while the lane stood at rung 4 of the stuck ladder (whoever decided it).
 const stuckMove = (e: RolloverEntry): e is Rollover => e.kind === "rollover" && e.who === "lane" && e.result.startsWith("done") && (e.signals.stuck?.rung ?? 0) >= 4;
 
-// The lane's newest stuck rollover that has no outcome yet: what its done claim or close is asked to describe.
+// The move that started the lane's current session, when it was a stuck one with no outcome yet: what its done claim or
+// close is asked to describe. An earlier stuck move followed by any other committed move is not asked about (rollover-stats
+// shows it as moved again), so the last session's result is never credited to it.
 export const pendingStuck = (entries: readonly RolloverEntry[], key: string): Rollover | undefined => {
-  const told = new Set(entries.flatMap((e) => (e.kind === "outcome" && e.key === key ? [e.rolloverAt] : [])));
-  return entries.findLast((e): e is Rollover => stuckMove(e) && e.key === key && !told.has(e.at));
+  const last = entries.findLast((e): e is Rollover => e.kind === "rollover" && e.who === "lane" && e.key === key && e.result.startsWith("done"));
+  if (!last || !stuckMove(last)) return undefined;
+  return entries.some((e) => e.kind === "outcome" && e.key === key && e.rolloverAt === last.at) ? undefined : last;
 };
 
 // The one line a lane gives at its done claim (or the lead's close note): one line, at most 300 characters.

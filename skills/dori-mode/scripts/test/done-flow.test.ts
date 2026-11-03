@@ -88,6 +88,22 @@ test("a lane whose move did not solve it says so; a lane never moved for being s
   expect(await claimDone(at(T0), other, "merged acme/app#3")).toBe("LANE_DONE_CLAIMED other-lane w:p2 merged acme/app#3");
 });
 
+test("only the move that started the current session is asked about: an earlier stuck move followed by another move is not", async () => {
+  // Given two stuck moves, the newer one answered: a claim again is not asked about the older one
+  stuckMove("demo-lane", "2026-01-01T11:00:00.000Z");
+  stuckMove("demo-lane", "2026-01-01T11:30:00.000Z");
+  await claimDone(at(T0), lane, "merged acme/app#1", undefined, { rolloverOutcome: { line: "second session split the PR", resolved: true } });
+  expect(readRollovers(state.dir).filter((e) => e.kind === "outcome").map((e) => e.kind === "outcome" && e.rolloverAt)).toEqual(["2026-01-01T11:30:00.000Z"]);
+  expect(await claimDone(at(T0 + MIN), lane, "merged acme/app#1")).toStartWith("LANE_DONE_CLAIMED demo-lane");
+  // Given a stuck move followed by a context move: the claim is not asked and the stuck move gets no credit
+  const other: Lane = { ...lane, key: "other-lane", pane: "w:p2" };
+  await at(T0).registry.write(other);
+  stuckMove("other-lane", "2026-01-01T11:00:00.000Z");
+  appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-01-01T11:40:00.000Z", key: "other-lane", from: "w:p1", to: "w:p2", signals: { contextPct: 90 }, steps: [], result: "done", reasons: [] });
+  expect(await claimDone(at(T0), other, "merged acme/app#3")).toBe("LANE_DONE_CLAIMED other-lane w:p2 merged acme/app#3");
+  expect(readRollovers(state.dir).filter((e) => e.kind === "outcome" && e.key === "other-lane")).toEqual([]);
+});
+
 test("commits that reached no remote block the close and name the worktree", async () => {
   world.aheadCount = "2";
   await claimDone(at(T0), lane, "merged acme/app#1");
