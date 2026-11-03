@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { defaultDiscordWords } from "../src/config.ts";
 import { Discord } from "../src/messenger/discord.ts";
 import { QuestionCards, QuestionStore } from "../src/messenger/discord-cards.ts";
-import { audioAttachment, type DiscordMessage, DiscordListener, type GatewayConnection, type ListenerDeps, LISTENER_INTENTS, webhookVerdict } from "../src/messenger/discord-listener.ts";
+import { audioAttachment, type DiscordMessage, DiscordListener, eyesOff, type GatewayConnection, type ListenerDeps, LISTENER_INTENTS, webhookVerdict } from "../src/messenger/discord-listener.ts";
 import type { Http, HttpRequest, HttpResponse } from "../src/messenger/http.ts";
 import { fakeClock, withState } from "./fakes.ts";
 
@@ -41,7 +41,7 @@ const fakeTimers = () => {
 let state: ReturnType<typeof withState>;
 afterEach(() => state?.done());
 
-const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?: string; transcribe?: (url: string) => Promise<string>; respond?: (req: HttpRequest) => HttpResponse | undefined; autoUnEye?: boolean; ownerWebhook?: string; pairChannel?: string; pairBots?: readonly string[]; watchChannels?: string[]; watchBots?: string[]; watchMatch?: RegExp; shadow?: boolean; mentionRoleIds?: string[]; gate?: (req: HttpRequest) => Promise<void> | undefined; hints?: (text: string) => readonly string[] } = {}) => {
+const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?: string; transcribe?: (url: string) => Promise<string>; respond?: (req: HttpRequest) => HttpResponse | undefined; autoUnEye?: boolean; ownerWebhook?: string; pairChannel?: string; pairBots?: readonly string[]; watchChannels?: string[]; watchBots?: string[]; watchMatch?: RegExp; shadow?: boolean; mentionRoleIds?: string[]; callNames?: string[]; gate?: (req: HttpRequest) => Promise<void> | undefined; hints?: (text: string) => readonly string[] } = {}) => {
   state = withState();
   const seen: HttpRequest[] = [];
   const http: Http = async (req) => {
@@ -58,7 +58,7 @@ const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?
   const sleeps: number[] = [];
   const dc = new Discord(http, { ...fakeClock(0), sleep: async (ms: number) => { sleeps.push(ms); } }, "bot");
   // one words setting for the cards and the listener, as the CLI builds them from one config
-  const words = { ...defaultDiscordWords, statusStyle: "emoji" as const, autoUnEye: opts.autoUnEye ?? true, mentionRoleIds: opts.mentionRoleIds ?? [] };
+  const words = { ...defaultDiscordWords, statusStyle: "emoji" as const, autoUnEye: opts.autoUnEye ?? true, mentionRoleIds: opts.mentionRoleIds ?? [], callNames: opts.callNames ?? [] };
   const cards = new QuestionCards(dc, new QuestionStore(`${state.dir}/discord`), { channel: CHANNEL, owner: OWNER, words }, () => Date.parse("2026-01-02T03:04:00Z"));
   const inboxFile = `${state.dir}/discord/inbox.jsonl`;
   if (opts.inbox) {
@@ -74,7 +74,7 @@ const setup = (route: (req: HttpRequest) => unknown = () => ({}), opts: { inbox?
   const inbox = () => (existsSync(inboxFile) ? readFileSync(inboxFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
   const calls = () => seen.map((r) => `${r.method} ${r.url.replace("https://discord.com/api/v10", "")}`);
   const eyesFile = () => JSON.parse(readFileSync(`${state.dir}/discord/eyes.json`, "utf8"));
-  return { listener, restart: () => new DiscordListener(deps), cards, gw, t, logs, fatal, inbox, calls, seen, sleeps, eyesFile };
+  return { listener, restart: () => new DiscordListener(deps), cards, gw, t, logs, fatal, inbox, calls, seen, sleeps, eyesFile, dc, eyesPath: `${state.dir}/discord/eyes.json` };
 };
 
 const unreacts = (calls: () => string[]) => calls().filter((c) => c.startsWith("DELETE")).map((c) => c.replace("DELETE /channels/", "").replace("/reactions/%F0%9F%91%80/@me", ""));
@@ -483,6 +483,86 @@ test("two listed pair bots become pair-bot rows without eyes while a third bot i
   await listener.onMessage(msg("1003", { channel_id: PAIR, author: { id: OTHER_BOT, bot: true } }));
   expect(inbox().map((r) => [r.id, r.scope, r.author_id])).toEqual([["1001", "pair-bot", PAIR_BOT], ["1002", "pair-bot", secondBot]]);
   expect(calls()).toEqual([]);
+});
+
+// owner 2026-11-03 09:58 KST: a Dori that read the owner's pair message and does not answer it takes its eyes off at once
+const NAMES = ["짱돌", "ZzangDori"];
+const pairBot = (id: string, patch: Partial<DiscordMessage> = {}) => msg(id, { channel_id: PAIR, author: { id: PAIR_BOT, bot: true }, ...patch });
+
+test("another Dori's reply to an owner pair message that did not call this Dori takes our eyes off it, and only ours", async () => {
+  const { listener, gw, inbox, calls, eyesFile, logs } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES });
+  listener.start();
+  ready(gw);
+  await listener.onMessage(msg("2001", { channel_id: PAIR, content: "수돌아 이거 해" }));
+  await listener.onMessage(msg("2002", { channel_id: PAIR, content: "무돌아 이것도" }));
+  expect(inbox().map((r) => [r.id, r.called, r.note])).toEqual([["2001", false, expect.stringContaining("dori eyes off 2001")], ["2002", false, expect.stringContaining("dori eyes off 2002")]]);
+  await listener.onMessage(pairBot("2003", { message_reference: { message_id: "2001" }, referenced_message: { author: { id: OWNER } } }));
+  expect(unreacts(calls)).toEqual([`${PAIR}/messages/2001`]);
+  expect(eyesFile()).toEqual({ [PAIR]: ["2002"] });
+  expect(logs).toContain(`EYES_CLEARED_ANSWERED ${PAIR} by=2003 bot=${PAIR_BOT} 2001`);
+  // a link to the owner's message in another Dori's post counts as its answer too
+  await listener.onMessage(pairBot("2004", { content: `내가 할게 https://discord.com/channels/${GUILD}/${PAIR}/2002` }));
+  expect(unreacts(calls)).toEqual([`${PAIR}/messages/2001`, `${PAIR}/messages/2002`]);
+  expect(eyesFile()).toEqual({});
+});
+
+test("an owner pair message that names this Dori, in text or voice, mentions its bot or replies to its post keeps our eyes when another Dori answers", async () => {
+  const transcribe = async () => "짱돌아 이것좀 봐";
+  const { listener, gw, inbox, calls, eyesFile } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, transcribe });
+  listener.start();
+  ready(gw);
+  await listener.onMessage(msg("3001", { channel_id: PAIR, content: "짱돌이랑 수돌이 둘 다" }));
+  await listener.onMessage(msg("3002", { channel_id: PAIR, content: "zzangdori, check" }));
+  await listener.onMessage(msg("3003", { channel_id: PAIR, content: "너 이거", mentions: [{ id: SELF }] }));
+  await listener.onMessage(msg("3004", { channel_id: PAIR, content: "그거 맞아", message_reference: { message_id: "2999" }, referenced_message: { author: { id: SELF } } }));
+  await listener.onMessage(msg("3005", { channel_id: PAIR, content: "", attachments: [{ url: "https://cdn/v.ogg", filename: "voice-message.ogg", content_type: "audio/ogg" }] }));
+  expect(inbox().map((r) => [r.id, r.called, r.note])).toEqual(["3001", "3002", "3003", "3004", "3005"].map((id) => [id, true, undefined]));
+  for (const [i, id] of ["3001", "3002", "3003", "3004", "3005"].entries()) await listener.onMessage(pairBot(`310${i}`, { message_reference: { message_id: id } }));
+  expect(unreacts(calls)).toEqual([]);
+  expect(eyesFile()).toEqual({ [PAIR]: ["3001", "3002", "3003", "3004", "3005"] });
+});
+
+test("a reply from a bot that is not a paired Dori, or any reply while discord.callNames is empty, leaves the eyes on", async () => {
+  const named = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES });
+  named.listener.start();
+  ready(named.gw);
+  await named.listener.onMessage(msg("4001", { channel_id: PAIR, content: "수돌아" }));
+  await named.listener.onMessage(msg("4002", { channel_id: PAIR, author: { id: OTHER_BOT, bot: true }, message_reference: { message_id: "4001" } }));
+  expect(unreacts(named.calls)).toEqual([]);
+  const unnamed = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT] });
+  unnamed.listener.start();
+  ready(unnamed.gw);
+  await unnamed.listener.onMessage(msg("4001", { channel_id: PAIR, content: "수돌아" }));
+  await unnamed.listener.onMessage(pairBot("4003", { message_reference: { message_id: "4001" } }));
+  expect(unreacts(unnamed.calls)).toEqual([]);
+  // the lead is still told how to take them off itself; no called flag is written without names to judge by
+  expect(unnamed.inbox().filter((r) => r.scope === "pair").map((r) => [r.id, r.called, r.note])).toEqual([["4001", undefined, expect.stringContaining("dori eyes off 4001")]]);
+});
+
+test("after a restart another Dori's answer still clears an uncalled message, while a pair row written before callNames keeps its eyes", async () => {
+  const rows = [{ id: "5001", ts: "x", channel_id: PAIR, scope: "pair", author_id: OWNER }, { id: "5002", ts: "x", channel_id: PAIR, scope: "pair", author_id: OWNER, called: false }];
+  const { restart, gw, calls, eyesPath } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, inbox: rows.map((r) => `${JSON.stringify(r)}\n`).join("") });
+  writeFileSync(eyesPath, JSON.stringify({ [PAIR]: ["5001", "5002"] }));
+  const listener = restart();
+  listener.start();
+  ready(gw);
+  await listener.onMessage(pairBot("5003", { message_reference: { message_id: "5001" } }));
+  await listener.onMessage(pairBot("5004", { message_reference: { message_id: "5002" } }));
+  expect(unreacts(calls)).toEqual([`${PAIR}/messages/5002`]);
+});
+
+test("dori eyes off takes only this bot's eyes off one message, by link or by an id eyes.json tracks, and refuses anything else", async () => {
+  const { listener, dc, calls, eyesPath, eyesFile } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT] });
+  await listener.onMessage(msg("6001", { channel_id: PAIR }));
+  await listener.onMessage(msg("6002", { channel_id: PAIR }));
+  expect(await eyesOff(dc, eyesPath, "600000000000009", "").catch((e: Error) => e.message)).toContain("is not in");
+  expect(await eyesOff(dc, eyesPath, `https://discord.com/channels/${GUILD}/${PAIR}/6001`, "")).toBe(`EYES_OFF ${PAIR} 6001`);
+  expect(eyesFile()).toEqual({ [PAIR]: ["6002"] });
+  writeFileSync(eyesPath, JSON.stringify({ [PAIR]: ["600200000000000002"] }));
+  expect(await eyesOff(dc, eyesPath, "600200000000000002", "")).toBe(`EYES_OFF ${PAIR} 600200000000000002`);
+  expect(eyesFile()).toEqual({});
+  expect(await eyesOff(dc, eyesPath, "not-an-id", PAIR).catch((e: Error) => e.message)).toContain("needs a message id");
+  expect(unreacts(calls)).toEqual([`${PAIR}/messages/6001`, `${PAIR}/messages/600200000000000002`]);
 });
 
 test("backfill reads the pair channel too, after the newest pair row", async () => {

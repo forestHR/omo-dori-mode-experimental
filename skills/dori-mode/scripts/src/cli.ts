@@ -2,7 +2,7 @@
 // allow: SIZE_OK — existing command dispatcher; command behavior lives in separate modules.
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
@@ -63,7 +63,7 @@ import { slackPresence } from "./messenger/slack-presence.ts";
 import { Telegram } from "./messenger/telegram.ts";
 import { Discord, discordPresence, tokenBotId } from "./messenger/discord.ts";
 import { openCardIds, QuestionCards, QuestionError, QuestionStore } from "./messenger/discord-cards.ts";
-import { DiscordListener } from "./messenger/discord-listener.ts";
+import { DiscordListener, eyesOff } from "./messenger/discord-listener.ts";
 import { bareThreadName, discordThreadId, postInThread, postLaneStart, progressText, threadHook, threadName, ThreadRefError, type ThreadStatus, type ThreadVerb, VERB_STATUS } from "./messenger/discord-thread.ts";
 import { duplicateLine, sendKey, sendOnce } from "./send-dedupe.ts";
 import { mapThread, standThread, threads } from "./messenger/thread-map.ts";
@@ -343,6 +343,10 @@ const USAGE = `dori <command> [options]
                                        inbox row, voice is transcribed, question-card answers are recorded; with
                                        DORI_DISCORD_WATCH_CHANNELS + DORI_DISCORD_WATCH_BOTS a monitoring bot's problem
                                        alert there (DORI_DISCORD_WATCH_MATCH) is a scope:"watch" row for the lead
+  eyes off <message id | link>         take this Dori's own eyes off one message at once: an owner message it read and
+                                       will not answer (another Dori's work in the pair channel). Prints EYES_OFF
+                                       <channel> <id>; the channel comes from the link, eyes.json or
+                                       DORI_DISCORD_PAIR_CHANNEL. Other reactions stay
   ask --text Q --option A [--option B ...] [--thread REF | --reply-to MSG | --channel "<reason>"] [--session ID] [--tmux NAME]
                                        post a Discord question card; the first option is the recommended one. It goes in
                                        its work's thread: --thread, else the open lane thread of the asking session
@@ -883,6 +887,14 @@ try {
     case "notify-change": {
       const files = flags.values.file;
       process.exitCode = await announceChange({ config, clock: realClock, send: (pane, text) => sendVerified(run, realClock, config, pane, text), print: (line) => console.log(line) }, { summary: need("summary"), files: Array.isArray(files) ? files.filter((file): file is string => typeof file === "string") : [] }) ? 0 : 1;
+      break;
+    }
+    case "eyes": {
+      if (key !== "off") die("usage: dori eyes off <message id | link>", 2);
+      onlyOptions("eyes off", [], 2);
+      const ref = flags.positionals[1] ?? die("usage: dori eyes off <message id | link>", 2);
+      const inbox = process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl");
+      console.log(await eyesOff(discordClient(), join(dirname(inbox), "eyes.json"), ref, process.env.DORI_DISCORD_PAIR_CHANNEL?.trim() ?? "").catch((e: unknown) => die(`EYES_OFF_FAIL ${ref} ${e instanceof Error ? e.message : String(e)}`)));
       break;
     }
     case "type": {

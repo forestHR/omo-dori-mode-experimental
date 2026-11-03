@@ -170,6 +170,10 @@ export type DiscordWords = {
   // role ids that call this Dori besides the roles its bot member has (read at listener start): an owner message anywhere
   // in the guild that mentions its bot or one of these roles reaches the inbox (scope "mention")
   readonly mentionRoleIds: readonly string[];
+  // names the owner calls this Dori by ("짱돌", "짱도리", "ZzangDori"): an owner message in the pair channel that names none
+  // of them, mentions neither its bot nor its roles and replies to none of its posts did not call it, so its eyes come off
+  // when another Dori answers that message (empty: they stay until this Dori writes there)
+  readonly callNames: readonly string[];
 };
 
 export const defaultDiscordWords: DiscordWords = {
@@ -205,6 +209,7 @@ export const defaultDiscordWords: DiscordWords = {
   ownerSpeech: "",
   botId: "",
   mentionRoleIds: [],
+  callNames: [],
 };
 
 // The stuck ladder (dori fix-attempt, freshness): one count per metric, the failed attempts since the last PASS or
