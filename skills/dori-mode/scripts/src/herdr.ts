@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 
 import type { Clock, Runner } from "./run.ts";
-import { powershellLiteral } from "./powershell.ts";
 import { commandExecutable, executableName } from "./executable.ts";
 import { AGENT, type Proc, procTable, topAgent } from "./session-id.ts";
 
@@ -98,8 +97,14 @@ export const shellQuote = (arg: string): string => (/^[\w./:@=+,-]+$/.test(arg) 
 // command goes after the call operator &, words in single quotes ('' for a quote), and the variables are set before it.
 export const agentLine = (argv: readonly string[], env: Readonly<Record<string, string | undefined>> = {}, platform: string = process.platform): string => {
   if (platform === "win32") {
-    const vars = Object.entries(env).map(([k, v]) => (v === undefined ? `Remove-Item Env:${k} -ErrorAction SilentlyContinue; ` : `$env:${k} = ${powershellLiteral(v)}; `)).join("");
-    return `$PSNativeCommandArgumentPassing = 'Standard'; ${vars}& ${argv.map(powershellLiteral).join(" ")}`;
+    // Names, values and arguments never become PowerShell text: each goes in as base64 (whose letters mean nothing inside
+    // single quotes) and is decoded in the shell, so empty values, names like ProgramFiles(x86), ; $ ` and curly quotes
+    // cannot change the command.
+    const data = (s: string) => `([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(s, "utf8").toString("base64")}')))`;
+    const vars = Object.entries(env).map(([k, v]) => (v === undefined
+      ? `Remove-Item -LiteralPath ('Env:' + ${data(k)}) -ErrorAction SilentlyContinue; `
+      : `Set-Item -LiteralPath ('Env:' + ${data(k)}) -Value ${data(v)}; `)).join("");
+    return `$PSNativeCommandArgumentPassing = 'Standard'; ${vars}$doriArgv = @(${argv.map(data).join(", ")}); $doriRest = @($doriArgv | Select-Object -Skip 1); & $doriArgv[0] @doriRest`;
   }
   const unset = Object.entries(env).flatMap(([k, v]) => (v === undefined ? ["-u", k] : []));
   const set = Object.entries(env).flatMap(([k, v]) => (v === undefined ? [] : [`${k}=${v}`]));

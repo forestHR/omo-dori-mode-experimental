@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { agentLine, HerdrShellError, openHerdrSession, requireHerdrPwsh } from "../src/herdr.ts";
 import { run, type Runner } from "../src/run.ts";
 import { fakeClock } from "./fakes.ts";
@@ -85,4 +88,35 @@ test.skipIf(process.platform !== "win32")("review 6 a real pwsh child sees an em
     shell.kill();
     await shell.exited;
   }
+}, 30_000);
+
+const hostile = { "ProgramFiles(x86)": "C:\\dori x86", "A;Write-Output pwned": "v1", "B$(Write-Output pwned)": "v2", "C`n": "v3", "D\u2019x": "it\u2019s; $x `\"q\"", EMPTY: "" };
+
+test("review 7 keeps every name, value and argument out of the PowerShell text", () => {
+  // Given hostile names and values, an empty value, a removal, and hostile arguments.
+  const line = agentLine(["omo", "", 'a "b"', "한글 c", "it\u2019s"], { ...hostile, GONE: undefined }, "win32");
+  // Then none of them appears in the line; only their base64 does.
+  for (const text of [...Object.keys(hostile), ...Object.values(hostile).filter(Boolean), "GONE", 'a "b"', "한글 c", "pwned"]) expect(line).not.toContain(text);
+  expect(line).not.toContain("$env:");
+});
+
+test.skipIf(process.platform !== "win32")("review 7 a real pwsh child receives hostile names, values and arguments exactly, and nothing else runs", async () => {
+  // Given the runner's real pwsh; empty values need 7.5+ (review 6), so the empty one is only sent there.
+  const version = (await run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"])).out.trim();
+  const [major = 0, minor = 0] = version.split(".").map(Number);
+  const env: Record<string, string | undefined> = { ...hostile, GONE: undefined };
+  if (!(major > 7 || (major === 7 && minor >= 5))) delete env.EMPTY;
+  const args = ["", 'a "b"', "한글 c", "it\u2019s", "$(Write-Output pwned)"];
+  const names = [...Object.keys(env)];
+  const probe = `console.log(JSON.stringify({ env: ${JSON.stringify(names)}.map((n) => process.env[n] ?? null), args: process.argv.slice(2) }))`;
+  const probeFile = join(mkdtempSync(join(tmpdir(), "dori-review-7-")), "probe.js");
+  writeFileSync(probeFile, probe);
+  const line = agentLine([process.execPath, probeFile, ...args], env, "win32");
+  // When pwsh runs the line with GONE set beforehand.
+  const out = await run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", line], { env: { ...Bun.env, GONE: "still here" } });
+  // Then the child sees each value exactly, GONE removed, every argument intact, and no injected statement ran.
+  expect(out.code).toBe(0);
+  const lines = out.out.trim().split(/\r?\n/);
+  expect(lines).toHaveLength(1);
+  expect(JSON.parse(lines[0] ?? "")).toEqual({ env: names.map((n) => env[n] ?? null), args });
 }, 30_000);

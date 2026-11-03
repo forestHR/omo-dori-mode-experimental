@@ -43,13 +43,18 @@ test("Windows process discovery recognizes omo executables and bundle paths", as
   expect(AGENT.test("/home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js --model m")).toBe(true);
 });
 
-test("Windows agent lines quote PowerShell arguments and environment assignments", () => {
+test("Windows agent lines carry arguments and environment changes only as base64 data", () => {
   // Given an executable, an argument containing a quote, and environment changes.
   const argv = ["C:\\h\\omo.exe", "--model", "it's"];
   // When the pane command is built.
   const line = agentLine(argv, { A: "1", GPU: undefined }, "win32");
-  // Then PowerShell receives separate quoted words after the call operator.
-  expect(line).toBe("$PSNativeCommandArgumentPassing = 'Standard'; $env:A = '1'; Remove-Item Env:GPU -ErrorAction SilentlyContinue; & 'C:\\h\\omo.exe' '--model' 'it''s'");
+  // Then every quoted word is base64, and decoding them gives the names, values and arguments in order.
+  const quoted = [...line.matchAll(/'([^']*)'/g)].map((m) => m[1] ?? "");
+  expect(quoted.filter((q) => q !== "Standard" && q !== "Env:").every((q) => /^[A-Za-z0-9+/=]*$/.test(q))).toBe(true);
+  const decoded = [...line.matchAll(/FromBase64String\('([^']*)'\)/g)].map((m) => Buffer.from(m[1] ?? "", "base64").toString("utf8"));
+  expect(decoded).toEqual(["A", "1", "GPU", "C:\\h\\omo.exe", "--model", "it's"]);
+  expect(line).toContain("Remove-Item -LiteralPath ('Env:' + ");
+  expect(line).toEndWith("& $doriArgv[0] @doriRest");
 });
 
 test.skipIf(process.platform !== "win32")("Windows process discovery finds the calling Bun process natively", async () => {
