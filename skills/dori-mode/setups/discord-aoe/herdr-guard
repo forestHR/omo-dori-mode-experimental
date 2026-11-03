@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# herdr with one refusal: "herdr server stop" from inside a herdr pane. Link it as ~/.local/bin/herdr (ahead of the real
-# herdr on PATH), as tmux-guard is linked for tmux.
+# herdr with one refusal: "herdr server stop" from inside a herdr pane. Link it as ~/.local/bin/herdr with the real herdr
+# moved to ~/.local/lib/herdr/herdr (or named by HERDR_REAL, else the next herdr on PATH), as tmux-guard is linked for tmux.
 #
 # A stopped herdr server ends every agent in its panes, the lead's included (measured on herdr 0.9.5). Every pane gets
 # HERDR_SOCKET_PATH for the live server, so a lane's QA cleanup that runs "herdr server stop" in a pane, even with another
@@ -10,20 +10,24 @@
 # call goes to the first other herdr on PATH unchanged.
 set -u
 self=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+is_other() { [ -x "$1" ] && [ ! -d "$1" ] && [ "$(readlink -f "$1" 2>/dev/null || printf '%s' "$1")" != "$self" ]; }
+# the real herdr: HERDR_REAL, else where the README moves it (install.sh puts it at ~/.local/bin/herdr, where the guard
+# goes), else the first other herdr on PATH
 real=""
-IFS=: read -ra dirs <<<"${PATH:-/usr/bin:/bin}"
-for d in "${dirs[@]}"; do
-  c="$d/herdr"
-  [ -x "$c" ] && [ ! -d "$c" ] || continue
-  [ "$(readlink -f "$c" 2>/dev/null || printf '%s' "$c")" = "$self" ] && continue
-  real=$c
-  break
-done
-[ -n "$real" ] || { echo "herdr-guard: no other herdr on PATH" >&2; exit 127; }
+for c in "${HERDR_REAL:-}" "$HOME/.local/lib/herdr/herdr"; do [ -n "$c" ] && is_other "$c" && { real=$c; break; }; done
+if [ -z "$real" ]; then
+  IFS=: read -ra dirs <<<"${PATH:-/usr/bin:/bin}"
+  for d in "${dirs[@]}"; do is_other "$d/herdr" && { real="$d/herdr"; break; }; done
+fi
+[ -n "$real" ] || { echo "herdr-guard: no real herdr (HERDR_REAL, ~/.local/lib/herdr/herdr or another herdr on PATH)" >&2; exit 127; }
 
+# "server stop" anywhere among the words, so a global option and its value in front (herdr --session x server stop)
+# cannot hide it
 words=()
 for a in "$@"; do case $a in -*) ;; *) words+=("$a") ;; esac; done
-if [ -n "${HERDR_PANE_ID:-}" ] && [ "${HERDR_GUARD_ALLOW:-}" != 1 ] && [ "${words[0]:-}" = server ] && [ "${words[1]:-}" = stop ]; then
+stop=""
+for ((i = 0; i + 1 < ${#words[@]}; i++)); do [ "${words[i]}" = server ] && [ "${words[i + 1]}" = stop ] && stop=1; done
+if [ -n "${HERDR_PANE_ID:-}" ] && [ "${HERDR_GUARD_ALLOW:-}" != 1 ] && [ -n "$stop" ]; then
   # the socket this call would use: HERDR_SOCKET_PATH when set (every pane has it), else herdr's default under XDG_CONFIG_HOME
   want=${HERDR_SOCKET_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock}
   echo "HERDR_GUARD_REFUSED: herdr server stop inside a herdr pane would end every agent on the server at $want, the lead's included; set HERDR_GUARD_ALLOW=1 for a server you started yourself" >&2

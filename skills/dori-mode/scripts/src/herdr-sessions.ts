@@ -2,10 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { DoriConfig } from "./config.ts";
-import { agentPath } from "./aoe.ts";
+import { agentPath, herdrAgentArgv } from "./aoe.ts";
 import { agentLine, herdrAgentPid, herdrSessions, herdrShellPid } from "./herdr.ts";
 import type { Clock, Runner } from "./run.ts";
-import { argvSessionId, procTable, resolveSession } from "./session-id.ts";
+import { argvSessionId, hasSessionSelector, procTable, resolveSession } from "./session-id.ts";
 
 // A herdr server that stops ends every agent in its panes and gives back the same pane ids with fresh shells (herdr 0.9.5,
 // measured 2026-11-03), unlike an aoe session, which aoe starts again in its conversation. So the omo session a herdr lead
@@ -44,7 +44,8 @@ export const herdrLeadSession = async (run: Runner, config: Partial<Pick<DoriCon
   const hit = await resolveSession(pane, cwd, table, { run, sessionsDir: config.sessionsDir, backend: "herdr" });
   if (!hit.id) return kept?.session ?? "";
   const model = modelOf(table.find((p) => p.pid === hit.pid)?.cmd ?? "");
-  if (config.stateDir && (kept?.session !== hit.id || kept.cwd !== cwd || kept.model !== model)) recordHerdrSession(config.stateDir, pane, { session: hit.id, cwd, ...(model ? { model } : {}), at: new Date().toISOString() });
+  // recorded on every read, unchanged or not: its time is when it was last checked (lead-down reads again after 10 min)
+  if (config.stateDir) recordHerdrSession(config.stateDir, pane, { session: hit.id, cwd, ...(model ? { model } : {}), at: new Date().toISOString() });
   return hit.id;
 };
 
@@ -60,20 +61,27 @@ export const reviveHerdr = async (run: Runner, clock: Clock, config: Pick<DoriCo
   if (!(await herdrSessions(run)).some((s) => s.pane === pane)) return `REVIVE_FAIL ${pane}: herdr has no such pane (its tab was closed); open a new session instead`;
   for (let i = 0; i < 20 && !(await herdrShellPid(run, pane)); i++) await clock.sleep(1_000);
   const restored = await herdrAgentPid(run, pane);
+  const read = async () => (await run(["herdr", "pane", "read", pane, "--source", "visible"])).out;
+  // what the pane showed before the agent was started: a ❯ left there by the agent that ended (or a shell prompt) is no sign
+  const before = restored ? undefined : await read();
   if (!restored) {
+    // the configured agentCommand with its own options (a --session-dir included), the recorded session and model
+    if (hasSessionSelector(config.agentCommand.slice(1))) return `REVIVE_FAIL ${pane}: agentCommand picks its session itself (${config.agentCommand.join(" ")}); revive needs one without a session selector`;
     const tool = config.agentCommand[0] ?? "omo";
-    const ran = await run(["herdr", "pane", "run", pane, agentLine([tool, "--session-id", rec.session, "--model", rec.model || config.defaultModel], { PATH: agentPath(tool) })], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
+    const argv = herdrAgentArgv(config.agentCommand, rec.model || config.defaultModel, undefined, rec.session);
+    const ran = await run(["herdr", "pane", "run", pane, agentLine(argv, { PATH: agentPath(tool) })], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
     if (ran.code !== 0) return `REVIVE_FAIL ${pane}: herdr pane run failed: ${(ran.err || ran.out).slice(0, 160)}`;
   }
   const how = restored ? ` (herdr had started it again, pid ${restored})` : "";
   for (let i = 0; i < 90; i++) {
-    const screen = (await run(["herdr", "pane", "read", pane, "--source", "visible"])).out;
-    if (screen.split("\n").some((l) => l.trimStart().startsWith("❯"))) {
+    // ready once an agent runs in the pane and draws its own ❯ prompt (a screen other than the one before it started)
+    const screen = (await herdrAgentPid(run, pane)) ? await read() : "";
+    if (screen && screen !== before && screen.split("\n").some((l) => l.trimStart().startsWith("❯"))) {
       if (!prompt) return `REVIVE_OK ${pane} session ${rec.session}${how}`;
       return (await type(pane, prompt)) ? `REVIVE_OK ${pane} session ${rec.session}${how} (prompt submitted)` : `REVIVE_PROMPT_NOT_SUBMITTED ${pane} session ${rec.session}${how}`;
     }
     await clock.sleep(2_000);
   }
-  return `REVIVE_FAIL ${pane}: no ❯ prompt within 3 minutes of starting session ${rec.session}`;
+  return `REVIVE_FAIL ${pane}: no running agent with its ❯ prompt within 3 minutes of starting session ${rec.session}`;
 };
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -174,6 +174,17 @@ test("a herdr lead with no record yet (just handed over) is recorded on the firs
   expect(readHerdrSessions(dir)["w1:p1"]).toMatchObject({ session: "11111111-2222-4333-8444-555555555555", model: "m/x" });
 });
 
+test("an unchanged herdr lead record gets its check time on each read, so the next read waits its ten minutes", async () => {
+  const deps = omo({ leadPane: "w1:p1", leadReviveMin: 5, sessionsDir: dir });
+  // checked 11 minutes before the (fake) clock: due again
+  const old = new Date(-11 * 60_000).toISOString();
+  recordHerdrSession(dir, "w1:p1", { session: "11111111-2222-4333-8444-555555555555", cwd: "/repo", model: "m/x", at: old });
+  world.panes = [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo" }];
+  world.ps = "4000 1 -bash\n4001 4000 omo --session-id 11111111-2222-4333-8444-555555555555 --model m/x";
+  await leadDownTick(deps);
+  expect(readHerdrSessions(dir)["w1:p1"]?.at).not.toBe(old);
+});
+
 test("a herdr lead revived after leadReviveMin tells the owner once, as an aoe lead does", async () => {
   recordHerdrSession(dir, "w1:p1", { session: "11111111-2222-4333-8444-555555555555", cwd: dir, at: new Date(0).toISOString() });
   world.panes = [{ pane_id: "w1:p1", workspace_id: "w1", cwd: dir }];
@@ -277,4 +288,40 @@ test("recovery and the verify rollback count a herdr pane with only its shell le
   const run = fakeRunner(world);
   expect(await agentAlive(run, [], "w1:p1")).toBe(false);
   expect(await agentAlive(run, [], "w1:p2")).toBe(true);
+});
+
+test("a revive is OK only once an agent runs and draws its own prompt: a ❯ left by the ended agent is no sign, and agentCommand's options stay", async () => {
+  const deps = omo({ leadPane: "w1:p1", agentCommand: ["omo", "--session-dir", "/s", "--model", "{model}", "{prompt}"] });
+  recordHerdrSession(dir, "w1:p1", { session: "11111111-2222-4333-8444-555555555555", cwd: dir, model: "m/x", at: new Date(0).toISOString() });
+  world.panes = [{ pane_id: "w1:p1", workspace_id: "w1", cwd: dir }];
+  world.herdrDead = ["w1:p1"];
+  world.screens = { "w1:p1": "❯ old prompt of the ended agent" };
+  world.herdrNoStart = true;
+  expect(await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p1", "", async () => true)).toStartWith("REVIVE_FAIL w1:p1: no running agent with its ❯ prompt");
+  world.herdrNoStart = false;
+  expect(await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p1", "", async () => true)).toBe("REVIVE_OK w1:p1 session 11111111-2222-4333-8444-555555555555");
+  const ran = world.calls.filter((c) => c[2] === "run").at(-1)?.[4] ?? "";
+  expect(ran).toMatch(/ omo --session-id 11111111-2222-4333-8444-555555555555 --session-dir \/s --model m\/x$/);
+  const selector = omo({ leadPane: "w1:p1", agentCommand: ["omo", "--continue", "{prompt}"] });
+  world.herdrDead = ["w1:p1"];
+  expect(await reviveHerdr(selector.run, selector.clock, selector.config, "w1:p1", "", async () => true)).toStartWith("REVIVE_FAIL w1:p1: agentCommand picks its session itself");
+});
+
+test("herdr-guard refuses server stop inside a pane even behind a global option and its value, and runs the real herdr it was moved to", async () => {
+  const home = join(dir, "home");
+  mkdirSync(join(home, ".local/lib/herdr"), { recursive: true });
+  const real = join(home, ".local/lib/herdr/herdr");
+  writeFileSync(real, "#!/bin/sh\necho REAL \"$@\"\n", { mode: 0o755 });
+  const guard = join(import.meta.dir, "../../setups/discord-aoe/herdr-guard");
+  const call = async (args: string[], env: Record<string, string>) => {
+    const p = Bun.spawn(["bash", guard, ...args], { env: { PATH: "/usr/bin:/bin", HOME: home, ...env }, stdout: "pipe", stderr: "pipe" });
+    return { code: await p.exited, out: await new Response(p.stdout).text(), err: await new Response(p.stderr).text() };
+  };
+  for (const args of [["server", "stop"], ["--session", "default", "server", "stop"]]) {
+    const r = await call(args, { HERDR_PANE_ID: "w1:p1" });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("HERDR_GUARD_REFUSED");
+  }
+  expect((await call(["--session", "default", "server", "stop"], {})).out).toBe("REAL --session default server stop\n");
+  expect((await call(["pane", "list"], { HERDR_PANE_ID: "w1:p1" })).out).toBe("REAL pane list\n");
 });
