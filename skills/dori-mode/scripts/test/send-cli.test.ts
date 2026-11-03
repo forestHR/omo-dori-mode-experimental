@@ -298,7 +298,7 @@ for (const [name, args, parent, out] of [
 
 // 2026-11-03: the owner wants OkDori to put the AX-MVP deck (pptx, PDF) and demo video into Slack itself; send had no
 // --file, so Slack.upload had no caller and the Dori could only post a Drive link
-const fakeSlack = (complete = 200) => {
+const fakeSlack = (complete = 200, during: { upload?: () => void } = {}) => {
   const calls: { path: string; body: unknown }[] = [];
   let slots = 0;
   let port = 0;
@@ -318,6 +318,7 @@ const fakeSlack = (complete = 200) => {
       calls.push({ path, body });
       if (path === "/api/files.getUploadURLExternal" && !form) return Response.json({ ok: false, error: "invalid_arguments" });
       if (path === "/api/files.getUploadURLExternal") return Response.json({ ok: true, upload_url: `http://127.0.0.1:${port}/up/${++slots}`, file_id: `F${slots}` });
+      if (path === "/api/files.completeUploadExternal") during.upload?.();
       if (path === "/api/files.completeUploadExternal") return complete === 200 ? Response.json({ ok: true, files: body.files }) : new Response("unavailable", { status: complete });
       if (path === "/api/chat.postMessage") return Response.json({ ok: true, channel: body.channel, ts: "1700000100.000100" });
       if (path === "/api/reactions.remove") return Response.json({ ok: true });
@@ -332,7 +333,8 @@ const slackCli = (dir: string, port: number | undefined, args: readonly string[]
     "bun", join(import.meta.dir, "../src/cli.ts"), "send", ...args]);
 
 test("send slack --file uploads every file to its own URL, then shares them as one message with the text in the thread", async () => {
-  const { calls, server } = fakeSlack();
+  const during: { upload?: () => void } = {};
+  const { calls, server } = fakeSlack(200, during);
   const state = withState();
   try {
     writeFileSync(join(state.dir, "deck.pdf"), "pdf bytes");
@@ -360,9 +362,11 @@ test("send slack --file uploads every file to its own URL, then shares them as o
         { path: "/api/chat.postMessage", body: { channel: "C1", text: "자료 올렸어", thread_ts: "1700000000.000001" } },
       ],
     });
-    // a share in the channel itself answers the channel message before it; one that arrives after the share started is not
+    // a share in the channel itself answers the channel message before it; one that arrives during the upload is not,
+    // even with a ts older than the host clock (a host clock ahead of Slack's, review of #285)
     const row = (id: string) => JSON.stringify({ scope: "slack", id, channel_id: "C1", thread_ts: null, reply_thread: id, addressed: "name" });
-    writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${row("1700000000.000050")}\n${row("9999999999.000001")}\n`, { flag: "a" });
+    writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${row("1700000000.000050")}\n`, { flag: "a" });
+    during.upload = () => writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${row("1700000000.000060")}\n`, { flag: "a" });
     await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
     expect(calls.filter((c) => c.path === "/api/reactions.remove").map((c) => (c.body as { timestamp: string }).timestamp)).toEqual(["1700000000.000001", "1700000000.000050"]);
   } finally {
