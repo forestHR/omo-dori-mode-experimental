@@ -21,6 +21,7 @@ const keysFor = (screens: readonly string[]) => {
     type: async (text) => { log.typed.push(text); return undefined; },
     enter: async () => { log.enters++; },
     read: async () => screens[Math.min(log.reads++, screens.length - 1)] ?? "",
+    runsOmoCommands: true,
   };
   return { keys, log };
 };
@@ -104,8 +105,16 @@ test("a skill, a template or an unknown /text is no command omo runs: an emptied
 });
 
 test("a screen that shows no input box (the pane went away, a read failed) does not count as an emptied box for a command", async () => {
-  const { keys } = keysFor([""]);
-  expect((await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/thinking low")).status).toBe("NOT_SUBMITTED");
+  for (const screens of [[""], [slashDone([]), ""]]) {
+    const { keys } = keysFor(screens);
+    expect((await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/thinking low")).status).toBe("NOT_SUBMITTED");
+  }
+});
+
+test("a pane that runs another agent gets no omo command shortcut: its emptied box alone is NOT_SUBMITTED", async () => {
+  const { keys } = keysFor([slashDone([])]);
+  const r = await submitText({ ...keys, runsOmoCommands: false }, fakeClock(0), "/goal pause");
+  expect(r).toEqual({ status: "NOT_SUBMITTED", reason: `input box empty but no running turn ("esc to interrupt") within 15s` });
 });
 
 test("a command typed after a draft in the box is one ordinary message, so an emptied box alone is NOT_SUBMITTED", async () => {

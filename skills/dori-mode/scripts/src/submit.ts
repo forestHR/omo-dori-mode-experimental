@@ -19,6 +19,9 @@ export type PaneKeys = {
   // deletes the input box's text before the cursor, one line per call (omo's ctrl+u; at a line start it joins the line
   // above), so a text that was not submitted is not left behind for the next one to be typed after
   readonly clear?: () => Promise<void>;
+  // the pane runs omo, so a command omo runs itself counts as taken once omo empties the box (isOmoCommand); another
+  // agent may take the same /text as an ordinary prompt
+  readonly runsOmoCommands?: boolean;
 };
 
 export type SubmitTiming = { readonly settleMs: number; readonly pollMs: number; readonly clearPolls: number; readonly busyPolls: number };
@@ -127,7 +130,7 @@ const clearOwn = async (keys: PaneKeys, clock: Clock, timing: SubmitTiming, text
 
 export const submitText = async (keys: PaneKeys, clock: Clock, text: string, timing: SubmitTiming = SUBMIT_TIMING): Promise<Submitted> => {
   const failed = (reason: string): Submitted => ({ status: "NOT_SUBMITTED", reason });
-  const command = isOmoCommand(text);
+  const command = !!keys.runsOmoCommands && isOmoCommand(text);
   const first = keys.clear || command ? await keys.read() : "";
   const emptyBefore = keys.clear ? !editorText(first) : false;
   // only into a box seen empty is the typed text all that omo gets (after a draft it is one ordinary message)

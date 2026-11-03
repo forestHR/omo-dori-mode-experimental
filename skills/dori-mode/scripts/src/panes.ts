@@ -158,6 +158,7 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
     read: () => captureTmux(run, pane),
     clear: async () => { await key("clear"); },
     delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
+    runsOmoCommands: true,
   };
 };
 
