@@ -1,3 +1,5 @@
+import { paneLife } from "./aoe.ts";
+import { isHerdrPane } from "./herdr.ts";
 import { inputLine } from "./aoe.ts";
 import type { DoriConfig } from "./config.ts";
 import { frozenPanes } from "./frozen.ts";
@@ -30,7 +32,8 @@ export const deadPaneTick = async (run: Runner, config: DoriConfig, seen: Set<st
     const id = pane.pane_id;
     if (skip.has(id) || (watch.size > 0 && !watch.has(pane.workspace_id))) continue;
     const screen = await readScreen(run, config.backend, id);
-    if (agentShows(screen)) {
+    // a herdr pane keeps the screen of an agent that ended (and a shell can draw ❯): its prompt counts only while an agent runs
+    if (agentShows(screen) && (!isHerdrPane(id) || (await paneLife(run, id)).live)) {
       state.unknown.delete(id);
       state.lastTail.delete(id);
       continue;

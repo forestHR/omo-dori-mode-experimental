@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deadPaneTick, newDeadPaneState } from "../src/dead-panes.ts";
 
 import { closeAoeSession, envMismatch, herdrAgentArgv, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
 import { agentLine, openHerdrSession } from "../src/herdr.ts";
@@ -325,6 +326,8 @@ test("herdr-guard refuses server stop inside a pane even behind a global option 
   }
   expect((await call(["--session", "default", "server", "stop"], {})).out).toBe("REAL --session default server stop\n");
   expect((await call(["pane", "list"], { HERDR_PANE_ID: "w1:p1" })).out).toBe("REAL pane list\n");
+  // text that only holds the words is no server stop
+  expect((await call(["pane", "send-text", "w1:p1", "server", "stop"], { HERDR_PANE_ID: "w1:p1" })).out).toBe("REAL pane send-text w1:p1 server stop\n");
 });
 
 test("a revived agent that runs but has not drawn omo's input box yet is not ready: an echoed command and a shell ❯ are no sign", async () => {
@@ -344,4 +347,16 @@ test("a revived agent that runs but has not drawn omo's input box yet is not rea
   expect(await reviveHerdr(run, deps.clock, deps.config, "w1:p1", "[DORI] back", async (_p, t) => (typed.push(t), true))).toBe("REVIVE_OK w1:p1 session 11111111-2222-4333-8444-555555555555 (prompt submitted)");
   expect(reads).toBeGreaterThanOrEqual(4);
   expect(world.calls.find((c) => c[2] === "run")?.[4] ?? "").toStartWith("clear && ");
+});
+
+test("a herdr pane whose agent ended is checked for its dead marker though its screen still shows the old ❯ prompt", async () => {
+  const deps = omo({ deadPanePatterns: ["process exited"], workspaces: [] });
+  world.panes = [{ pane_id: "w1:p5", workspace_id: "w1", cwd: dir }];
+  world.herdrDead = ["w1:p5"];
+  world.screens = { "w1:p5": "────────\n❯ \n────────\nprocess exited" };
+  const seen = new Set<string>();
+  const state = newDeadPaneState();
+  await deadPaneTick(deps.run, deps.config, seen, "h1", [], state);
+  const lines = await deadPaneTick(deps.run, deps.config, seen, "h1", [], state);
+  expect(lines.join("\n")).toContain("w1:p5");
 });
