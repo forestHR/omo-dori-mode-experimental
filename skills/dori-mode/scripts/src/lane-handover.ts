@@ -20,6 +20,7 @@ import { awaitPrompt } from "./launch.ts";
 import { QuestionStore } from "./messenger/discord-cards.ts";
 import { herdrResult, isHerdrPane } from "./herdr.ts";
 import { omoSession, sendVerified } from "./panes.ts";
+import { hasSessionSelector } from "./session-id.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
@@ -440,6 +441,8 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     return { code: 2 };
   };
   if (!omoSession(config)) return refuse("dori handover --lane needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
+  // a herdr handover opens a new conversation; an agentCommand that picks its session itself (--continue, --session ...) would reopen the old one
+  if (config.backend === "herdr" && hasSessionSelector(config.agentCommand.slice(1))) return refuse(`dori handover --lane on herdr needs an agentCommand without a session selector (it opens a new session): ${config.agentCommand.join(" ")}`);
   const lane = await deps.registry.read(key);
   if (!lane) return refuse("no such lane");
   if (statusOf(lane) === "closed") return refuse("the lane is closed");

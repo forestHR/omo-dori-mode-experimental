@@ -199,17 +199,13 @@ test("upstream #66/#70 on herdr: an omo pane with a question open, and a bare-ag
   expect(sent(world)).toEqual([]);
 });
 
-test("a handover's new herdr session keeps agentCommand's own options, always opens a new session and runs the handover's model and thinking", () => {
+test("a handover's new herdr session keeps agentCommand's own options, opens a new session and runs the handover's model and thinking", () => {
   const argv = herdrAgentArgv(["omo", "--session-dir", "/s", "--model", "{model}", "{prompt}"], "m/x", "high");
   expect(argv.slice(0, 2)).toEqual(["omo", "--session-id"]);
   expect(argv[2]).toMatch(/^[0-9a-f-]{36}$/);
   expect(argv.slice(3)).toEqual(["--session-dir", "/s", "--model", "m/x", "--thinking", "high"]);
-  // a session selector, a literal model and a thinking of the template give way, in either flag form
-  for (const t of [["omo", "--continue", "--model", "a/old", "--thinking", "low"], ["omo", "--session", "99999999", "--model=a/old", "--thinking=low"], ["omo", "--session-id", "11111111-2222-4333-8444-555555555555", "-c"]]) {
-    const out = herdrAgentArgv(t, "b/new", "high");
-    expect(out.filter((a) => a.startsWith("--session") || a === "-c" || a === "--continue")).toEqual(["--session-id"]);
-    expect(out.slice(3)).toEqual(["--model", "b/new", "--thinking", "high"]);
-  }
+  // a literal model and a thinking of the template give way, in either flag form (a session selector is refused earlier)
+  for (const t of [["omo", "--model", "a/old", "--thinking", "low"], ["omo", "--model=a/old", "--thinking=low"]]) expect(herdrAgentArgv(t, "b/new", "high").slice(3)).toEqual(["--model", "b/new", "--thinking", "high"]);
 });
 
 test("recovery and the verify rollback count a herdr pane with only its shell left as gone, not as the old session to go back to", async () => {

@@ -3,7 +3,6 @@ import { basename, dirname, join } from "node:path";
 
 import { closeHerdrSession, herdrAgentPid, herdrLife, herdrRead, herdrSessions, herdrShellPid, isHerdrPane, openHerdrSession, procEnv } from "./herdr.ts";
 import type { Pane } from "./panes.ts";
-import { hasSessionSelector } from "./session-id.ts";
 import type { Clock, Runner } from "./run.ts";
 import { turnRunning } from "./submit.ts";
 
@@ -249,15 +248,13 @@ export const agentPath = (tool: string): string => {
 // program, and the handover's --model and --thinking.
 export const herdrAgentArgv = (template: readonly string[], model: string, thinking?: string): string[] => {
   const [program = "omo", ...rest] = template.filter((a) => !a.includes("{prompt}"));
-  // a handover always opens a new conversation with the model and thinking it asked for: the template's session
-  // selectors (--continue, --session ...) and its --model/--thinking give way; every other option stays
-  const replaced = (a: string) => hasSessionSelector([a]) || /^--(model|thinking)(=|$)/.test(a);
-  const takesValue = (a: string) => !a.includes("=") && ["--session", "--session-id", "--resume", "-r", "--fork", "--model", "--thinking"].includes(a);
+  // the handover's --model and --thinking replace the template's; a template with a session selector is refused before
+  // this (handover.ts, lane-handover.ts)
   const kept: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i] ?? "";
-    if (!replaced(a)) kept.push(a);
-    else if (takesValue(a) && i + 1 < rest.length && !(rest[i + 1] ?? "").startsWith("-")) i++;
+    if (!/^--(model|thinking)(=|$)/.test(a)) kept.push(a);
+    else if (!a.includes("=") && i + 1 < rest.length && !(rest[i + 1] ?? "").startsWith("-")) i++;
   }
   return [program, "--session-id", crypto.randomUUID(), ...kept, "--model", model, ...(thinking ? ["--thinking", thinking] : [])];
 };

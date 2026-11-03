@@ -16,6 +16,7 @@ import { awaitPrompt } from "./launch.ts";
 import { type Question, QuestionStore } from "./messenger/discord-cards.ts";
 import { isHerdrPane } from "./herdr.ts";
 import { omoSession, sendVerified } from "./panes.ts";
+import { hasSessionSelector } from "./session-id.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso } from "./run.ts";
 import { descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
@@ -743,6 +744,8 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
     return { code: 2 };
   };
   if (!omoSession(config)) return refuse("dori handover needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
+  // a herdr handover opens a new conversation; an agentCommand that picks its session itself (--continue, --session ...) would reopen the old one
+  if (config.backend === "herdr" && hasSessionSelector(config.agentCommand.slice(1))) return refuse(`dori handover on herdr needs an agentCommand without a session selector (it opens a new session): ${config.agentCommand.join(" ")}`);
   if (!config.leadPane) return refuse("leadPane is not set");
   if (deps.envLeadPane) return refuse(`DORI_LEAD_PANE=${deps.envLeadPane} is set in the environment and overrides leadPane in ${deps.configPath}, so lanes would keep reporting there; remove it (also from any wrapper script) and keep the pane in the config file`);
   if (opts.note && !existsSync(opts.note)) return refuse(`note file not found: ${opts.note}`);

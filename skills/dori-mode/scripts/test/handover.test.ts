@@ -8,7 +8,7 @@ import { readFrozen } from "../src/frozen.ts";
 import { QuestionStore } from "../src/messenger/discord-cards.ts";
 import type { Lane } from "../src/registry.ts";
 import { sessionDirFor } from "../src/session-id.ts";
-import { depsFor, fakeClock, NEW_AOE_ID, newWorld, sent, withState, type World } from "./fakes.ts";
+import { depsFor, fakeClock, NEW_AOE_ID, newWorld, RUNNING, sent, withState, type World } from "./fakes.ts";
 
 const OLD = "aoe_lead_0a0a0a0a";
 const OLD_ID = "0a0a0a0a11112222";
@@ -840,4 +840,30 @@ test("once the lead's move commits, the old lead's tasks in the shared task host
   expect(printed).toContain(`HANDOVER_TASKS_CANCELLED lead st_01aaa "survey the lane logs" -> ${r.note}`);
   expect([shared, frozen, other].map((f) => (JSON.parse(readFileSync(f, "utf8")) as { status: string }).status)).toEqual(["cancelled", "running", "running"]);
   expect(readFileSync(r.note ?? "", "utf8")).toContain(`- st_01aaa: survey the lane logs; cancelled; record ${shared}`);
+});
+
+test("a new lead whose first turn outlasts the verify time gets no probe: the handover fails and moves back", async () => {
+  const deps = await setup();
+  const run = deps.run;
+  let probed = false;
+  const r = await handover({
+    ...deps,
+    run: async (argv, o) => {
+      if (argv[1] === "send-keys" && argv.includes(`=${NEW}:`) && (argv.at(-1) ?? "").includes("HANDOVER_PROBE")) probed = true;
+      const got = await run(argv, o);
+      return argv[1] === "capture-pane" && argv.includes(`=${NEW}:`) ? { ...got, out: `${got.out}\n${RUNNING}` } : got;
+    },
+  }, { approvedBy: APPROVED, title: "lead2", verifyMin: 1 });
+  expect(r.code).not.toBe(0);
+  expect(probed).toBe(false);
+  const inbox = (() => { try { return readFileSync(deps.inbox, "utf8"); } catch { return ""; } })();
+  expect(inbox).not.toContain("handover-probe");
+});
+
+test("on herdr an agentCommand that picks its session itself is refused before anything opens", async () => {
+  const deps = await setup();
+  const r = await handover({ ...deps, config: { ...deps.config, backend: "herdr", agentCommand: ["omo", "--continue", "--model", "{model}", "{prompt}"] } }, { approvedBy: APPROVED, title: "lead2" });
+  expect(r.code).not.toBe(0);
+  expect(JSON.stringify(readRollovers(state.dir).at(-1))).toContain("without a session selector");
+  expect(w.calls.some((c) => c[0] === "herdr" || c[1] === "add")).toBe(false);
 });
