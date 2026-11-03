@@ -29,8 +29,12 @@ export class Slack {
     };
   }
 
-  async call(method: string, params: Record<string, unknown>, policy?: RetryPolicy): Promise<Record<string, unknown>> {
-    const res = await withBackoff(this.http, this.clock, { method: "POST", url: `${this.base}/${method}`, headers: this.headers(true), body: JSON.stringify(params) }, policy);
+  // form: the method reads form fields only (files.getUploadURLExternal answers a JSON body invalid_arguments, live
+  // 2026-11-03), so the params go out url-encoded
+  async call(method: string, params: Record<string, unknown>, policy?: RetryPolicy, form = false): Promise<Record<string, unknown>> {
+    const payload = form ? new URLSearchParams(Object.entries(params).map(([k, v]): [string, string] => [k, String(v)])).toString() : JSON.stringify(params);
+    const headers = form ? { ...this.headers(false), "Content-Type": "application/x-www-form-urlencoded" } : this.headers(true);
+    const res = await withBackoff(this.http, this.clock, { method: "POST", url: `${this.base}/${method}`, headers, body: payload }, policy);
     const body = JSON.parse(res.body || "{}") as Record<string, unknown>;
     if (res.status !== 200 || body.ok !== true) throw new MessengerError(`slack ${method}: ${String(body.error ?? res.status)}`, res.status, String(body.error ?? ""));
     if (this.ledger && method === "chat.postMessage" && typeof body.ts === "string") {
@@ -57,7 +61,7 @@ export class Slack {
     const text = comment ? guardText(comment) : undefined;
     const done: { id: string; title: string }[] = [];
     for (const f of files) {
-      const slot = await this.call("files.getUploadURLExternal", { filename: f.filename, length: f.length });
+      const slot = await this.call("files.getUploadURLExternal", { filename: f.filename, length: f.length }, undefined, true);
       const put = await withBackoff(this.http, this.clock, { method: "POST", url: String(slot.upload_url), body: await f.read() });
       if (put.status !== 200) throw new MessengerError(`slack upload ${f.filename}: ${put.status}`, put.status);
       done.push({ id: String(slot.file_id), title: f.title ?? f.filename });
