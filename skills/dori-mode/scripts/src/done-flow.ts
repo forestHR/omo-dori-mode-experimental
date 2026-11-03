@@ -13,8 +13,7 @@ import { leadLimitTick, limitResumeTick } from "./lead-limit.ts";
 import { missedAnswersTick } from "./missed-answers.ts";
 import { hasThread, type Lane, type Registry, statusOf, type ThreadPost, withStatus } from "./registry.ts";
 import { type Clock, iso, type Runner } from "./run.ts";
-import { omoPane, omoSession, sendVerified, submitToPane, type TypeOptions } from "./panes.ts";
-import { asTextRefusal } from "./submit.ts";
+import { omoPane, omoSession, sendVerified, submitToPane } from "./panes.ts";
 import { pendingGoalTick } from "./pending-goal.ts";
 import type { Submitted } from "./submit.ts";
 import { replacementOf } from "./frozen.ts";
@@ -169,7 +168,7 @@ export const closerOf = (lane: Lane): string => {
 // typed: NOT_SUBMITTED <pane> LANE_IS_CLOSED <key> with when and who closed it, instead of the screen check's "no ❯
 // prompt", which the lead read as a busy lane for 30 minutes (Moodori 2026-10-31 07:23Z). A gone or dead pane is named the
 // same way by the screen check (PANE_GONE / PANE_DEAD).
-export const typeIntoPane = async (deps: FlowDeps, pane: string, text: string, opts: TypeOptions = {}): Promise<Submitted & { readonly pane: string; readonly notes: readonly string[] }> => {
+export const typeIntoPane = async (deps: FlowDeps, pane: string, text: string): Promise<Submitted & { readonly pane: string; readonly notes: readonly string[] }> => {
   const log = (line: string) => watchLog(deps.config.watchLog, deps.clock, { source: "type", line });
   const notes: string[] = [];
   // a pane a handover froze forwards its text to the session that replaced it (submitToPane): no lane check here
@@ -184,19 +183,13 @@ export const typeIntoPane = async (deps: FlowDeps, pane: string, text: string, o
       return { status: "NOT_SUBMITTED", reason, pane, notes };
     }
   }
-  // --as-text cannot turn a command omo runs itself into a message: refused before anything happens, in the watch log too
-  const notText = opts.asText ? asTextRefusal(text) : undefined;
-  if (notText) {
-    log(`NOT_SUBMITTED ${pane} ${notText}`);
-    return { status: "NOT_SUBMITTED", reason: notText, pane, notes };
-  }
   const why = "the lead typed a new instruction into the lane (dori type)";
   if (lane && statusOf(lane) === "done-claimed") {
     const line = await reopenClaim(deps, lane, why);
     log(line);
     notes.push(line);
   }
-  const r = await submitToPane(deps.run, deps.clock, deps.config, pane, text, opts);
+  const r = await submitToPane(deps.run, deps.clock, deps.config, pane, text);
   if (notes.length && lane?.pane && r.status === "SUBMITTED") await sendVerified(deps.run, deps.clock, deps.config, r.pane, reopenedText(lane.key, why));
   return { ...r, notes };
 };

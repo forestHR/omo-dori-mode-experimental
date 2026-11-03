@@ -122,9 +122,7 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
 export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || isOmoExecutable(config.agentCommand[0] ?? "");
 export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
 
-export type TypeOptions = { readonly asText?: boolean };
-
-const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string, opts: TypeOptions = {}): PaneKeys => {
+const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): PaneKeys => {
   const herdr = isHerdrPane(pane);
   if (!omoPane(config, pane))
     return {
@@ -141,8 +139,7 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
       read: () => readScreen(run, config.backend, pane),
     };
   const send = (part: string) => run(herdr ? ["herdr", "pane", "send-text", pane, part] : ["tmux", "send-keys", "-t", target(pane), "-l", "--", part]);
-  const KEYS = { enter: ["enter", "Enter"], clear: ["ctrl+u", "C-u"] } as const;
-  const key = (name: keyof typeof KEYS) => run(herdr ? ["herdr", "pane", "send-keys", pane, KEYS[name][0]] : ["tmux", "send-keys", "-t", target(pane), KEYS[name][1]]);
+  const key = (name: "enter" | "clear") => run(herdr ? ["herdr", "pane", "send-keys", pane, name === "enter" ? "enter" : "ctrl+u"] : ["tmux", "send-keys", "-t", target(pane), name === "enter" ? "Enter" : "C-u"]);
   const where = herdr ? `herdr pane ${pane}` : `tmux session ${pane}`;
   return {
     type: async (text) => {
@@ -160,7 +157,6 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
     enter: async () => { await key("enter"); },
     read: () => captureTmux(run, pane),
     clear: async () => { await key("clear"); },
-    sendRefusedAsText: opts.asText,
     delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
     runsOmoCommands: true,
   };
@@ -181,11 +177,11 @@ export const typeLine = async (run: Runner, clock: Clock, config: DoriConfig, pa
 // Every text the scripts type into a pane goes through here; NOT_SUBMITTED lands in the watch log for the lead. A pane a
 // handover froze reads nothing, so the text goes to the session that replaced it (pane: where it went; FORWARDED in the
 // watch log).
-export const submitToPane = async (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string, opts: TypeOptions = {}): Promise<Submitted & { readonly pane: string }> => {
+export const submitToPane = async (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): Promise<Submitted & { readonly pane: string }> => {
   if (/`|\$\(/.test(text)) throw new UnsafeTextError("refusing to send text containing a backtick or $(");
   const to = replacementOf(config.stateDir, pane) ?? pane;
   if (to !== pane) watchLog(config.watchLog, clock, { source: "submit", line: `FORWARDED ${pane} -> ${to}: ${pane} was frozen by a handover; the text goes to the session that replaced it` });
-  const result = await submitText(paneKeys(run, clock, config, to, text, opts), clock, text);
+  const result = await submitText(paneKeys(run, clock, config, to, text), clock, text);
   if (result.status === "NOT_SUBMITTED") watchLog(config.watchLog, clock, { source: "submit", line: `NOT_SUBMITTED ${to} ${result.reason}` });
   return { ...result, pane: to };
 };

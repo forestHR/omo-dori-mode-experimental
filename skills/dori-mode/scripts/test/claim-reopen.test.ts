@@ -104,13 +104,3 @@ test("dori type into a pane whose tmux session is gone is PANE_GONE, and a dead 
   expect((await typeIntoPane(at(T0, { run: dead }), PANE, "[LEAD] hello")).reason).toBe(`PANE_DEAD: the program in ${PANE} exited (status 143); nothing was typed`);
   expect(typed()).toEqual([]);
 });
-
-test("dori type --as-text of a command omo runs itself is refused before typing, and the refusal is in the watch log", async () => {
-  await claimDone(at(T0), lane, "promo.mp4 done");
-  const before = typed().length;
-  const r = await typeIntoPane(at(T0 + MIN), PANE, "/quit", { asText: true });
-  expect(r).toMatchObject({ status: "NOT_SUBMITTED", reason: "AS_TEXT_COMMAND: omo runs /quit itself, so --as-text cannot send it as a message; nothing was typed" });
-  expect(typed().length).toBe(before);
-  expect(await watchLog()).toContain(`type NOT_SUBMITTED ${PANE} AS_TEXT_COMMAND`);
-  expect(statusOf(await read())).toBe("done-claimed"); // nothing happened, so the claim stands
-});
