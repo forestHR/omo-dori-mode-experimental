@@ -49,6 +49,11 @@ export const herdrLeadSession = async (run: Runner, config: Partial<Pick<DoriCon
   return hit.id;
 };
 
+const omoInputBox = (screen: string): boolean => {
+  const lines = screen.split("\n");
+  return lines.some((l, i) => l.trimStart().startsWith("❯") && lines.slice(Math.max(0, i - 2), i).some((u) => u.trimStart().startsWith("─")));
+};
+
 // Starts the recorded conversation of a herdr pane again in that pane, whose agent is gone (its shell stayed or herdr
 // gave the pane back after a restart): omo --session-id resumes an existing session exactly. Waits for omo's ❯ prompt,
 // then types prompt (when not "") through type. A line saying what happened.
@@ -62,21 +67,21 @@ export const reviveHerdr = async (run: Runner, clock: Clock, config: Pick<DoriCo
   for (let i = 0; i < 20 && !(await herdrShellPid(run, pane)); i++) await clock.sleep(1_000);
   const restored = await herdrAgentPid(run, pane);
   const read = async () => (await run(["herdr", "pane", "read", pane, "--source", "visible"])).out;
-  // what the pane showed before the agent was started: a ❯ left there by the agent that ended (or a shell prompt) is no sign
-  const before = restored ? undefined : await read();
   if (!restored) {
     // the configured agentCommand with its own options (a --session-dir included), the recorded session and model
     if (hasSessionSelector(config.agentCommand.slice(1))) return `REVIVE_FAIL ${pane}: agentCommand picks its session itself (${config.agentCommand.join(" ")}); revive needs one without a session selector`;
     const tool = config.agentCommand[0] ?? "omo";
     const argv = herdrAgentArgv(config.agentCommand, rec.model || config.defaultModel, undefined, rec.session);
-    const ran = await run(["herdr", "pane", "run", pane, agentLine(argv, { PATH: agentPath(tool) })], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
+    // the screen is cleared first, so a ❯ the ended agent left there is gone before the new one draws
+    const ran = await run(["herdr", "pane", "run", pane, `clear && ${agentLine(argv, { PATH: agentPath(tool) })}`], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
     if (ran.code !== 0) return `REVIVE_FAIL ${pane}: herdr pane run failed: ${(ran.err || ran.out).slice(0, 160)}`;
   }
   const how = restored ? ` (herdr had started it again, pid ${restored})` : "";
   for (let i = 0; i < 90; i++) {
-    // ready once an agent runs in the pane and draws its own ❯ prompt (a screen other than the one before it started)
+    // ready once an agent runs in the pane and shows omo's own input box: a ❯ line with the box's ─ border right above it
+    // (an echoed command line or a shell prompt drawn as ❯ has no box)
     const screen = (await herdrAgentPid(run, pane)) ? await read() : "";
-    if (screen && screen !== before && screen.split("\n").some((l) => l.trimStart().startsWith("❯"))) {
+    if (screen && omoInputBox(screen)) {
       if (!prompt) return `REVIVE_OK ${pane} session ${rec.session}${how}`;
       return (await type(pane, prompt)) ? `REVIVE_OK ${pane} session ${rec.session}${how} (prompt submitted)` : `REVIVE_PROMPT_NOT_SUBMITTED ${pane} session ${rec.session}${how}`;
     }

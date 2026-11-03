@@ -110,7 +110,7 @@ test("a herdr lead whose agent is gone is named stopped with the session recorde
   const ran = world.calls.find((c) => c[2] === "run") ?? [];
   expect(ran.slice(0, 4)).toEqual(["herdr", "pane", "run", "w1:p1"]);
   // the checked PATH goes first (a herdr pane takes the server's environment), then the recorded session and model
-  expect(ran[4]).toMatch(/^env PATH=\S+ omo --session-id 11111111-2222-4333-8444-555555555555 --model m\/x$/);
+  expect(ran[4]).toMatch(/^clear && env PATH=\S+ omo --session-id 11111111-2222-4333-8444-555555555555 --model m\/x$/);
   expect(typed).toEqual(["[DORI] back"]);
   expect(await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p9", "", async () => true)).toStartWith("REVIVE_FAIL w1:p9: no omo session recorded");
   expect(readHerdrSessions(dir)["w1:p1"]?.model).toBe("m/x");
@@ -143,6 +143,7 @@ test("a revive right after a server restart waits for herdr to spawn the pane, a
     if (argv[2] === "process-info" && ++reads > 2) world.herdrGone = [];
     return base(argv, o);
   };
+  world.screens = { "w1:p1": "omo\n────────\n❯ \n────────" };
   const typed: string[] = [];
   const line = await reviveHerdr(run, deps.clock, deps.config, "w1:p1", "[DORI] back", async (_p, t) => (typed.push(t), true));
   expect(line).toBe("REVIVE_OK w1:p1 session 11111111-2222-4333-8444-555555555555 (herdr had started it again, pid 4001) (prompt submitted)");
@@ -317,11 +318,30 @@ test("herdr-guard refuses server stop inside a pane even behind a global option 
     const p = Bun.spawn(["bash", guard, ...args], { env: { PATH: "/usr/bin:/bin", HOME: home, ...env }, stdout: "pipe", stderr: "pipe" });
     return { code: await p.exited, out: await new Response(p.stdout).text(), err: await new Response(p.stderr).text() };
   };
-  for (const args of [["server", "stop"], ["--session", "default", "server", "stop"]]) {
+  for (const args of [["server", "stop"], ["--session", "default", "server", "stop"], ["server", "--session", "default", "stop"], ["server", "--session=default", "stop"]]) {
     const r = await call(args, { HERDR_PANE_ID: "w1:p1" });
     expect(r.code).toBe(1);
     expect(r.err).toContain("HERDR_GUARD_REFUSED");
   }
   expect((await call(["--session", "default", "server", "stop"], {})).out).toBe("REAL --session default server stop\n");
   expect((await call(["pane", "list"], { HERDR_PANE_ID: "w1:p1" })).out).toBe("REAL pane list\n");
+});
+
+test("a revived agent that runs but has not drawn omo's input box yet is not ready: an echoed command and a shell ❯ are no sign", async () => {
+  const deps = omo({ leadPane: "w1:p1" });
+  recordHerdrSession(dir, "w1:p1", { session: "11111111-2222-4333-8444-555555555555", cwd: dir, model: "m/x", at: new Date(0).toISOString() });
+  world.panes = [{ pane_id: "w1:p1", workspace_id: "w1", cwd: dir }];
+  world.herdrDead = ["w1:p1"];
+  world.herdrNoStart = true;
+  let reads = 0;
+  const base = deps.run;
+  const run: Runner = async (argv, o) => {
+    if (argv[2] === "run") world.herdrDead = [];
+    if (argv[2] === "read" && world.herdrDead?.length === 0) world.screens["w1:p1"] = ++reads < 4 ? "user$ clear && omo --session-id 11111111-2222-4333-8444-555555555555\n❯ " : "omo\n────────\n❯ \n────────";
+    return base(argv, o);
+  };
+  const typed: string[] = [];
+  expect(await reviveHerdr(run, deps.clock, deps.config, "w1:p1", "[DORI] back", async (_p, t) => (typed.push(t), true))).toBe("REVIVE_OK w1:p1 session 11111111-2222-4333-8444-555555555555 (prompt submitted)");
+  expect(reads).toBeGreaterThanOrEqual(4);
+  expect(world.calls.find((c) => c[2] === "run")?.[4] ?? "").toStartWith("clear && ");
 });

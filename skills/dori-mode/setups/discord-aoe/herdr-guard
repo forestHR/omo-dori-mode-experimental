@@ -21,12 +21,13 @@ if [ -z "$real" ]; then
 fi
 [ -n "$real" ] || { echo "herdr-guard: no real herdr (HERDR_REAL, ~/.local/lib/herdr/herdr or another herdr on PATH)" >&2; exit 127; }
 
-# "server stop" anywhere among the words, so a global option and its value in front (herdr --session x server stop)
-# cannot hide it
-words=()
-for a in "$@"; do case $a in -*) ;; *) words+=("$a") ;; esac; done
-stop=""
-for ((i = 0; i + 1 < ${#words[@]}; i++)); do [ "${words[i]}" = server ] && [ "${words[i + 1]}" = stop ] && stop=1; done
+# "server" and, after it, "stop" among the words, whatever options and values stand around or between them (herdr drops
+# --session and its value wherever it is: herdr --session x server stop and herdr server --session x stop both stop it)
+stop="" seen=""
+for a in "$@"; do
+  [ "$a" = server ] && seen=1
+  [ -n "$seen" ] && [ "$a" = stop ] && stop=1
+done
 if [ -n "${HERDR_PANE_ID:-}" ] && [ "${HERDR_GUARD_ALLOW:-}" != 1 ] && [ -n "$stop" ]; then
   # the socket this call would use: HERDR_SOCKET_PATH when set (every pane has it), else herdr's default under XDG_CONFIG_HOME
   want=${HERDR_SOCKET_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr/herdr.sock}

@@ -92,7 +92,7 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   if (cmd === "herdr" && a1 === "pane" && a2 === "run" && !w.herdrNoStart) {
     const pane = argv[3] ?? "";
     w.herdrDead = w.herdrDead?.filter((p) => p !== pane);
-    w.screens[pane] = "omo · session started\n❯ ";
+    w.screens[pane] = "omo · session started\n────────\n❯ \n────────";
   }
   if (cmd === "herdr" && a1 === "pane" && a2 === "list") return ok(JSON.stringify({ result: { panes: w.panes } }));
   if (cmd === "herdr" && a1 === "pane" && (a2 === "get" || a2 === "process-info")) {
