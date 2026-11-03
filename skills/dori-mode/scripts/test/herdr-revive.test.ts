@@ -8,6 +8,9 @@ import { leadDownTick } from "../src/lead-down.ts";
 import type { Runner } from "../src/run.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, type World } from "./fakes.ts";
 
+// The names, values and arguments a Windows agent line carries, decoded from its base64 data in order.
+const winData = (line: string): string[] => [...line.matchAll(/FromBase64String\('([^']*)'\)/g)].map((m) => Buffer.from(m[1] ?? "", "base64").toString("utf8"));
+
 // The herdr side of the session primitives (herdr.ts): a pane id with ":" goes to herdr, a tmux name to tmux, so one Dori
 // can hold lanes of both while it moves.
 let world: World;
@@ -33,9 +36,10 @@ test("a herdr lead whose agent is gone is named stopped with the session recorde
   const ran = world.calls.find((c) => c[2] === "run") ?? [];
   expect(ran.slice(0, 4)).toEqual(["herdr", "pane", "run", "w1:p1"]);
   // the checked PATH goes first (a herdr pane takes the server's environment), then the recorded session and model
-  expect(ran[4]).toMatch(process.platform === "win32"
-    ? /^Clear-Host; \$PSNativeCommandArgumentPassing = 'Standard'; \$env:PATH = '[^']+'; & 'omo' '--session-id' '11111111-2222-4333-8444-555555555555' '--model' 'm\/x'$/
-    : /^clear && env PATH=\S+ omo --session-id 11111111-2222-4333-8444-555555555555 --model m\/x$/);
+  if (process.platform === "win32") {
+    expect(ran[4]).toStartWith("Clear-Host; $PSNativeCommandArgumentPassing = 'Standard'; Set-Item -LiteralPath ('Env:' + ");
+    expect(winData(ran[4] ?? "")).toEqual(["PATH", expect.any(String), "omo", "--session-id", "11111111-2222-4333-8444-555555555555", "--model", "m/x"]);
+  } else expect(ran[4]).toMatch(/^clear && env PATH=\S+ omo --session-id 11111111-2222-4333-8444-555555555555 --model m\/x$/);
   expect(typed).toEqual(["[DORI] back"]);
   expect(await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p9", "", async () => true)).toStartWith("REVIVE_FAIL w1:p9: no omo session recorded");
   expect(readHerdrSessions(dir)["w1:p1"]?.model).toBe("m/x");
@@ -110,9 +114,8 @@ test("a revive is OK only once an agent runs and draws its own prompt: a ❯ lef
   world.herdrNoStart = false;
   expect(await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p1", "", async () => true)).toBe("REVIVE_OK w1:p1 session 11111111-2222-4333-8444-555555555555");
   const ran = world.calls.filter((c) => c[2] === "run").at(-1)?.[4] ?? "";
-  expect(ran).toMatch(process.platform === "win32"
-    ? / & 'omo' '--session-id' '11111111-2222-4333-8444-555555555555' '--session-dir' '\/s' '--model' 'm\/x'$/
-    : / omo --session-id 11111111-2222-4333-8444-555555555555 --session-dir \/s --model m\/x$/);
+  if (process.platform === "win32") expect(winData(ran).slice(2)).toEqual(["omo", "--session-id", "11111111-2222-4333-8444-555555555555", "--session-dir", "/s", "--model", "m/x"]);
+  else expect(ran).toMatch(/ omo --session-id 11111111-2222-4333-8444-555555555555 --session-dir \/s --model m\/x$/);
   const selector = omo({ leadPane: "w1:p1", agentCommand: ["omo", "--continue", "{prompt}"] });
   world.herdrDead = ["w1:p1"];
   expect(await reviveHerdr(selector.run, selector.clock, selector.config, "w1:p1", "", async () => true)).toStartWith("REVIVE_FAIL w1:p1: agentCommand picks its session itself");
