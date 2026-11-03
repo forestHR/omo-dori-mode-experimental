@@ -494,7 +494,10 @@ const titleFor = (old: string, stamp: string): string => `${old.replace(/-\d{8}$
 // writes its request here (approval, --force, options); the run waiting for the lane's idle moment takes it by rename at
 // its next look and goes on with it, so a lead's --force moves the lane at once instead of "another handover is running"
 // (ZzangDori herdr-switch, 2026-11-03 09:10:45Z). A holder that is moving the lane takes nothing: the request is withdrawn.
-export const takeoverFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.takeover.json`);
+// Each request is a file of its own (<key>.takeover-<pid>-<id>.json, published whole by rename), so two runs never write over
+// each other and each withdraws only its own.
+const takeoverDir = (stateDir: string): string => join(stateDir, "handover", "lanes");
+const takeoverPrefix = (key: string): string => `${key}.takeover-`;
 type Takeover = { readonly pid: number; readonly at: string; readonly approvedBy?: string; readonly force: boolean; readonly request: RolloverRequest };
 const TAKE_POLL_MS = 1_000;
 const TAKE_TRIES = 15;
@@ -506,14 +509,33 @@ const lockHolder = (file: string, alive: (pid: number) => boolean): { readonly p
 
 const requestOf = (opts: LaneHandoverOptions): RolloverRequest => ({ ...(opts.note ? { note: resolve(opts.note) } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}), ...(opts.keepOld ? { keepOld: true } : {}), ...(opts.verifyMin ? { verifyMin: opts.verifyMin } : {}) });
 
+// What the holder's move left on disk, the durable record of its end: the pending journal (removed only when the move ended
+// either way) and the handover note's result file (written once the checks passed). A pane the registry points at proves
+// nothing: the move repoints it before its checks.
+const moveOutcome = (stateDir: string, key: string, since: string, alive: (pid: number) => boolean): { readonly result: string; readonly to?: string } | undefined => {
+  const pending = readPending(stateDir, key);
+  if (pending && !alive(pending.pid)) return { result: "interrupted" };
+  let names: string[] = [];
+  try {
+    names = readdirSync(takeoverDir(stateDir)).filter((n) => new RegExp(`^${escape(key)}-\\d{8}-\\d{6}\\.result\\.json$`).test(n)).sort();
+  } catch {
+    return undefined;
+  }
+  for (const n of names.reverse()) {
+    const r = readJson<{ at?: string; result?: string; to?: string }>(join(takeoverDir(stateDir), n));
+    if (r?.at && r.result && r.at >= since) return { result: r.result, ...(r.to ? { to: r.to } : {}) };
+  }
+  return undefined;
+};
+
 // the taking side: leave the request, wait for the holder to take it, then follow the holder to its end and report its result
 const handOver = async (deps: LaneHandoverDeps, key: string, holder: { readonly pid: number; readonly at: string }, opts: LaneHandoverOptions, at: string, emit: (line: string) => void, refuse: (why: string) => LaneHandoverResult): Promise<LaneHandoverResult> => {
-  const file = takeoverFile(deps.config.stateDir, key);
-  const from = (await deps.registry.read(key))?.pane;
+  const file = join(takeoverDir(deps.config.stateDir), `${takeoverPrefix(key)}${process.pid}-${deps.nonce()}.json`);
   const mine: Takeover = { pid: process.pid, at, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}), force: Boolean(opts.force), request: requestOf(opts) };
-  writeFileSync(file, JSON.stringify(mine));
+  writeFileSync(`${file}.part`, JSON.stringify(mine));
+  renameSync(`${file}.part`, file);
   for (let i = 0; i < TAKE_TRIES && existsSync(file); i++) await deps.clock.sleep(TAKE_POLL_MS);
-  const back = `${file}.withdrawn-${process.pid}`;
+  const back = `${file}.withdrawn`;
   try {
     renameSync(file, back);
     rmSync(back, { force: true });
@@ -526,33 +548,47 @@ const handOver = async (deps: LaneHandoverDeps, key: string, holder: { readonly 
   for (let i = 0; i < tries && deps.alive(holder.pid); i++) await deps.clock.sleep(2_000);
   const row = readRollovers(deps.config.stateDir).findLast((e): e is Extract<RolloverEntry, { kind: "rollover" }> => e.kind === "rollover" && e.who === "lane" && e.key === key && e.at >= at);
   if (!row) {
-    // a holder that ended after the move but before its record (killed, or its owner report failed hard) still moved the
-    // lane: the registry says where it is
-    const now = (await deps.registry.read(key))?.pane;
-    if (now && now !== from && !deps.alive(holder.pid)) {
-      emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: moved -> ${now} (pid ${holder.pid} ended before its rollover record; the watch log has its lines)`);
-      return { code: 0, to: now };
+    // a holder that ended before its rollover record (killed, or its owner report failed hard): what its move left on disk
+    const left = deps.alive(holder.pid) ? undefined : moveOutcome(deps.config.stateDir, key, at, deps.alive);
+    if (left?.result === "interrupted") {
+      emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: interrupted: pid ${holder.pid} ended in the middle of the move; the next dori handover --lane ${key} repairs it first (HANDOVER_RECOVERED)`);
+      return { code: 3 };
     }
-    emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: unknown: pid ${holder.pid} ${deps.alive(holder.pid) ? "still runs" : "ended without a rollover record"}; the watch log has its lines`);
+    if (left) {
+      emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: ${left.result}${left.to ? ` -> ${left.to}` : ""} (from the handover's result file; pid ${holder.pid} ended before its rollover record)`);
+      return { code: left.result.startsWith("done") ? 0 : 3, ...(left.to ? { to: left.to } : {}) };
+    }
+    emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: unknown: pid ${holder.pid} ${deps.alive(holder.pid) ? "still runs" : "ended without a record"}; the watch log has its lines`);
     return { code: 3 };
   }
   emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: ${row.result}${row.to ? ` -> ${row.to}` : ""}${row.reasons[0] ? `: ${row.reasons[0].slice(0, 300)}` : ""}`);
   return { code: row.result.startsWith("done") ? 0 : row.result === "refused" ? 2 : 3, ...(row.to ? { to: row.to } : {}) };
 };
 
-// the waiting side: take a request left for this lane, by rename so only one run takes it; one whose writer is gone is dropped
+// the waiting side: take the oldest request left for this lane, by rename so only one run takes it; one whose writer is
+// gone is dropped and the next looked at; the others stay for their writers to withdraw
 const claimTakeover = (deps: LaneHandoverDeps, key: string): Takeover | undefined => {
-  const file = takeoverFile(deps.config.stateDir, key);
-  const mine = `${file}.claimed-${process.pid}`;
+  const dir = takeoverDir(deps.config.stateDir);
+  let names: string[] = [];
   try {
-    renameSync(file, mine);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw e;
+    names = readdirSync(dir).filter((n) => n.startsWith(takeoverPrefix(key)) && n.endsWith(".json"));
+  } catch {
+    return undefined;
   }
-  const t = readJson<Takeover>(mine);
-  rmSync(mine, { force: true });
-  return t && deps.alive(t.pid) ? t : undefined;
+  const queued = names.map((n) => ({ n, t: readJson<Takeover>(join(dir, n)) })).filter((x) => x.t).sort((x, y) => (x.t?.at ?? "").localeCompare(y.t?.at ?? "") || x.n.localeCompare(y.n));
+  for (const { n } of queued) {
+    const mine = join(dir, `${n}.claimed-${process.pid}`);
+    try {
+      renameSync(join(dir, n), mine);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw e;
+    }
+    const t = readJson<Takeover>(mine);
+    rmSync(mine, { force: true });
+    if (t && deps.alive(t.pid)) return t;
+  }
+  return undefined;
 };
 
 const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions, granted: boolean): Promise<LaneHandoverResult> => {

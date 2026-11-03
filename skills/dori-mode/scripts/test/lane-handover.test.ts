@@ -1419,7 +1419,8 @@ test("an automatic start whose lane stays busy for the whole wait is refused as 
 });
 
 const LEAD_STUCK = "lead:STUCK rung 4 on loss after research";
-const takeoverFile = () => join(state.dir, "handover", "lanes", "demo.takeover.json");
+const takeoverFile = (id = "4242-a") => join(state.dir, "handover", "lanes", `demo.takeover-${id}.json`);
+const takeovers = () => readdirSync(join(state.dir, "handover", "lanes")).filter((n) => n.startsWith("demo.takeover-") && n.endsWith(".json"));
 
 test("a lead's handover refused while the lane is busy asks the lane for its safe point itself and says the move waits: nothing more to type by hand", async () => {
   // Given: the lead typed "[LEAD] reach a safe point ..." by hand after each refusal (47 re-runs by hand in 3 weeks)
@@ -1468,52 +1469,96 @@ test("a lead's --force while a run waits for the lane's idle moment is taken ove
   expect(sent(w).some((t) => t.startsWith("[LEAD] The lead moves demo"))).toBe(false);
 });
 
-test("a run that finds the lane's lock held hands its approval to the holder and reports the holder's result; a holder that does not take it (mid-move) leaves the run refused as before", async () => {
+test("a run that finds the lane's lock held hands its approval to the holder and reports the holder's result from its record; a holder that does not take it (mid-move) leaves the run refused as before", async () => {
   // Given
   const base = await setup();
   let claim = false;
-  let logs = true;
+  let ending: "row" | "result" | "crash" = "row";
+  let taken = "";
+  const lanes = join(state.dir, "handover", "lanes");
   const deps: LaneHandoverDeps = {
     ...base,
     reportOwner: async () => "msg-1",
     clock: { ...base.clock, sleep: async () => {
-      if (claim && existsSync(takeoverFile())) {
-        writeFileSync(`${takeoverFile()}.claimed`, readFileSync(takeoverFile()));
-        rmSync(takeoverFile());
-        if (logs) appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-10-11T16:40:00.000Z", key: "demo", from: OLD, to: NEW, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "done", reasons: [] });
-        else await base.registry.patch("demo", { pane: NEW });
+      const mine = takeovers()[0];
+      if (claim && mine) {
+        taken = readFileSync(join(lanes, mine), "utf8");
+        rmSync(join(lanes, mine));
+        if (ending === "row") appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-10-11T16:40:00.000Z", key: "demo", from: OLD, to: NEW, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "done", reasons: [] });
+        // the holder ended after its checks passed, before its rollover row: the note's result file has the end
+        else if (ending === "result") writeFileSync(join(lanes, "demo-20261011-164000.result.json"), JSON.stringify({ at: "2026-10-11T16:40:00.000Z", key: "demo", to: NEW, result: "done" }));
+        // it ended in the middle of the move: the registry already points at the new pane, the pending journal is left
+        else {
+          await base.registry.patch("demo", { pane: NEW });
+          writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid: 77, at: "2026-10-11T16:39:00Z", from: OLD, to: NEW, note: "n" }));
+        }
         live.delete(77);
       }
       simulate();
     } },
   };
-  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
-  const lock = () => writeFileSync(join(state.dir, "handover", "lanes", "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
+  mkdirSync(lanes, { recursive: true });
+  const lock = () => writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
   lock();
   live.add(77);
   // When: the holder is mid-move and takes nothing
   const refused = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
-  const leftover = existsSync(takeoverFile());
+  const leftover = takeovers().length;
   // the holder waits for the idle moment and takes it
   claim = true;
-  const taken = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  const viaRow = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  const rowLine = printed.at(-1);
+  lock();
+  live.add(77);
+  rmSync(join(state.dir, "rollover-log.jsonl"), { force: true });
+  ending = "result";
+  const viaResult = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  const resultLine = printed.at(-1);
+  rmSync(join(state.dir, "rollover-log.jsonl"), { force: true });
+  rmSync(join(lanes, "demo-20261011-164000.result.json"));
+  lock();
+  live.add(77);
+  ending = "crash";
+  const crashed = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
   // Then
   expect(refused.code).toBe(2);
   expect(printed.some((l) => l.startsWith("HANDOVER_REFUSED demo: another handover is running (pid 77"))).toBe(true);
-  expect(leftover).toBe(false);
-  expect(taken.code).toBe(0);
-  expect(printed.find((l) => l.startsWith("HANDOVER_TAKEN_OVER demo: "))).toContain("pid 77");
-  expect(printed.at(-1)).toStartWith("HANDOVER_TAKEN_OVER_RESULT demo: done");
+  expect(leftover).toBe(0);
+  expect(JSON.parse(taken)).toMatchObject({ approvedBy: LEAD_STUCK, force: true });
+  expect(viaRow.code).toBe(0);
+  expect(rowLine).toStartWith("HANDOVER_TAKEN_OVER_RESULT demo: done");
+  expect(viaResult.code).toBe(0);
+  expect(resultLine).toStartWith(`HANDOVER_TAKEN_OVER_RESULT demo: done -> ${NEW} (from the handover's result file`);
+  // a repointed registry is no proof (review 320): the journal says the move was cut off
+  expect(crashed.code).toBe(3);
+  expect(printed.at(-1)).toStartWith("HANDOVER_TAKEN_OVER_RESULT demo: interrupted");
   expect(opened()).toBe(false);
-  expect(JSON.parse(readFileSync(`${takeoverFile()}.claimed`, "utf8"))).toMatchObject({ approvedBy: LEAD_STUCK, force: true });
-  // a holder that moved the lane and ended before its record (QA: its owner report failed hard): the registry tells
-  lock();
-  live.add(77);
-  logs = false;
-  rmSync(join(state.dir, "rollover-log.jsonl"), { force: true });
-  const unlogged = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
-  expect(unlogged.code).toBe(0);
-  expect(printed.at(-1)).toStartWith(`HANDOVER_TAKEN_OVER_RESULT demo: moved -> ${NEW}`);
+});
+
+test("two runs that both find the lock held each leave a request of their own: the waiting run takes the older one, the other is left for its writer to withdraw", async () => {
+  // Given: two requests written while a run waits (review 320: one file overwritten by the other lost an approval)
+  const base = await setup();
+  const c = fakeClock(Date.parse("2026-10-11T16:35:00Z"));
+  let polls = 0;
+  const deps: LaneHandoverDeps = {
+    ...base,
+    clock: { now: () => c.at, sleep: async (ms: number) => { c.at += ms; polls++; if (polls === 2) {
+      writeFileSync(takeoverFile("4243-b"), JSON.stringify({ pid: 4243, at: "2026-10-11T16:35:05.000Z", approvedBy: "lead:later, STUCK rung 4 on y", force: false, request: {} }));
+      writeFileSync(takeoverFile("4242-a"), JSON.stringify({ pid: 4242, at: "2026-10-11T16:35:04.000Z", approvedBy: LEAD_STUCK, force: true, request: {} }));
+    } simulate(); } },
+    config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } },
+    reportOwner: async () => "msg-1",
+  };
+  live.add(4242).add(4243);
+  table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
+  w.screens[OLD] = BUSY;
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
+  // Then
+  expect(r.code).toBe(0);
+  expect(printed.find((l) => l.startsWith("HANDOVER_TAKEN_OVER demo: "))).toContain("pid 4242");
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ approvedBy: LEAD_STUCK });
+  expect(takeovers()).toEqual(["demo.takeover-4243-b.json"]);
 });
 
 // omo's input box sits between two ─ borders; the status lines under it can quote "esc to interrupt" (here the cwd and a
@@ -2032,6 +2077,21 @@ test("the lead's waiting handover starts again by itself: a busy refusal at the 
   running.delete(502);
   expect(await tick(59)).toEqual(["demo started"]);
   expect(resumes).toHaveLength(4);
+  // a ready mark too old to use is told once, and the request still starts on a fresh mark or once its work ended (review 320)
+  refused(60, "work", [503]);
+  running.add(503);
+  ready(deps, [], new Date(T0 + 61 * 60_000).toISOString());
+  expect(await tick(95)).toEqual(["demo skipped"]);
+  expect(await tick(96)).toEqual([]);
+  ready(deps, [], new Date(T0 + 97 * 60_000).toISOString());
+  expect(await tick(98)).toEqual(["demo started"]);
+  refused(99, "work", [504]);
+  running.add(504);
+  ready(deps, [], new Date(T0 + 100 * 60_000).toISOString());
+  expect(await tick(140)).toEqual(["demo skipped"]);
+  running.delete(504);
+  expect(await tick(141)).toEqual(["demo started"]);
+  expect(resumes).toHaveLength(6);
 });
 
 test("the lead's refusal of a busy lane says that the lane's ready mark starts it again, and that start is given the options the refused run was given", async () => {

@@ -292,11 +292,13 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
   const asked = waitingRequest(readRollovers(stateDir), key, pane);
   if (!asked) return [];
   const claimed = resumeFile(stateDir, key);
-  const claim = readJson<{ request?: string; since?: string; approvedBy?: string; result?: string; toldAt?: string }>(claimed);
+  const claim = readJson<{ request?: string; since?: string; approvedBy?: string; result?: string; toldAt?: string; readyAt?: string }>(claimed);
   const by = (asked.approvedBy ?? "").trim();
   // the first ask of this waiting request: a run started again for it and refused again carries it on
   const since = claim?.since && claim.approvedBy === by && claim.result === "started" ? claim.since : claim?.request === asked.at && claim.since ? claim.since : asked.at;
-  if (claim?.request === asked.at && claim.result !== "waiting") return [];
+  // a refusal started once (or skipped for good) is done; one still waiting, or skipped for a stale ready mark, is looked at
+  // again: a fresh mark or its work ending still starts it (review 320)
+  if (claim?.request === asked.at && claim.result !== "waiting" && claim.result !== "stale-mark") return [];
   const alive = hooks.alive ?? pidAlive;
   if (handoverRunning(stateDir, "lane", key, alive)) return [];
   const now = deps.clock.now();
@@ -322,8 +324,11 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
   }
   // a refusal logged before its options were kept (no request) is not started again: it could drop --keep-old and close
   // the old session; the lead runs it again. A ready mark past readyMin is ignored by the run, so it starts nothing.
-  const why = !asked.request ? "the request was logged before its options were kept, so a start now could drop them (--keep-old, --note, --model)" : asked.blocked === "work" && readied && !ended && now - markAt > min * 60_000 ? `the ready mark is older than ${min} min` : "";
-  writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, at: new Date(now).toISOString(), ...(readied ? { readyAt: mark?.at } : {}), result: why ? "skipped" : "started" })}\n`);
+  const stale = asked.blocked === "work" && readied && !ended && now - markAt > min * 60_000;
+  const why = !asked.request ? "the request was logged before its options were kept, so a start now could drop them (--keep-old, --note, --model)" : stale ? `the ready mark is older than ${min} min` : "";
+  // the lead hears of one stale mark once
+  if (stale && claim?.request === asked.at && claim.result === "stale-mark" && claim.readyAt === mark?.at) return [];
+  writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, at: new Date(now).toISOString(), ...(readied ? { readyAt: mark?.at } : {}), result: stale ? "stale-mark" : why ? "skipped" : "started" })}\n`);
   const cause = asked.blocked === "busy" ? "the lane was busy; the run waits for its idle moment" : readied ? `the ready mark of ${mark?.at} in ${pane} follows it` : `the work it named ended (${named.join(", ")})`;
   if (why) {
     const lead = deps.config.leadPane;
