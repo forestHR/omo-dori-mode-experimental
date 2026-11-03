@@ -30,8 +30,10 @@ export const listPanes = async (run: Runner, backend: Backend): Promise<Pane[]> 
   return (JSON.parse(r.out) as { result: { panes: Pane[] } }).result.panes;
 };
 
+// an aoe session (a tmux name) is read through tmux whatever the config says, a herdr pane through herdr (captureTmux
+// dispatches on the pane id)
 export const readScreen = async (run: Runner, backend: Backend, pane: string, lines?: number): Promise<string> =>
-  backend === "aoe"
+  backend === "aoe" || isHerdrPane(pane) || pane.startsWith("aoe_")
     ? captureTmux(run, pane, lines)
     : (await run(["herdr", "pane", "read", pane, "--source", lines ? "recent" : "visible", ...(lines ? ["--lines", String(lines)] : [])])).out;
 

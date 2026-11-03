@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
 import { isHerdrPane } from "./herdr.ts";
-import { endHerdrAgent, reviveHerdr } from "./herdr-sessions.ts";
+import { endHerdrAgent, herdrLeadSession, reviveHerdr } from "./herdr-sessions.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
@@ -176,8 +176,8 @@ const USAGE = `dori <command> [options]
                                        nothing without launchEnv); used by setups/discord-aoe/self-restart.sh
   sync   [--write]                     registry vs live panes; read-only unless --write; a SIGNALS line per open lane with a record
   claim-done [<key>] --evidence TEXT [--summary TEXT] [--posted ID|LINK] [--post-summary]
-                                       key defaults to the lane registered for this pane ($HERDR_PANE_ID, or the tmux session
-                                       with backend aoe); --summary: 2 to 5 plain lines for the owner's thread in his language.
+                                       key defaults to the lane registered for this pane (the tmux session it runs in, else
+                                       $HERDR_PANE_ID); --summary: 2 to 5 plain lines for the owner's thread in his language.
                                        The result reaches the thread once: when this lane's session posted in its work thread
                                        (dori send, dori thread) in the last 30 minutes, or --posted names that message, it is
                                        the result (RESULT_ALREADY_POSTED) and the close posts no summary; --post-summary: that
@@ -679,14 +679,14 @@ const leadDepsFor = (print: (line: string) => void): HandoverDeps => ({
 });
 // dori commands that talk to the owner refuse from a session that a running handover is replacing (no double replies)
 const quietGuard = async (): Promise<void> => {
-  const here = config.backend === "aoe" ? await currentTmuxSession(run) : (process.env.HERDR_PANE_ID ?? "");
+  const here = await currentTmuxSession(run);
   const why = quietReason(config.stateDir, here, Date.now());
   if (why) die(why, 4);
 };
 const passEnv = (): string[] => ["PATH", "HOME", "DORI_CONFIG", "DORI_STATE_DIR", "DORI_ENV_FILE", "DORI_DISCORD_INBOX", "DORI_DISCORD_STATE_DIR"].filter((n) => process.env[n] !== undefined).map((n) => `--setenv=${n}`);
 
 const lane = async (k: string | undefined) => {
-  const here = config.backend === "aoe" ? await currentTmuxSession(run) : (process.env.HERDR_PANE_ID ?? "");
+  const here = await currentTmuxSession(run);
   const found = k ? await deps.registry.read(k) : await deps.registry.byPane(here);
   if (!found) return die(k ? `no registered lane "${k}"` : "no open lane is registered for this pane");
   if (statusOf(found) === "closed") return die(`lane ${found.key} is already closed`);
@@ -696,7 +696,7 @@ const lane = async (k: string | undefined) => {
 // A post this session made in an open lane's own work thread is recorded on that lane, so its close does not post the same
 // result a second time (done-flow.ts recordThreadPost). Not recording it only means the close posts its summary as before.
 const notePost = async (thread: string, id: string, text: string): Promise<void> => {
-  const here = config.backend === "aoe" ? await currentTmuxSession(run).catch(() => "") : (process.env.HERDR_PANE_ID ?? "");
+  const here = await currentTmuxSession(run).catch(() => "");
   await recordThreadPost(deps.registry, here, thread, id, text, new Date().toISOString()).catch((e: unknown) => console.error(`THREAD_POST_NOT_RECORDED discord:${thread} ${id}: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`));
 };
 // --posted: a message id or its Discord link
@@ -1077,7 +1077,7 @@ try {
     case "tree": {
       const verb = key ?? "show";
       const anyLane = async (k: string) => (await deps.registry.read(k)) ?? die(`no registered lane "${k}"`);
-      const here = config.backend === "aoe" ? await currentTmuxSession(run).catch(() => "") : (process.env.HERDR_PANE_ID ?? "");
+      const here = await currentTmuxSession(run).catch(() => "");
       const paneLane = here ? await deps.registry.byPane(here) : null;
       const laneKey = opt("lane");
       const area: TreeArea = laneKey ? laneArea(await anyLane(laneKey), config) : opt("cwd") ? { cwd: resolve(opt("cwd") ?? "") } : tags()[0] ? { tag: tags()[0] } : paneLane ? laneArea(paneLane, config) : { cwd: resolve(process.cwd()) };
@@ -1128,7 +1128,7 @@ try {
     case "review": {
       const pr = parsePr(key ?? die("usage: dori review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K]"));
       const laneKey = opt("lane");
-      const here = laneKey ? "" : config.backend === "aoe" ? await currentTmuxSession(run).catch(() => "") : (process.env.HERDR_PANE_ID ?? "");
+      const here = laneKey ? "" : await currentTmuxSession(run).catch(() => "");
       const owner = laneKey ? await lane(laneKey) : here ? await deps.registry.byPane(here) : null;
       const out = await reviewPr(deps, pr, { dir: resolve(many("dir")[0] ?? process.cwd()), model: opt("model"), lane: owner });
       for (const line of out) console.log(line);
@@ -1811,7 +1811,7 @@ try {
           replyTo: flags.values["reply-to"] === true ? "" : opt("reply-to"),
           tmux: opt("tmux"),
           session: opt("session"),
-          here: config.backend === "aoe" ? await currentTmuxSession(run).catch(() => "") : (process.env.HERDR_PANE_ID ?? ""),
+          here: await currentTmuxSession(run).catch(() => ""),
           lanes: await deps.registry.open(),
           threads: threads(cardDir()),
           inbox: process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"),
@@ -1858,6 +1858,8 @@ try {
       const pane = key ?? die("usage: dori revive <herdr pane> [--text TEXT]");
       if (!isHerdrPane(pane)) die("revive takes a herdr pane id (an aoe session restarts with self-restart.sh)");
       if (flags.values.restart && (await paneLife(run, pane)).live) {
+        // the running conversation is recorded before its agent is ended, so the restart has a session to start again
+        if (!(await herdrLeadSession(run, config, pane, true))) die(`REVIVE_FAIL ${pane}: the omo session running there could not be told, so it was not ended`);
         const ended = await endHerdrAgent(run, realClock, pane);
         if (ended) die(`REVIVE_FAIL ${pane}: ${ended}`);
       }
@@ -1977,7 +1979,7 @@ try {
       break;
     }
     case "handover": {
-      const here = config.backend === "aoe" ? await currentTmuxSession(run) : (process.env.HERDR_PANE_ID ?? "");
+      const here = await currentTmuxSession(run);
       if (key === "ack") {
         console.log(ackHandover(opt("state") ? resolve(opt("state") ?? "") : config.stateDir, flags.positionals[1]?.trim() || die("usage: dori handover ack <id> [--state DIR]"), here, new Date().toISOString()));
         break;

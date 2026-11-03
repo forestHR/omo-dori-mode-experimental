@@ -7,7 +7,11 @@ import { closeAoeSession, envMismatch, isClosedLine, liveSessions, paneActivity,
 import { agentLine, openHerdrSession } from "../src/herdr.ts";
 import { endHerdrAgent, readHerdrSessions, recordHerdrSession, reviveHerdr } from "../src/herdr-sessions.ts";
 import { findLead } from "../src/lead.ts";
-import { leadAlive } from "../src/lead-down.ts";
+import { leadAlive, leadDownTick } from "../src/lead-down.ts";
+import { readScreen } from "../src/panes.ts";
+import { shellPidOf } from "../src/session-id.ts";
+import { closeLane } from "../src/done-flow.ts";
+import { launchLane } from "../src/launch.ts";
 import { submitToPane } from "../src/panes.ts";
 import type { Runner } from "../src/run.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, RUNNING, sent, type World } from "./fakes.ts";
@@ -146,4 +150,60 @@ test("a revive right after a server restart waits for herdr to spawn the pane, a
   expect(line).toBe("REVIVE_OK w1:p1 session 11111111-2222-4333-8444-555555555555 (herdr had started it again, pid 4001) (prompt submitted)");
   expect(world.calls.some((c) => c[2] === "run")).toBe(false);
   expect(typed).toEqual(["[DORI] back"]);
+});
+
+test("while a Dori moves (config herdr), its aoe lanes keep going through tmux: screen, shell pid and close", async () => {
+  const deps = omo();
+  world.aoe = [{ id: "abcdef0011223344", title: "old", path: "/repo" }];
+  world.tmux = ["aoe_old_abcdef00"];
+  await readScreen(deps.run, "herdr", "aoe_old_abcdef00");
+  await shellPidOf("aoe_old_abcdef00", { run: deps.run, sessionsDir: dir, backend: "herdr" });
+  expect(world.calls.filter((c) => c[0] === "herdr").map((c) => c.slice(1, 3).join(" "))).toEqual([]);
+  expect(world.calls.map((c) => c.slice(0, 2).join(" "))).toEqual(["tmux capture-pane", "tmux display-message"]);
+  await Bun.write(join(dir, "done"), "ok");
+  await deps.registry.write({ key: "old", title: "old", thread: "none", brief: "/b", done: `file ${join(dir, "done")}`, openedAt: "2026-01-01T00:00:00Z", pane: "aoe_old_abcdef00", status: "working" });
+  await closeLane({ ...deps, exists: () => true }, (await deps.registry.read("old"))!, "QA");
+  expect(world.calls.filter((c) => c[0] === "aoe" && (c[1] === "rm" || c[1] === "session")).map((c) => c.slice(0, 3).join(" "))).toEqual(["aoe session stop", "aoe rm abcdef0011223344"]);
+  expect(world.calls.some((c) => c[0] === "herdr" && c[2] === "close")).toBe(false);
+});
+
+test("a herdr lead with no record yet (just handed over) is recorded on the first live check", async () => {
+  const deps = omo({ leadPane: "w1:p1", leadReviveMin: 5, sessionsDir: dir });
+  world.panes = [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/repo" }];
+  world.ps = "4000 1 -bash\n4001 4000 omo --session-id 11111111-2222-4333-8444-555555555555 --model m/x";
+  expect(readHerdrSessions(dir)["w1:p1"]).toBeUndefined();
+  expect(await leadDownTick(deps)).toEqual([]);
+  expect(readHerdrSessions(dir)["w1:p1"]).toMatchObject({ session: "11111111-2222-4333-8444-555555555555", model: "m/x" });
+});
+
+test("a herdr lead revived after leadReviveMin tells the owner once, as an aoe lead does", async () => {
+  recordHerdrSession(dir, "w1:p1", { session: "11111111-2222-4333-8444-555555555555", cwd: dir, at: new Date(0).toISOString() });
+  world.panes = [{ pane_id: "w1:p1", workspace_id: "w1", cwd: dir }];
+  world.herdrDead = ["w1:p1"];
+  const posts: string[] = [];
+  const inbox = join(dir, "inbox.jsonl");
+  await Bun.write(inbox, `${JSON.stringify({ ts: new Date(0).toISOString(), author_id: "owner", channel_id: "c1", content: "hi" })}\n`);
+  const at = (ms: number) => ({ ...omo({ leadPane: "w1:p1", leadReviveMin: 5 }), clock: fakeClock(ms), ownerInbox: { path: inbox, ownerId: "owner", ownerChannel: "c1" }, postOwner: async (_c: string, t: string) => (posts.push(t), "m1") });
+  expect((await leadDownTick(at(0)))[0]).toStartWith("LEAD_DOWN w1:p1 no live herdr agent");
+  // herdr starts omo again during the revive (its pane answers as live from the next process-info)
+  const run = at(6 * 60_000).run;
+  const deps = { ...at(6 * 60_000), run: async (argv: readonly string[], o?: Parameters<Runner>[1]) => { if (argv[2] === "run") world.herdrDead = []; return run(argv, o); } };
+  const lines = await leadDownTick(deps);
+  expect(lines[0]).toStartWith("LEAD_REVIVE_STARTED w1:p1");
+  expect(lines.some((l) => l.startsWith("LEAD_DOWN_NOTICE w1:p1 POSTED"))).toBe(true);
+  expect(posts).toHaveLength(1);
+});
+
+test("launch on a fresh herdr server (no workspace yet) opens the lane in a workspace it made", async () => {
+  const brief = join(dir, "brief.md");
+  await Bun.write(brief, "# brief\n");
+  const deps = omo({ agentCommand: ["claude", "{prompt}"] });
+  const base = deps.run;
+  let made = false;
+  const r = await launchLane({ ...deps, readGoal: async () => ({ status: "active" }), run: async (argv, o) => {
+    if (argv[1] === "tab" && argv[2] === "create") return made ? { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w1:p2", tab_id: "w1:t2" } } }), err: "" } : { code: 1, out: JSON.stringify({ error: { code: "workspace_not_found" } }), err: "" };
+    if (argv[1] === "workspace" && argv[2] === "create") return (made = true), { code: 0, out: JSON.stringify({ result: { workspace: { workspace_id: "w1" } } }), err: "" };
+    return base(argv, o);
+  } }, { noThread: "QA", key: "fresh", title: "fresh", brief, done: "file /x", cwd: "/tmp" });
+  expect(r.lane).toMatchObject({ pane: "w1:p2", tab: "w1:t2" });
 });

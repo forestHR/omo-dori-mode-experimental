@@ -243,7 +243,8 @@ export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly
   if (opts.backend === "herdr") {
     const argv = [opts.tool, "--session-id", crypto.randomUUID(), "--model", opts.model, ...(opts.thinking ? ["--thinking", opts.thinking] : [])];
     try {
-      return (await openHerdrSession(run, clock, { title: opts.title, cwd: opts.cwd, argv, env: path === callerPath ? (env ?? {}) : { ...env, PATH: path }, ...(opts.workspace ? { workspace: opts.workspace } : {}) })).pane;
+      // a herdr pane takes the server's environment, not this caller's: the checked PATH always goes on its command line
+      return (await openHerdrSession(run, clock, { title: opts.title, cwd: opts.cwd, argv, env: { ...env, PATH: path }, ...(opts.workspace ? { workspace: opts.workspace } : {}) })).pane;
     } catch (e) {
       throw new AoeError(e instanceof Error ? e.message : String(e));
     }
@@ -274,9 +275,11 @@ export const closeAoeSession = async (run: Runner, pane: string): Promise<string
 // whether closeAoeSession closed the session (aoe: stopped and trashed; herdr: stopped and closed)
 export const isClosedLine = (line: string): boolean => / stopped and (trashed|closed)$/.test(line);
 
-// the session this process runs in: its tmux session, else its herdr pane
+// the session this process runs in: its herdr pane (herdr sets HERDR_PANE_ID in each pane; a $TMUX there is only inherited
+// from where the herdr server was started), else its tmux session
 export const currentTmuxSession = async (run: Runner): Promise<string> => {
-  if (!process.env.TMUX) return process.env.HERDR_PANE_ID ?? "";
+  if (process.env.HERDR_PANE_ID) return process.env.HERDR_PANE_ID;
+  if (!process.env.TMUX) return "";
   const r = await run(["tmux", "display-message", "-p", "#S"]);
   return r.code === 0 ? r.out.trim() : "";
 };

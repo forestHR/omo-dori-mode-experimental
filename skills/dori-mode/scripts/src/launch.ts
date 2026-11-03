@@ -3,7 +3,7 @@ import { basename, resolve } from "node:path";
 
 import { AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
 import { turnRunning } from "./submit.ts";
-import { agentLine, isHerdrPane } from "./herdr.ts";
+import { isHerdrPane, openHerdrSession } from "./herdr.ts";
 import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { agentGone, firstTurnRuns, GOAL_WAIT, goalReader, lastLines, noGoalWhy } from "./pending-goal.ts";
@@ -607,14 +607,16 @@ export const withSessionId = (argv: readonly string[], id: string): string[] =>
 
 // env: launchEnv for the lane (laneEnv), set on the agent's command line, since a herdr pane takes the server's environment
 const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string, env: Readonly<Record<string, string | undefined>> = {}): Promise<Opened> => {
-  const created = await deps.run(["herdr", "tab", "create", ...(deps.config.laneWorkspace ? ["--workspace", deps.config.laneWorkspace] : []), "--cwd", cwd, "--label", key, "--no-focus"]);
-  if (created.code !== 0) throw new LaunchFailed(`herdr tab create failed: ${created.err || created.out}`);
-  const made = (JSON.parse(created.out) as { result: { root_pane: { pane_id: string; tab_id?: string }; tab_id?: string } }).result;
-  const pane = made.root_pane.pane_id;
-  const tab = made.tab_id ?? made.root_pane.tab_id;
   // the template is checked, not the filled argv: the prompt is one argument and never a selector
   const argv = fill(withSessionId(deps.config.agentCommand, crypto.randomUUID()), { model, prompt });
-  await deps.run(["herdr", "pane", "run", pane, Object.keys(env).length ? agentLine(argv, env) : argv.map(quoteForPane).join(" ")]);
+  // the shared opener (herdr.ts): a tab labelled with the key, a workspace first on a fresh server, the agent run there
+  let opened: { readonly pane: string; readonly tab?: string };
+  try {
+    opened = await openHerdrSession(deps.run, deps.clock, { title: key, cwd, argv, env, ...(deps.config.laneWorkspace ? { workspace: deps.config.laneWorkspace } : {}) });
+  } catch (e) {
+    throw new LaunchFailed(e instanceof Error ? e.message : String(e));
+  }
+  const { pane, tab } = opened;
   // a command with its own --session-dir keeps its sessions (and goals) outside sessionsDir, so launch cannot read them
   const elsewhere = argv.some((a) => a === "--session-dir" || a.startsWith("--session-dir="));
   return { pane, ...(tab ? { tab } : {}), session: elsewhere ? "" : argvSessionId(argv) };

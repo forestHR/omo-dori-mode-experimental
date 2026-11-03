@@ -78,7 +78,9 @@ export const leadDownTick = async (deps: FlowDeps, env: Readonly<Record<string, 
   const now = deps.clock.now();
   if (await leadAlive(deps.run, pane)) {
     // a herdr lead's conversation is kept for its revive (herdr-sessions.ts), read again at most every RECORD_EVERY_MS
-    if (isHerdrPane(pane) && now - Date.parse(readHerdrSessions(deps.config.stateDir)[pane]?.at ?? "") >= RECORD_EVERY_MS) await herdrLeadSession(deps.run, deps.config, pane, true).catch(() => "");
+    // (no record yet, as after a handover moved the lead to a new pane: read it now)
+    const recordedAt = Date.parse(readHerdrSessions(deps.config.stateDir)[pane]?.at ?? "");
+    if (isHerdrPane(pane) && !(now - recordedAt < RECORD_EVERY_MS)) await herdrLeadSession(deps.run, deps.config, pane, true).catch(() => "");
     if (!mark) return [];
     rmSync(markPath(deps), { force: true });
     return [`LEAD_UP ${pane} down since ${mark.since} (${Math.round((now - Date.parse(mark.since)) / 60_000)} min, ${mark.revives} revive(s))`];
@@ -113,19 +115,27 @@ export const leadDownTick = async (deps: FlowDeps, env: Readonly<Record<string, 
   const [id = "", tmux = pane] = lead.split(" ");
   if (isHerdrPane(tmux)) {
     // the herdr server owns the agent it starts, so no unit of its own is needed (a restart of dori-lanes leaves it)
-    save({ ...next, revives: next.revives + 1, lastReviveAt: new Date(now).toISOString() });
+    // next itself, so the notice saved below keeps the count
+    next = { ...next, revives: next.revives + 1, lastReviveAt: new Date(now).toISOString() };
+    save(next);
     const line = await reviveHerdr(deps.run, deps.clock, deps.config, tmux, revivedText(clock(deps, since), "herdr agent"), (p, t) => sendVerified(deps.run, deps.clock, deps.config, p, t));
-    out.push(line.startsWith("REVIVE_OK") ? `LEAD_REVIVE_STARTED ${pane} down since ${next.since}; ${line} (${next.revives + 1}/${REVIVE_MAX})` : `LEAD_REVIVE_WARN ${pane} ${line}`);
-    return out;
+    if (!line.startsWith("REVIVE_OK")) {
+      out.push(`LEAD_REVIVE_WARN ${pane} ${line}`);
+      return out;
+    }
+    out.push(`LEAD_REVIVE_STARTED ${pane} down since ${next.since}; ${line} (${next.revives}/${REVIVE_MAX})`);
+  } else {
+    const unit = `dori-lead-revive-${now}`;
+    const started = await deps.run(reviveArgv(unit, id, tmux, revivedText(clock(deps, since)), env));
+    // next itself, so the notice saved below keeps the count
+    next = { ...next, revives: next.revives + 1, lastReviveAt: new Date(now).toISOString() };
+    save(next);
+    if (started.code !== 0) {
+      out.push(`LEAD_REVIVE_WARN ${pane} systemd-run failed (code ${started.code}): ${(started.err || started.out).trim().slice(0, 200)}`);
+      return out;
+    }
+    out.push(`LEAD_REVIVE_STARTED ${pane} down since ${next.since}; ${unit} runs self-restart.sh --start ${id} (${next.revives}/${REVIVE_MAX})`);
   }
-  const unit = `dori-lead-revive-${now}`;
-  const started = await deps.run(reviveArgv(unit, id, tmux, revivedText(clock(deps, since)), env));
-  save({ ...next, revives: next.revives + 1, lastReviveAt: new Date(now).toISOString() });
-  if (started.code !== 0) {
-    out.push(`LEAD_REVIVE_WARN ${pane} systemd-run failed (code ${started.code}): ${(started.err || started.out).trim().slice(0, 200)}`);
-    return out;
-  }
-  out.push(`LEAD_REVIVE_STARTED ${pane} down since ${next.since}; ${unit} runs self-restart.sh --start ${id} (${next.revives}/${REVIVE_MAX})`);
   if (next.notice) return out;
   const inbox = deps.ownerInbox;
   const rows = inbox && existsSync(inbox.path) ? ownerRows(tailOf(inbox.path, INBOX_TAIL_BYTES), inbox.ownerId).filter((r) => now - r.at < DAY_MS) : [];

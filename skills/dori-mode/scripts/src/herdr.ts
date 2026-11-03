@@ -83,9 +83,9 @@ export const openHerdrSession = async (run: Runner, clock: Clock, opts: { readon
     if (ws?.workspace_id) created = await run(tabArgv(ws.workspace_id));
   }
   if (created.code !== 0) throw new Error(`herdr tab create failed: ${created.err || created.out}`);
-  const made = (JSON.parse(created.out) as { result: { root_pane: { pane_id: string; tab_id?: string }; tab?: { tab_id?: string } } }).result;
+  const made = (JSON.parse(created.out) as { result: { root_pane: { pane_id: string; tab_id?: string }; tab?: { tab_id?: string }; tab_id?: string } }).result;
   const pane = made.root_pane.pane_id;
-  const tab = made.root_pane.tab_id ?? made.tab?.tab_id;
+  const tab = made.root_pane.tab_id ?? made.tab?.tab_id ?? made.tab_id;
   // a fresh shell may drop what is typed before its prompt is drawn
   for (let i = 0; i < 20 && !(await herdrRead(run, pane)).trim(); i++) await clock.sleep(250);
   const ran = await run(["herdr", "pane", "run", pane, agentLine(opts.argv, opts.env)]);
