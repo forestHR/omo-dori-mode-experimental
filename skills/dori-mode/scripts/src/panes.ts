@@ -141,16 +141,22 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
   const send = (part: string) => run(herdr ? ["herdr", "pane", "send-text", pane, part] : ["tmux", "send-keys", "-t", target(pane), "-l", "--", part]);
   const key = (name: "enter" | "clear") => run(herdr ? ["herdr", "pane", "send-keys", pane, name === "enter" ? "enter" : "ctrl+u"] : ["tmux", "send-keys", "-t", target(pane), name === "enter" ? "Enter" : "C-u"]);
   const where = herdr ? `herdr pane ${pane}` : `tmux session ${pane}`;
+  const ready = async (): Promise<string | undefined> => {
+    // named, so a lead does not read a missing pane as a busy one (the prompt check below would say "no ❯ prompt")
+    const life = await paneLife(run, pane);
+    if (!life.live) return life.how === "gone" ? `PANE_GONE: there is no ${where} (it ended, or the name is wrong); nothing was typed` : `PANE_DEAD: the program in ${pane} exited (${life.status < 0 ? "no agent runs in it" : `status ${life.status}`}); nothing was typed`;
+    const stopped = await stoppedAgent(run, pane);
+    if (stopped) return `the agent in the pane is stopped (pid ${stopped}, frozen): nothing would read the text, so it was not typed`;
+    // upstream #70: an omo question open in a herdr pane would take the text as its answer
+    if (herdr && QUESTION_MARK.test(await captureTmux(run, pane))) return `PANE_BLOCKED: a question is open in ${pane} (Ask user); the text would answer it, so nothing was typed`;
+    if (!(await waitForPrompt(run, clock, pane, 10, 1_000))) return "no ❯ prompt in the pane";
+    return undefined;
+  };
   return {
+    ready,
     type: async (text) => {
-      // named, so a lead does not read a missing pane as a busy one (the prompt check below would say "no ❯ prompt")
-      const life = await paneLife(run, pane);
-      if (!life.live) return life.how === "gone" ? `PANE_GONE: there is no ${where} (it ended, or the name is wrong); nothing was typed` : `PANE_DEAD: the program in ${pane} exited (${life.status < 0 ? "no agent runs in it" : `status ${life.status}`}); nothing was typed`;
-      const stopped = await stoppedAgent(run, pane);
-      if (stopped) return `the agent in the pane is stopped (pid ${stopped}, frozen): nothing would read the text, so it was not typed`;
-      // upstream #70: an omo question open in a herdr pane would take the text as its answer
-      if (herdr && QUESTION_MARK.test(await captureTmux(run, pane))) return `PANE_BLOCKED: a question is open in ${pane} (Ask user); the text would answer it, so nothing was typed`;
-      if (!(await waitForPrompt(run, clock, pane, 10, 1_000))) return "no ❯ prompt in the pane";
+      const unsafe = await ready();
+      if (unsafe) return unsafe;
       for (const part of sendChunks(text)) if ((await send(part)).code !== 0) return herdr ? "herdr send-text failed" : "tmux send-keys failed";
       return undefined;
     },

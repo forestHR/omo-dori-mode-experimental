@@ -978,9 +978,13 @@ try {
     }
     case "type": {
       const pane = key ?? die("type needs a pane (a tmux session name or a herdr pane id)");
+      onlyOptions("type", ["text", "text-file"], 1);
       const file = opt("text-file");
-      const text = file ? (await Bun.file(file).text()).trim() : need("text");
-      if (!text) die("type needs non-empty text");
+      // spaces before a /text are kept (omo sends such a text as a message, not as a command); trailing ones and blank
+      // lines before it are not
+      const raw = file ? await Bun.file(file).text() : flags.values.text;
+      const text = typeof raw === "string" ? raw.replace(/^(?:[^\S\n]*\n)+/, "").trimEnd() : "";
+      if (!text.trim()) die("type needs non-empty text");
       const r = await typeIntoPane(deps, pane, text);
       for (const note of r.notes) console.error(note);
       if (r.pane !== pane) console.error(`FORWARDED ${pane} -> ${r.pane}: ${pane} was frozen by a handover, so the text went to the session that replaced it`);
