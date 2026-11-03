@@ -46,6 +46,9 @@ export type Receipt = {
   readonly code?: number;
   readonly tail?: string;
   readonly mergeCommit?: string;
+  // tests: the commit checks' lines, and the --no-test reason that let a fix without a test through
+  readonly checks?: readonly string[];
+  readonly waiver?: string;
 };
 
 const receiptDir = (stateDir: string): string => join(stateDir, "receipts");
@@ -79,6 +82,135 @@ const receiptsOf = async (stateDir: string, pr: PrRef, kind: Kind): Promise<Rece
 
 const short = (sha: string): string => sha.slice(0, 12);
 const why = (r: Ran): string => (r.err || r.out).trim().split("\n").slice(-3).join(" ").slice(0, 300) || `exit ${r.code}`;
+
+// The commit checks dori review runs before the tests: dori-superagent PR #44 (dori verify-pr,
+// https://github.com/sisyphuslabs/dori-superagent/pull/44) checked commit identities and fix-without-test as a command of
+// its own; here they are part of dori review, so a lane learns no new command. Its issue #57
+// (https://github.com/sisyphuslabs/dori-superagent/issues/57) items 1-3 are in: fix commits match without case, a test
+// changed by no line (a pure rename) does not count, and a file under test/ or tests/ is a test only when named as one, so
+// code there counts as source (item 3, the narrower rule). Item 4 (a footer listing identities) has no counterpart here.
+// The commit list comes from GitHub (the PR's own commits), each commit's names, emails and files from git in the checkout.
+export type Identity = { readonly name: string; readonly email: string };
+export type PrFile = { readonly path: string; readonly oldPath?: string; readonly lines: number };
+export type PrCommit = { readonly sha: string; readonly subject: string; readonly author: Identity; readonly committer: Identity; readonly parents: number; readonly files: readonly PrFile[] };
+
+const CODE = String.raw`\.(?:[cm]?[jt]sx?|py|go|rs|rb|sh|java|kt|swift)$`;
+// fixture, helper, fake and mock directories never hold counted tests (from #44)
+export const isTestPath = (path: string): boolean =>
+  !/(?:^|\/)(?:fixtures?|__fixtures__|__snapshots__|helpers?|fakes?|mocks?)\//i.test(path)
+  && (new RegExp(String.raw`(?:^|/)[^/]+\.(?:test|spec)${CODE}`, "i").test(path)
+    || /(?:^|\/)(?:test_[^/]+\.py|[^/]+_test\.(?:go|py|rb)|[^/]+_spec\.rb|[^/]+\.bats)$/i.test(path)
+    || /(?:^|\/)[^/]+Tests?\.(?:java|kt|swift)$/.test(path)
+    || new RegExp(String.raw`(?:^|/)__tests__/.+${CODE}`, "i").test(path)
+    || /(?:^|\/)tests\/[^/]+\.rs$/.test(path));
+
+export const isSourcePath = (path: string): boolean =>
+  !isTestPath(path) && !/(?:^|\/)(?:docs?|fixtures?|__fixtures__|__snapshots__)\//i.test(path)
+  && /\.(?:[cm]?[jt]sx?|css|scss|sass|less|html|vue|svelte|py|go|rs|rb|sh|sql|c|cpp|h|java|kt|swift)$/i.test(path);
+
+const FIX = /^fix(?:\([^)]*\))?!?:/i;
+const NOREPLY = "noreply@github.com";
+// a mail address is personal: refusals and logs show only its first letters
+export const maskEmail = (email: string): string => email.replace(/^(.{0,2})[^@]*@(.{0,2}).*$/, "$1***@$2***");
+
+export type CheckResult = { readonly problems: readonly string[]; readonly lines: readonly string[]; readonly waiver?: string };
+
+export const checkCommits = (repo: string, commits: readonly PrCommit[], o: { readonly atHead: ReadonlySet<string>; readonly executables?: ReadonlySet<string>; readonly identity?: Identity; readonly noTest?: string }): CheckResult => {
+  const problems: string[] = [];
+  const lines: string[] = [];
+  const want = o.identity;
+  let identity = "skipped";
+  if (!want) lines.push(`IDENTITY_SKIP ${repo} has no mergeGate.identities entry; commit names and emails are not checked`);
+  else if (typeof want.name !== "string" || !want.name.trim() || typeof want.email !== "string" || !want.email.trim()) problems.push(`mergeGate.identities["${repo}"] needs a nonempty name and email`);
+  else {
+    identity = `ok(${commits.length})`;
+    // one reason per role and address, with the commits it covers: a PR of 16 commits by one other address is one line
+    const wrong = new Map<string, string[]>();
+    const add = (reason: string, c: PrCommit) => wrong.set(reason, [...(wrong.get(reason) ?? []), short(c.sha)]);
+    for (const c of commits) {
+      for (const role of ["author", "committer"] as const) {
+        const got = c[role];
+        // GitHub commits a merge it makes (Update branch) as itself
+        if (role === "committer" && c.parents > 1 && got.email.toLowerCase() === NOREPLY) continue;
+        if (got.email.toLowerCase() !== want.email.trim().toLowerCase() || got.email.toLowerCase() === NOREPLY) add(`${role} email ${maskEmail(got.email)}`, c);
+        else if (got.name.trim() !== want.name.trim()) add(`${role} name`, c);
+      }
+    }
+    for (const [reason, shas] of wrong) problems.push(`${reason} (${shas.length === 1 ? `commit ${shas[0]}` : `${shas.length} commits: ${shas.slice(0, 3).join(", ")}${shas.length > 3 ? ", ..." : ""}`}) is not the one set for ${repo} in mergeGate.identities${reason.includes("email") ? ` (${maskEmail(want.email)})` : ""}`);
+  }
+  // a merge commit's files came from the base branch, not from this PR
+  const own = commits.filter((c) => c.parents <= 1);
+  // an extensionless script that is executable at the head (setups/discord-aoe/dori-file-relay) is source too
+  const source = (p: string): boolean => isSourcePath(p) || (o.executables?.has(p) === true && !isTestPath(p));
+  const fixes = own.filter((c) => FIX.test(c.subject) && c.files.some((f) => source(f.path) || (f.oldPath !== undefined && source(f.oldPath))));
+  // where a test changed in commit i is at the head: later commits may rename it with no changed line
+  const finalPath = (i: number, path: string): string => own.slice(i + 1).reduce((p, c) => c.files.find((f) => f.oldPath === p)?.path ?? p, path);
+  const counted = (i: number, f: PrFile): string | undefined => {
+    const at = finalPath(i, f.path);
+    return isTestPath(f.path) && f.lines > 0 && isTestPath(at) && o.atHead.has(at) ? at : undefined;
+  };
+  const testsOf = (c: PrCommit): string[] => c.files.flatMap((f) => counted(own.indexOf(c), f) ?? []);
+  const tests = [...new Set(own.flatMap(testsOf))];
+  let fixTest = "no-fix";
+  let waiver: string | undefined;
+  if (fixes.length && !tests.length) {
+    const shas = fixes.map((c) => short(c.sha)).join(", ");
+    if (o.noTest) {
+      fixTest = "waived";
+      waiver = o.noTest;
+      lines.push(`FIXTEST_WAIVED fix commit ${shas} has no test; --no-test: ${o.noTest} (kept in the tests receipt)`);
+    } else problems.push(`fix commit ${shas} changes source and no commit of the PR adds or changes a test (a test file renamed with no changed line, or deleted at the head, does not count); add a test, or pass --no-test "<reason>" when the fix cannot have one`);
+  } else if (fixes.length) {
+    fixTest = "tested";
+    for (const c of fixes) if (!testsOf(c).length) lines.push(`FIXTEST_NOTE fix commit ${short(c.sha)} has no test of its own; another commit of the PR changes ${tests.join(", ")}`);
+  }
+  return { problems, lines: [...lines, ...(problems.length ? [] : [`CHECKS_OK {pr} identity=${identity} fix-test=${fixTest}`])], ...(waiver ? { waiver } : {}) };
+};
+
+// git show --numstat -z: "added\tdeleted\tpath\0", a rename "added\tdeleted\t\0old\0new\0"; a binary file shows - for both
+const parseNumstat = (out: string): PrFile[] => {
+  const parts = out.split("\0");
+  const files: PrFile[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const m = /^\s*(-|\d+)\t(-|\d+)\t(.*)$/s.exec(parts[i] ?? "");
+    if (!m) continue;
+    const lines = m[1] === "-" ? 1 : Number(m[1]) + Number(m[2]);
+    if (m[3]) files.push({ path: m[3], lines });
+    else {
+      files.push({ path: parts[i + 2] ?? "", oldPath: parts[i + 1] ?? "", lines });
+      i += 2;
+    }
+  }
+  return files;
+};
+
+export const readPrCommits = async (deps: Pick<FlowDeps, "run">, pr: PrRef, root: string, head: string): Promise<{ commits: PrCommit[]; atHead: Set<string>; executables: Set<string> }> => {
+  const list = await deps.run(["gh", "api", "--paginate", `repos/${pr.repo}/pulls/${pr.number}/commits?per_page=100`, "--jq", ".[].sha"]);
+  if (list.code !== 0) throw new GateRefusal(`REVIEW_REFUSED cannot read the commits of ${pr.id}: ${why(list)}`);
+  const shas = list.out.split("\n").map((s) => s.trim()).filter(Boolean);
+  // GitHub lists at most 250 commits; a list cut short does not end at the head
+  if (!shas.length || !shas.every((s) => /^[0-9a-f]{40}$/.test(s)) || shas.at(-1) !== head) throw new GateRefusal(`REVIEW_REFUSED the commit list GitHub gave for ${pr.id} does not end at its head ${short(head)} (${shas.length} commits); the commit checks cannot read every commit`);
+  const commits: PrCommit[] = [];
+  for (const s of shas) {
+    const meta = await deps.run(["git", "-C", root, "log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce%x00%P%x00%s", s]);
+    const f = meta.out.replace(/\n$/, "").split("\0");
+    if (meta.code !== 0 || f.length !== 6) throw new GateRefusal(`REVIEW_REFUSED commit ${short(s)} of ${pr.id} cannot be read in ${root}: ${why(meta)}`);
+    const [an = "", ae = "", cn = "", ce = "", parents = "", subject = ""] = f;
+    const n = parents.split(" ").filter(Boolean).length;
+    let files: PrFile[] = [];
+    if (n <= 1) {
+      const stat = await deps.run(["git", "-C", root, "show", "--numstat", "-z", "-M", "--format=", s]);
+      if (stat.code !== 0) throw new GateRefusal(`REVIEW_REFUSED cannot read the files of commit ${short(s)} of ${pr.id}: ${why(stat)}`);
+      files = parseNumstat(stat.out);
+    }
+    commits.push({ sha: s, subject, author: { name: an, email: ae }, committer: { name: cn, email: ce }, parents: n, files });
+  }
+  const tree = await deps.run(["git", "-C", root, "ls-tree", "-r", "-z", head]);
+  if (tree.code !== 0) throw new GateRefusal(`REVIEW_REFUSED cannot list the files at ${short(head)} in ${root}: ${why(tree)}`);
+  // "<mode> <type> <object>\t<path>"
+  const entries = tree.out.split("\0").filter(Boolean).map((e) => ({ mode: e.slice(0, e.indexOf(" ")), path: e.slice(e.indexOf("\t") + 1) }));
+  return { commits, atHead: new Set(entries.map((e) => e.path)), executables: new Set(entries.filter((e) => e.mode === "100755").map((e) => e.path)) };
+};
 
 type View = { readonly state: string; readonly headRefOid: string; readonly autoMergeRequest?: unknown; readonly statusCheckRollup?: readonly unknown[] | null; readonly mergedAt?: string | null; readonly mergeCommit?: { readonly oid?: string } | null; readonly title?: string };
 
@@ -145,7 +277,7 @@ const secs = (deps: Pick<FlowDeps, "clock">, since: number): number => Math.roun
 
 const tailOf = (r: Ran): string => `${r.out}\n${r.err}`.trim().slice(-1500);
 
-export type ReviewOptions = { readonly dir: string; readonly model?: string; readonly lane?: Lane | null };
+export type ReviewOptions = { readonly dir: string; readonly model?: string; readonly lane?: Lane | null; readonly noTest?: string };
 
 // dori review <pr>: the checkout at dir must be the PR's head, clean. A PR with checks or auto-merge is refused; the tests run there first
 // (a failing run writes its receipt and no review is asked for); then reviewers are tried in order until one prints a
@@ -178,13 +310,20 @@ export const reviewPr = async (deps: FlowDeps, pr: PrRef, opts: ReviewOptions): 
   const lines: string[] = [];
   const cfg = deps.config.mergeGate;
   const testDir = join(root, cfg.testDir);
-  // a new run at this head replaces the old result: a pass from before must not outlive a failure now
+  // a new run at this head replaces the old result: a pass from before must not outlive a failure now (of the checks too)
   rmSync(receiptPath(deps.config.stateDir, pr, sha, "tests"), { force: true });
+  const read = await readPrCommits(deps, pr, root, sha);
+  const identity = Object.entries(cfg.identities ?? {}).find(([r]) => r.toLowerCase() === pr.repo.toLowerCase())?.[1];
+  const checked = checkCommits(pr.repo, read.commits, { atHead: read.atHead, executables: read.executables, ...(identity ? { identity } : {}), ...(opts.noTest ? { noTest: opts.noTest } : {}) });
+  if (checked.problems.length) throw new GateRefusal(`REVIEW_CHECKS_FAILED ${pr.id} head=${short(sha)}: ${checked.problems.join("; ")}; no receipt, no tests run`);
+  const checks = checked.lines.map((l) => l.replace("{pr}", `${pr.id} head=${sha}`));
+  lines.push(...checks);
+  log(`CHECKS ${pr.id} head=${sha} ${checks.at(-1)?.replace(/^CHECKS_OK \S+ head=\S+ /, "") ?? ""}${checked.waiver ? " (waived with --no-test)" : ""}`);
   const started = deps.clock.now();
   const t = await deps.run(cfg.testCommand, { cwd: testDir, timeoutMs: cfg.testMinutes * 60_000 });
   if (t.code !== 0) throw new GateRefusal(`REVIEW_TESTS_FAILED ${pr.id} head=${short(sha)}: ${cfg.testCommand.join(" ")} in ${testDir} exited ${t.code}; no receipt\n${tailOf(t).slice(-600)}`);
   await still("after the tests");
-  const path = await writeReceipt(deps.config.stateDir, pr, { pr: pr.id, sha, kind: "tests", at: iso(deps.clock), command: cfg.testCommand, code: t.code, tail: tailOf(t) });
+  const path = await writeReceipt(deps.config.stateDir, pr, { pr: pr.id, sha, kind: "tests", at: iso(deps.clock), command: cfg.testCommand, code: t.code, tail: tailOf(t), checks, ...(checked.waiver ? { waiver: checked.waiver } : {}) });
   log(`TESTS ${pr.id} head=${sha} exit=${t.code} receipt=${path}`);
   lines.push(`TESTS_OK ${pr.id} head=${sha} ${cfg.testCommand.join(" ")} exit 0 in ${secs(deps, started)} s receipt=${path}`);
   const diff = await deps.run(["gh", "pr", "diff", pr.number, "--repo", pr.repo]);

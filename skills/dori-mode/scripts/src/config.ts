@@ -236,7 +236,8 @@ export type Reviewers = { readonly models: readonly string[]; readonly allowSame
 // dori review / dori merge (src/merge-gate.ts). repos: "<owner>/<repo>" -> ISO time; claim-done refuses a lane whose done
 // signal names a PR of that repo merged at or after that time without dori merge (empty: no repo is checked). testCommand
 // runs in <checkout>/<testDir> for a PR with no GitHub checks, at most testMinutes.
-export type MergeGate = { readonly repos: Readonly<Record<string, string>>; readonly testCommand: readonly string[]; readonly testDir: string; readonly testMinutes: number };
+// identities: "<owner>/<repo>" (any case) -> the name and email every PR commit's author and committer must have (dori review)
+export type MergeGate = { readonly repos: Readonly<Record<string, string>>; readonly identities: Readonly<Record<string, { readonly name: string; readonly email: string }>>; readonly testCommand: readonly string[]; readonly testDir: string; readonly testMinutes: number };
 
 // dori scorecard: where the day's numbers come from and how the card reads. Empty paths leave that line as n/a.
 export type Scorecard = {
@@ -600,7 +601,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
     trainingTags: ["training"], trainingWatch: "chain[_-]?watch|_chain_|\\btrain(ing)?\\b|learning iteration|/runs/|run[_-]?dir|\\bdori heavy\\b|(^|[^a-z])(eval|replay)([^a-z]|$)", supplementRounds: 2, frozenCloseH: 24, auditAfterMin: 10, auditWindowH: 24, auditLeadH: 6, auditSummaryAt: "Mon 08:30",
     proposalText: "Move {who} to a new session? {signals}. The handover note it would get: {note}{blockers}" },
   stateGit: { dirs: [], everyMin: 10, maxFileKb: 512, timeoutSec: 60, timeZone: "", backup: BACKUP_DEFAULTS },
-  mergeGate: { repos: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
+  mergeGate: { repos: {}, identities: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
   backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", pairRepairPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" },
   supervision: defaultSupervision(),
   instances: [],

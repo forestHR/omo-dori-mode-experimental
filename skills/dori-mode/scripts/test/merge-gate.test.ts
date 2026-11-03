@@ -14,7 +14,8 @@ const B = "b".repeat(40);
 const PR = parsePr("acme/app#7");
 const DIR = "/wt/app";
 
-type Gh = { head: string; checkout: string; state: string; dirtyAfterTests?: boolean; tested?: boolean; statusFails?: boolean; queued?: boolean; viewFailsAfterMerge?: boolean; deleteFails?: boolean; mergeRejects?: boolean; autoMerge?: boolean; diff?: string; prompt?: string; pushDuringReview?: string; noVerdict?: { code: number; out: string; times: number; err?: string }; checks: Record<string, string>[]; testsCode: number; verdict: string; mergedAt: string; calls: string[][] };
+type FakeCommit = { sha: string; subject: string; email?: string; numstat?: string };
+type Gh = { commits?: FakeCommit[]; atHead?: string[]; head: string; checkout: string; state: string; dirtyAfterTests?: boolean; tested?: boolean; statusFails?: boolean; queued?: boolean; viewFailsAfterMerge?: boolean; deleteFails?: boolean; mergeRejects?: boolean; autoMerge?: boolean; diff?: string; prompt?: string; pushDuringReview?: string; noVerdict?: { code: number; out: string; times: number; err?: string }; checks: Record<string, string>[]; testsCode: number; verdict: string; mergedAt: string; calls: string[][] };
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -30,6 +31,12 @@ const runner = (w: Gh): Runner => async (argv) => {
   if (a.startsWith("gh pr view") && w.viewFailsAfterMerge && w.calls.some((c) => c[2] === "merge")) return { code: 1, out: "", err: "HTTP 502" };
   if (a.startsWith("gh pr view")) return ok(JSON.stringify({ state: w.state, headRefOid: w.head, mergedAt: w.mergedAt || null, mergeCommit: w.state === "MERGED" ? { oid: "m".repeat(40) } : null, title: "demo", statusCheckRollup: w.checks, autoMergeRequest: w.autoMerge ? { enabledAt: "2026-11-02T08:00:00Z" } : null }));
   if (a.startsWith("gh pr diff")) return ok(w.diff ?? "diff --git a/x b/x\n+x");
+  const listed = w.commits ?? [{ sha: w.head, subject: "feat: demo" }];
+  if (a.startsWith("gh api --paginate repos/")) return ok(listed.map((c) => `${c.sha}\n`).join(""));
+  const one = listed.find((c) => c.sha === argv.at(-1));
+  if (argv[3] === "log" && one) return ok(`Lane\0${one.email ?? "lane@example.org"}\0Lane\0${one.email ?? "lane@example.org"}\0${"0".repeat(40)}\0${one.subject}\n`);
+  if (argv[3] === "show" && one) return ok(one.numstat ?? "3\t1\tsrc/x.ts\0");
+  if (argv[3] === "ls-tree") return ok((w.atHead ?? ["src/x.ts"]).map((p) => `100644 blob ${"0".repeat(40)}\t${p}\0`).join(""));
   if (a.startsWith("gh pr merge") && argv.includes("--disable-auto")) return ok();
   if (a.startsWith("gh pr merge") && w.mergeRejects) return { code: 1, out: "", err: "GraphQL: Head branch was modified. Review and try the merge again." };
   if (a.startsWith("gh pr merge")) {
@@ -56,11 +63,11 @@ const runner = (w: Gh): Runner => async (argv) => {
   return { code: 127, out: "", err: `unexpected ${a}` };
 };
 
-const deps = (w: Gh, repos: Record<string, string> = {}): FlowDeps => {
+const deps = (w: Gh, repos: Record<string, string> = {}, identities: Record<string, { name: string; email: string }> = {}): FlowDeps => {
   const state = mkdtempSync(join(tmpdir(), "merge-gate-"));
   dirs.push(state);
   const base = defaultConfig(state);
-  const config = { ...base, stateDir: state, watchLog: join(state, "lanes.log"), explore: { ...base.explore, modelsCommand: [], challengeCommand: ["fake-reviewer", "{model}", "{prompt}"] }, mergeGate: { ...base.mergeGate, repos } };
+  const config = { ...base, stateDir: state, watchLog: join(state, "lanes.log"), explore: { ...base.explore, modelsCommand: [], challengeCommand: ["fake-reviewer", "{model}", "{prompt}"] }, mergeGate: { ...base.mergeGate, repos, identities } };
   return { run: runner(w), clock: { now: () => Date.parse("2026-11-02T08:00:00Z"), sleep: async () => {} }, registry: new Registry(state), config };
 };
 
@@ -340,3 +347,38 @@ test("a nonzero exit with empty stderr names its exit code, never its unmasked s
   expect(message).not.toContain("half done");
   expect(readFileSync(kept(message), "utf8")).toBe("half done\napi_key=[masked]");
 });
+
+
+// dori review's commit checks (dori-superagent #44 https://github.com/sisyphuslabs/dori-superagent/pull/44 and #57
+// https://github.com/sisyphuslabs/dori-superagent/issues/57) run before the tests: a refusal runs no test and no reviewer
+test("a source fix with no test is refused before the tests, and takes back an earlier pass at that head", async () => {
+  const w = world();
+  const d = deps(w);
+  await reviewPr(d, PR, { dir: DIR });
+  w.commits = [{ sha: A, subject: "Fix: count" }];
+  const before = w.calls.length;
+  await expect(reviewPr(d, PR, { dir: DIR })).rejects.toThrow(/^REVIEW_CHECKS_FAILED acme\/app#7 head=aaaaaaaaaaaa: fix commit aaaaaaaaaaaa changes source and no commit of the PR adds or changes a test/);
+  expect(w.calls.slice(before).some((c) => c[0] === "bun" || c[0] === "fake-reviewer")).toBe(false);
+  expect(await readReceipt(d.config.stateDir, PR, A, "tests")).toBeUndefined();
+  await expect(mergePr(d, PR)).rejects.toThrow(/^MERGE_REFUSED acme\/app#7 has no local test receipt/);
+});
+
+test("--no-test lets a fix without a test through and its reason is in the tests receipt", async () => {
+  const w = { ...world(), commits: [{ sha: A, subject: "fix: config default" }] };
+  const d = deps(w);
+  const lines = await reviewPr(d, PR, { dir: DIR, noTest: "only a default in config.ts; no behaviour to test" });
+  expect(lines).toContain("FIXTEST_WAIVED fix commit aaaaaaaaaaaa has no test; --no-test: only a default in config.ts; no behaviour to test (kept in the tests receipt)");
+  expect((await readReceipt(d.config.stateDir, PR, A, "tests"))?.waiver).toBe("only a default in config.ts; no behaviour to test");
+});
+
+test("a commit by another identity than the repo's is refused without its address; no entry skips with one line", async () => {
+  const w = { ...world(), commits: [{ sha: A, subject: "feat: x", email: "stranger@corp.io" }] };
+  const d = deps(w, {}, { "Acme/App": { name: "Lane", email: "lane@example.org" } });
+  const failure = (await reviewPr(d, PR, { dir: DIR }).then(() => undefined, (e: unknown) => e)) as Error;
+  expect(failure.message).toStartWith("REVIEW_CHECKS_FAILED acme/app#7 head=aaaaaaaaaaaa: author email st***@co*** (commit aaaaaaaaaaaa) is not the one set for acme/app");
+  expect(failure.message).not.toContain("stranger@corp.io");
+  expect(w.calls.some((c) => c[0] === "bun")).toBe(false);
+  const lines = await reviewPr(deps({ ...world(), commits: w.commits }), PR, { dir: DIR });
+  expect(lines.slice(0, 2)).toEqual(["IDENTITY_SKIP acme/app has no mergeGate.identities entry; commit names and emails are not checked", `CHECKS_OK acme/app#7 head=${A} identity=skipped fix-test=no-fix`]);
+});
+

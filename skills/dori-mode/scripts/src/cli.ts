@@ -228,9 +228,12 @@ const USAGE = `dori <command> [options]
                                        order (best GPT, Claude, Grok); the first that writes a review wins, --all asks one
                                        of each family in turn. Ids this host cannot call are skipped before any call
   challenge --check [<key>]            each reviewer id: REVIEWER_OK (and the id it is called as) or REVIEWER_SKIP and why
-  review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K]
+  review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K] [--no-test "<reason>"]
                                        a review receipt pinned to the PR's head commit: CHECKOUT (default: here) must be
-                                       that head with no changes; mergeGate.testCommand runs there first (TESTS_OK, or
+                                       that head with no changes; the commit checks run first (REVIEW_CHECKS_FAILED: a
+                                       commit's author or committer is not mergeGate.identities[repo], or a fix: commit
+                                       changes source and no commit adds or changes a test; --no-test waives only the
+                                       test rule, its reason kept in the tests receipt); mergeGate.testCommand next (TESTS_OK, or
                                        REVIEW_TESTS_FAILED and no review); then a fresh reviewer of another family than
                                        the lane's model reads the diff and the code and ends with VERDICT: CLEAR|BLOCK
                                        (exit 1 on BLOCK). For repos without CI: a PR with GitHub checks or auto-merge is
@@ -554,7 +557,7 @@ const flags = parseArgs({
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
     "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
-    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
+    "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -1155,11 +1158,12 @@ try {
       break;
     }
     case "review": {
-      const pr = parsePr(key ?? die("usage: dori review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K]"));
+      const pr = parsePr(key ?? die('usage: dori review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K] [--no-test "<reason>"]'));
+      const noTest = flags.values["no-test"] === undefined ? undefined : opt("no-test") || die('--no-test needs a reason: --no-test "<why this fix has no test>"');
       const laneKey = opt("lane");
       const here = laneKey ? "" : await currentTmuxSession(run).catch(() => "");
       const owner = laneKey ? await lane(laneKey) : here ? await deps.registry.byPane(here) : null;
-      const out = await reviewPr(deps, pr, { dir: resolve(many("dir")[0] ?? process.cwd()), model: opt("model"), lane: owner });
+      const out = await reviewPr(deps, pr, { dir: resolve(many("dir")[0] ?? process.cwd()), model: opt("model"), lane: owner, ...(noTest ? { noTest } : {}) });
       for (const line of out) console.log(line);
       if (/ verdict=BLOCK /.test(out.at(-1) ?? "")) process.exit(1);
       break;
