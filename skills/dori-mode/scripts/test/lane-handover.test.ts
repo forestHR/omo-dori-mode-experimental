@@ -2577,3 +2577,51 @@ test("an old-session task that finishes by itself before the new session ends it
   expect(printed.find((l) => l.startsWith("HANDOVER_TASKS_CANCELLED"))).toBeUndefined();
   expect(printed).toContain(`HANDOVER_TASKS_ENDED demo st_01bd9 completed: ended by themselves before the cancel -> ${r.note}`);
 });
+
+test("review 320 round 3: after the holder is gone the run starts over (an interrupted move is repaired first), and a lane another run moved meanwhile is not moved again", async () => {
+  // Given
+  const base = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  let crash = true;
+  const deps: LaneHandoverDeps = { ...base, reportOwner: async () => "msg-1", clock: { ...base.clock, sleep: async () => {
+    if (crash && live.has(77)) writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid: 77, at: "2026-10-11T16:34:00Z", from: OLD, to: NEW, note: "n" }));
+    live.delete(77);
+    simulate();
+  } } };
+  mkdirSync(lanes, { recursive: true });
+  const lock = () => { writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" })); live.add(77); };
+  // When: the holder opened a new session and died while this run waited
+  lock();
+  const repaired = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  // another run that waited beside this one moved the lane while this one waited (plan challenge 2026-11-03 14:24Z)
+  crash = false;
+  rmSync(pendingFile(state.dir, "demo"), { force: true });
+  const moves = () => w.calls.filter((c) => c[0] === "aoe" && c[1] === "add").length;
+  const before = moves();
+  lock();
+  const moving: LaneHandoverDeps = { ...deps, clock: { ...base.clock, sleep: async () => { if (live.has(77)) { await base.registry.patch("demo", { pane: "aoe_demo_moved_1" }); live.delete(77); } simulate(); } } };
+  const other = await laneHandover(moving, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  // Then
+  expect(repaired.code).toBe(3);
+  expect(printed.some((l) => l.startsWith("HANDOVER_INTERRUPTED demo: "))).toBe(true);
+  expect(other.code).toBe(0);
+  expect(printed.at(-1)).toBe("HANDOVER_ALREADY_MOVED demo: the lane moved from aoe_demo_1a1a1a1a to aoe_demo_moved_1 while this run waited; it is not moved again");
+  expect(moves()).toBe(before);
+});
+
+test("review 320 round 3: a request that keeps coming back busy past readyMin is told to the lead once and goes on", async () => {
+  // Given
+  const base = await setup();
+  const T0 = Date.parse("2026-10-11T16:35:00Z");
+  const clock = fakeClock(T0);
+  const deps = { ...base, clock, config: { ...base.config, handover: { ...base.config.handover, readyMin: 30 } } };
+  const resumes: string[] = [];
+  const hooks = { signals: async () => ({}), alive: () => false, resume: async (key: string) => { resumes.push(key); return { started: true, line: "unit=u" }; } };
+  const busy = (min: number) => appendRollover(state.dir, { kind: "rollover", who: "lane", at: new Date(T0 + min * 60_000).toISOString(), key: "demo", from: OLD, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "refused", reasons: ["x"], blocked: "busy", request: {} });
+  const tick = async (min: number) => { clock.at = T0 + min * 60_000; await deps.registry.patch("demo", { lastReplyAt: clock.at }); await freshnessTick(deps, "/home/test", hooks); };
+  // When
+  for (const m of [0, 21, 42, 63]) { busy(m); await tick(m + 1); }
+  // Then
+  expect(resumes).toHaveLength(4);
+  expect(sent(w).filter((x) => x.startsWith("[DORI] demo: the handover you asked for") && x.includes("stayed busy"))).toHaveLength(1);
+});

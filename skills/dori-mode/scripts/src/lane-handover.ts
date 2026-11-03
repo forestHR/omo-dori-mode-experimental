@@ -608,6 +608,15 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   if (holder) {
     const stop = await handOver(deps, key, holder, opts, at, emit);
     if (stop) return stop;
+    // the holder is gone. The request is for the session this run found in the lane's pane: one that moved meanwhile (another
+    // run that waited beside this one moved it) is not moved again (plan challenge, review 320). Else start over, so an
+    // interrupted move the holder left (its pending journal) is repaired first and the registry is read again.
+    const now = (await deps.registry.read(key))?.pane;
+    if (now && now !== lane.pane) {
+      emit(`HANDOVER_ALREADY_MOVED ${key}: the lane moved from ${lane.pane} to ${now} while this run waited; it is not moved again`);
+      return { code: 0, to: now };
+    }
+    return attempt(deps, key, here, opts, granted);
   }
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
   if (!old) return refuse(`no live session for pane ${lane.pane}`);

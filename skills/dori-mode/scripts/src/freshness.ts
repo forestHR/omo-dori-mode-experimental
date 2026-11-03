@@ -319,7 +319,7 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
     const lead = deps.config.leadPane;
     const text = `[DORI] ${key}: the handover you asked for at ${since} still waits: the lane has not marked ready and the work it named still runs (${named.join(", ")}). It starts by itself once either happens; to move it now, run dori handover --lane ${key} --approved-by "<the same approval>" --force (that work then ends).`;
     const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, text) : false;
-    writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, result: "waiting", toldAt: new Date(now).toISOString() })}\n`);
+    writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, result: "waiting", ...(told || !lead ? { toldAt: new Date(now).toISOString() } : {}) })}\n`);
     return log(`HANDOVER_PENDING_STALE ${key} waiting: the request of ${since} (refused ${asked.blocked}) still waits after ${min} min; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
   }
   // a refusal logged before its options were kept (no request) is not started again: it could drop --keep-old and close
@@ -328,7 +328,7 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
   const why = !asked.request ? "the request was logged before its options were kept, so a start now could drop them (--keep-old, --note, --model)" : stale ? `the ready mark is older than ${min} min` : "";
   // the lead hears of one stale mark once
   if (stale && claim?.request === asked.at && claim.result === "stale-mark" && claim.readyAt === mark?.at) return [];
-  writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, at: new Date(now).toISOString(), ...(readied ? { readyAt: mark?.at } : {}), result: stale ? "stale-mark" : why ? "skipped" : "started" })}\n`);
+  writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, at: new Date(now).toISOString(), ...(readied ? { readyAt: mark?.at } : {}), ...(claim?.toldAt && claim.since === since ? { toldAt: claim.toldAt } : {}), result: stale ? "stale-mark" : why ? "skipped" : "started" })}\n`);
   const cause = asked.blocked === "busy" ? "the lane was busy; the run waits for its idle moment" : readied ? `the ready mark of ${mark?.at} in ${pane} follows it` : `the work it named ended (${named.join(", ")})`;
   if (why) {
     const lead = deps.config.leadPane;
@@ -337,6 +337,15 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
       : `[DORI] ${key}: the handover you asked for at ${asked.at} was refused (${asked.blocked}), but that request was logged before its options were kept, so it was not started again. Run dori handover --lane ${key} again with the same approval and options now.`;
     const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, text) : false;
     return log(`HANDOVER_READY_RESUME_SKIPPED ${key} skipped: ${readied ? `the ready mark of ${mark?.at} in ${pane} follows the request of ${asked.at}` : `the request of ${asked.at}`} (refused ${asked.blocked}), not started again: ${why}; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
+  }
+  // a request still waiting readyMin after it was first asked is told to the lead once, a busy one too (review 320)
+  const toldAt = claim?.toldAt && (claim.request === asked.at || claim.since === since) ? claim.toldAt : undefined;
+  if (!toldAt && now - Date.parse(since) > min * 60_000) {
+    const lead = deps.config.leadPane;
+    const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, `[DORI] ${key}: the handover you asked for at ${since} still waits: the lane stayed busy (${asked.blocked}). It goes on starting by itself at the lane's idle moment; to move it now, run dori handover --lane ${key} --approved-by "<the same approval>" --force.`) : false;
+    watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line: `HANDOVER_PENDING_STALE ${key} waiting: the request of ${since} (refused ${asked.blocked}) still waits after ${min} min; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : "lead not told"}` });
+    // kept only once the lead got it (or there is no lead to tell): a note that did not arrive goes again next sweep
+    if (told || !lead) writeFileSync(claimed, `${JSON.stringify({ ...readJson<object>(claimed), toldAt: new Date(now).toISOString() })}\n`);
   }
   const r = await hooks.resume(key, by, asked.request ?? {});
   if (!r.started) writeFileSync(claimed, `${JSON.stringify({ request: "", since, approvedBy: by, result: "started" })}\n`);
