@@ -708,6 +708,17 @@ def thread_status(outcome: str) -> str | None:
             "실행 실패": "❗"}.get(outcome)
 
 
+def grantee(body: bytes) -> str:
+    """Who a Drive permission body grants to (address, domain or "anyone"); "" when it cannot be read."""
+    try:
+        data = json.loads(body or b"{}")
+    except ValueError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("emailAddress") or data.get("domain") or data.get("type") or "").lower()
+
+
 def bare_thread_name(name: str) -> str:
     """The name without any leading mark: "✅ ❗ 실패 · 🔐 x" and "🔔 🔐 x" both give "🔐 x"."""
     while True:
@@ -1798,7 +1809,7 @@ class Gate:
         thread = next((str(e["thread"]) for e in self.pending() if e.get("owner_message") == proof
                        and e.get("status", "pending") == "pending" and e.get("thread") and str(e["thread"]) != channel), "")
         thread = thread or await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
-        await self.supersede(thread, api, op, path, method, title)
+        await self.supersede(thread, api, op, path, method, title, body)
         # Owner 2026-10-19 00:00 KST: the card shows who, what and the reactions; the reason,
         # the owner-message link and the expiry stay in the pending record.
         content = (f"승인 필요 · {CARD_KIND.get(api, api)}\n"
@@ -1866,13 +1877,18 @@ class Gate:
         print("GATE_CARD_THREAD_FALLBACK", file=sys.stderr, flush=True)
         return channel
 
-    async def supersede(self, thread, api, op, path, method, title) -> None:
-        """A newer card for the same work in the same thread replaces the older undecided one."""
+    async def supersede(self, thread, api, op, path, method, title, body=b"") -> None:
+        """A newer card for the same work in the same thread replaces the older undecided one.
+
+        A sharing grant is the same work only for the same grantee: one owner message may share one file with two
+        people, and since its cards share one thread (Q474) the second must not replace the first."""
         async with self.approval_lock:
             for entry in self.pending():
                 if (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
                         or entry.get("path") != path or entry.get("status") != "pending"
-                        or method == "POST" and entry.get("title") != title):
+                        or method == "POST" and entry.get("title") != title
+                        or method == "POST" and path.endswith("/permissions")
+                        and grantee(base64.b64decode(entry.get("body") or "")) != grantee(body)):
                     continue
                 base = f"/channels/{entry['channel']}/messages/{entry['message']}"
                 if await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅"):
@@ -2052,8 +2068,10 @@ class Gate:
         waiting = {e.get("thread") for e in self.pending()}
         for info in json_object(body).get("threads", []):
             thread = str(info.get("id", ""))
-            if (str(info.get("parent_id")) != channel or thread in waiting
-                    or not bare_thread_name(str(info.get("name") or "")).startswith("🔐 ")):
+            name = str(info.get("name") or "")
+            # a decided thread someone reopened keeps its title; only a still-undecided "🔔 🔐 …" (or old "🔐 …") is swept
+            if (str(info.get("parent_id")) != channel or thread in waiting or decided_name(name)
+                    or not bare_thread_name(name).startswith("🔐 ")):
                 continue
             status, _, body = await self.bot_call("GET", f"/channels/{thread}/messages?limit=50")
             messages = json.loads(body) if 200 <= status < 300 else []

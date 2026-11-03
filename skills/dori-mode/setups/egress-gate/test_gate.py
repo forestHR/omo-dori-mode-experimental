@@ -765,6 +765,29 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.thread_patches, [("100", {"name": "⛔ 🔐 일정 초대 · Old",
                                                          "archived": True})])
 
+    async def test_two_grants_of_one_file_from_one_message_share_a_thread_and_both_wait(self):
+        self.approval()
+        for who in ("partner@example.net", "second@example.net"):
+            status, _ = await self.request(path="/www.googleapis.com/drive/v3/files/f/permissions", origin="30/100",
+                                           data={"type": "user", "role": "reader", "emailAddress": who})
+            self.assertEqual(status, 202)
+        self.assertEqual(len(self.service.pending()), 2)
+        self.assertEqual(len(self.thread_names), 1)
+        # the same grant asked again is still the same work: it replaces the older card
+        await self.request(path="/www.googleapis.com/drive/v3/files/f/permissions", origin="30/100",
+                           data={"type": "user", "role": "reader", "emailAddress": "second@example.net"})
+        self.assertEqual(len(self.service.pending()), 2)
+
+    async def test_the_start_sweep_leaves_a_reopened_decided_thread_alone(self):
+        self.approval()
+        await self.request(data={"summary": "Old", "attendees": [{"email": "outside@example.net"}]})
+        self.approve(emoji="⛔")
+        with patch.object(self.service, "close_card_thread", lambda *a: asyncio.sleep(0)):
+            await self.service.poll_approvals()
+        self.thread_meta["100"] = {**self.thread_meta.get("100", {}), "name": "⛔ 🔐 일정 초대 · Old"}
+        await self.service.close_decided_threads()
+        self.assertEqual(self.thread_patches, [])
+
     async def test_tampered_card_never_executes_or_edits(self):
         self.approval()
         await self.request(data={"attendees": [{"email": "outside@example.net"}]})
