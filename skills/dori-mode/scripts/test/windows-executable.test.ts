@@ -54,7 +54,7 @@ test.each(programs)("review 3 type keeps omo safety checks for %s", async (progr
   expect(sent(world)).toEqual([]);
 });
 
-test.each(programs)("native configuration %s follows platform handover policy", async (program) => {
+test.each(programs)("native configuration %s passes handover preflight and writes its note", async (program) => {
   // Given a live lane, its process table and a native executable configuration.
   const brief = join(dir, "brief.md");
   writeFileSync(brief, "# Native handover\n");
@@ -67,8 +67,7 @@ test.each(programs)("native configuration %s follows platform handover policy", 
   };
   // When the public handover preflight runs.
   const result = await laneHandover(deps, "native", "w0:p0", { dryRun: true });
-  // Then Linux accepts the executable, while Windows refuses before writing a note.
-  expect(result.code).toBe(process.platform === "win32" ? 2 : 0);
-  if (process.platform === "win32") expect(result.note).toBeUndefined();
-  else expect(await Bun.file(result.note ?? "").exists()).toBe(true);
+  // Then both platforms accept the executable and produce a note for the proposed handover.
+  expect(result.code).toBe(0);
+  expect(await Bun.file(result.note ?? "").exists()).toBe(true);
 });

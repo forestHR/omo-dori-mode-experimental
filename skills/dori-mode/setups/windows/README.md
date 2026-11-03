@@ -4,7 +4,7 @@ This setup adds installation, skill discovery, `dori serve` and Task Scheduler t
 
 Herdr panes must use **pwsh 7.3 or newer**, not Windows PowerShell 5.1. Point herdr's shell setting at the installed `pwsh.exe`. Dori checks the actual pane shell and version and refuses unsupported shells with `HERDR_SHELL_UNSUPPORTED`; standard native argument passing preserves empty arguments and embedded quotes.
 
-Windows freeze, thaw and handover are not supported yet. They refuse without changing processes or records. Close the old lane and use `dori launch` to create a replacement instead. For a lead, open a new herdr pane, start `omo`, and update `leadPane` in the configuration.
+Lead and lane handovers freeze the old agent on Windows too: `NtSuspendProcess` / `NtResumeProcess` through `bun:ffi`, the agent once and then its children, thawed children first. Process discovery reports an agent whose threads are all suspended as stopped (`Get-Process` thread states; `Win32_Process` shows no suspension), so a send during a handover types neither text nor Enter, also from another invocation before the replacement record exists. A handover that must run detached from the agent it freezes is refused on Windows for now (`HANDOVER_DETACH_UNSUPPORTED`): the lead's handover from its own pane, automatic rollovers, the resume after a lane marks ready, and the audit after a commit. Run `dori handover` or `dori handover --lane <key>` from another herdr pane instead.
 
 ## Install
 
@@ -65,4 +65,4 @@ There are no automatic push or PR checks. From this repository, run the workflow
 gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref <branch>
 ```
 
-The suite executes native PowerShell quoting, process/session discovery, handover refusals, installer and launcher behavior, real agent skill discovery from outside the checkout, and registered Task Scheduler settings. POSIX fixtures remain in the full Linux suite.
+The suite executes native PowerShell quoting, process/session discovery, handover freeze and thaw, installer and launcher behavior, real agent skill discovery from outside the checkout, and registered Task Scheduler settings. POSIX fixtures remain in the full Linux suite.
