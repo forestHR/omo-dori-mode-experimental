@@ -279,6 +279,56 @@ test("a lane that does not take the lead notice is kept for the freshness retry 
   expect(JSON.parse(readFileSync(join(state.dir, "handover", "lane-tells.json"), "utf8"))).toEqual({ demo: { pane: "aoe_demo_12345678", lead: NEW, at: "2026-10-11T16:35:00.000Z", tries: 1 } });
 });
 
+for (const exitsOn of ["SIGTERM", "SIGKILL", "never"] as const) {
+  test(`ends old monitor chains before freezing the committed lead when the monitor exits on ${exitsOn}`, async () => {
+    // Given: the manifest's monitor owns a shell tree beneath the old lead's agent.
+    const base = await setup();
+    let table = [...TREE];
+    writeManifest("old-sid", [monitor("inbox", INBOX_CMD, { runtime: { pid: 12 } })]);
+    live.add(12);
+    const committed: boolean[] = [];
+    const deps: HandoverDeps = {
+      ...base,
+      procs: async () => table,
+      signal: (pid, sig) => {
+        if (pid === -12) {
+          committed.push(leadPaneInConfig() === NEW && new QuestionStore(base.cardDir).get("Q1")?.session === "new-sid");
+          if (sig === exitsOn) table = table.filter((p) => p.pid !== 12 && p.pid !== 13);
+        }
+        return base.signal(pid, sig);
+      },
+    };
+    // When
+    const result = await handover(deps, { approvedBy: APPROVED, title: "lead2" });
+    // Then: the process group ends after commit, before the agent and remaining children stop.
+    expect(result).toMatchObject({ code: 0, to: NEW });
+    expect(committed).toEqual(exitsOn === "SIGTERM" ? [true] : [true, true]);
+    expect(sigs).toEqual([
+      "SIGTERM -12",
+      ...(exitsOn === "SIGTERM" ? [] : ["SIGKILL -12"]),
+      "SIGSTOP 11",
+      ...(exitsOn === "never" ? ["SIGSTOP 12", "SIGSTOP 13"] : []),
+    ]);
+    expect(readFrozen(state.dir)).toMatchObject([{ agentPid: 11, pids: exitsOn === "never" ? [11, 12, 13] : [11] }]);
+    expect(printed).toContain(`HANDOVER_OLD_MONITORS_ENDED ${exitsOn === "never" ? "0 ()" : "1 (12)"}`);
+    expect(printed.some((line) => line.startsWith("HANDOVER_OLD_MONITORS_END_FAIL"))).toBe(exitsOn === "never");
+  });
+}
+
+test("leaves old monitor chains running when lead verification rolls back", async () => {
+  // Given
+  const deps = await setup();
+  writeManifest("old-sid", [monitor("inbox", INBOX_CMD, { runtime: { pid: 12 } })]);
+  live.add(12);
+  sim.ackInbox = false;
+  // When
+  const result = await handover(deps, { approvedBy: APPROVED, title: "lead2", verifyMin: 1 });
+  // Then
+  expect(result.code).toBe(3);
+  expect(leadPaneInConfig()).toBe(OLD);
+  expect(sigs).toEqual([]);
+});
+
 test("writes channel scope when sending the inbox probe", async () => {
   // Given
   const deps = await setup();

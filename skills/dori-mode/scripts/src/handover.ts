@@ -8,8 +8,9 @@ import { captureTmux, closeAoeSession, inputLine, isClosedLine, laneEnv, liveSes
 import { strayTasks, taskRecords } from "./background.ts";
 import { type HandoverWatcher } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
-import { type FreezeDeps, type FrozenRecord, freezePane, writeFrozen } from "./frozen.ts";
+import { type FreezeDeps, type FrozenRecord, type Sig, freezePane, writeFrozen } from "./frozen.ts";
 import { pointInstanceAlerts } from "./handover-alerts.ts";
+import { endOldMonitors } from "./handover-monitors.ts";
 import { leadMovedText, noteLaneTell } from "./lane-tells.ts";
 import { compactionStuckOn } from "./lane-handover.ts";
 import { awaitPrompt } from "./launch.ts";
@@ -25,7 +26,8 @@ import { appendRollover, approvalProblem, autoReason, type Candidate, clearQuiet
 import { turnRunning } from "./submit.ts";
 import { watchLog } from "./watch-log.ts";
 
-export type HandoverDeps = FlowDeps & Pick<FreezeDeps, "procs" | "signal"> & {
+export type HandoverDeps = FlowDeps & Pick<FreezeDeps, "procs"> & {
+  readonly signal: (pid: number, sig: Sig | "SIGTERM" | "SIGKILL") => boolean;
   readonly configPath: string;
   readonly envPath: string;
   readonly cardDir: string;
@@ -906,6 +908,7 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
   // A rolled-back move never gets here, and before this point it was only told to stay quiet.
   // work a monitor of the old lead started goes on: those monitors are not stopped, and the session closes once it ended
   const work = facts.from.session ? monitorWork(readManifest(manifestPath(config.sessionsDir, facts.from.cwd, facts.from.session)), await deps.procs(), deps.clock.now(), deps.alive, deps.home) : [];
+  for (const line of await endOldMonitors(deps, facts, work.map((j) => j.pid))) emit(line);
   const ice = await freezePane(deps, config.leadPane, process.pid, work.map((j) => j.pid)).catch((e: unknown) => ({ pids: [] as number[], agentPid: undefined, why: e instanceof Error ? e.message : String(e) }));
   mark("freeze", !!ice.agentPid);
   if (ice.agentPid) {

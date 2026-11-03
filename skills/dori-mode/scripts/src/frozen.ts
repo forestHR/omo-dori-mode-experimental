@@ -96,6 +96,7 @@ export const freezePane = async (deps: FreezeDeps, pane: string, self: number, s
 const resume = (deps: Pick<FreezeDeps, "signal">, rec: FrozenRecord): number => [...rec.pids].reverse().filter((p) => deps.signal(p, "SIGCONT")).length;
 
 export const thawFrozen = (deps: Pick<FreezeDeps, "signal">, stateDir: string, pane: string): string => {
+  // Thaw does not restore ended monitors: the new lead already owns their replacements.
   const rec = readFrozen(stateDir).find((r) => r.pane === pane);
   if (!rec) return `FROZEN_NONE ${pane}: no frozen session recorded for this pane (dori handover frozen lists them)`;
   const n = resume(deps, rec);
