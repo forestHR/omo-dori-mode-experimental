@@ -411,7 +411,7 @@ export const renderLaneNote = (f: LaneFacts, at: string, stateDir: string): stri
   "",
   "## Do this first",
   "1. Arm every monitor under Monitors again as a persistent monitor, with the same command and filter; one marked LAUNCHES_WORK gets the watch-only monitor its line describes instead, never its own command (its work still runs under the old session or already ended). Take each command, filter and description from its line under Monitors, where they are JSON strings: put them into the tool call as they are (a JSON string is a valid JS string), not retyped and not from the conversation summary, where a copy can differ. Arm each one once, all in one call, and print only how many armed and the ones that failed: each monitor's full reply is context the new session carries to its end.",
-  `2. A [LEAD] line with ${PROBE} <id> is a check of this handover. Before you answer it, read this whole note and your brief, then write what you understood to the file the line names, under the headings ${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")} (under Goal and Owner's words, the owner's goal and words quoted exactly as the note gives them; under Questions, only what neither the note nor the old log answers after you searched it, or none). The handover already wrote into that file, word for word, the owner's goal and quotes, the summary's decisions and the tried fixes: keep those lines as they are (do not translate, shorten or merge them), add what you understood below them, and write ## ${LANE_OWN.join(" and ## ")} yourself. Then run the dori handover ack command it gives (with its --state) and nothing else for that line. A [LEAD] HANDOVER_SUPPLEMENT <id> line names a file with what your restatement left out and the old log lines behind it: add those items to the same file, keep the rest, and run the ack command it gives.`,
+  `2. A [LEAD] line with ${PROBE} <id> is a check of this handover: read this whole note and your brief first, then run the dori handover ack command it gives (with its --state) and nothing else for that line. A [LEAD] HANDOVER_SUPPLEMENT <id> line comes from the audit after the commit: it names a file with what you were missing and the old log lines behind it; write those items into the file it names (create it if it is not there) and run the ack command it gives.`,
   `3. Read your brief ${f.lane.brief} in full. It still holds: same Done, same footer, and reports still go to the lead.`,
   `4. Until a [LEAD] ${COMMITTED} line arrives, do nothing else: change no file, start no process besides the monitors of step 1, post nothing. Until then the handover can still roll back and close this session.`,
   `5. After ${COMMITTED}: ${f.goal ? "register the goal under Goal again with your goal tool, same objective, and rebuild the todo list from Todos." : "rebuild the todo list from Todos."} Then continue the work from where Last reports and the lane's notes leave it. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you find later that the old session knew something this note did not carry and it cost you (you had to ask, redo or guess), run dori handover gap ${f.lane.key} --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>" and tell the lead.`,
@@ -776,15 +776,15 @@ const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string
   if (reasons.length) return { reasons, session, ...(shown.account ? { account: shown.account } : {}) };
   emit(`HANDOVER_STATUS_OK ${pane} ${shown.model}${shown.thinking ? ` thinking ${shown.thinking}` : ""}`);
   if (facts.monitors.length) emit(`HANDOVER_MONITORS_OK ${facts.monitors.length} in ${pane} (session ${session})`);
-  // what the handover holds goes into the restatement before the new session writes, word for word, so it starts there
-  // instead of coming back in supplement rounds
-  if (!existsSync(understood)) writeFileSync(understood, seedRestatement(`${facts.lane.key}: what the new session understood`, UNDERSTOOD_HEADINGS, LANE_OWN, (t) => missingFrom(t, facts)));
+  // No restatement before the commit (owner Q476, 2026-11-03: since the note carries the owner's words word for word, 19
+  // handovers needed no supplement round, while the rewrite held the lane up to two minutes): the probe asks only for the
+  // ack, which shows the new session reads its pane and runs dori; the audit after the commit still checks what it holds.
   // the probe goes in once the new session's first turn (reading the note) has ended: typed into a running turn it is a
   // steering line among tool results, which a session read as the last line of the note and held (herdr QA 2026-11-03)
   for (; i < tries && turnRunning(await captureTmux(deps.run, pane)); i++) await deps.clock.sleep(POLL_MS);
   if (i >= tries) return { reasons: [`the first turn of ${pane} was still running after the verify time; the probe was not sent`], session };
   const id = deps.nonce();
-  if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: write what you understood to ${understood} (${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds the note's quotes, decisions and tried fixes word for word: keep them, add yours), then run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
+  if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: once you have read the whole handover note, run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
   emit(`HANDOVER_PROBE_SENT ${id} -> ${pane}`);
   let by: string | undefined;
   for (; i < tries; i++) {
@@ -794,21 +794,12 @@ const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string
   }
   if (by === undefined) return { reasons: [`no ack for the probe ${id}`], session };
   if (by !== pane) return { reasons: [`the probe was acked from ${by || "an unknown pane"}, not ${pane}`], session };
-  // the new session says what it understood: a gap shows before the old session is gone. A gap is filled in, not rolled
-  // back: the left-out items go to it with the old log lines behind them and it restates; only a gap that outlasts the
-  // supplement rounds rolls back (it no longer takes in what it is given)
-  const gaps = await fillGaps({ clock: deps.clock, stateDir: deps.config.stateDir, nonce: deps.nonce, tell: (to, line) => tell(deps, to, line), ackedBy: (id) => ackedBy(deps.config.stateDir, id) },
-    { who: facts.lane.key, pane, understood, headings: UNDERSTOOD_HEADINGS, rounds: deps.config.handover.supplementRounds, oldLog: facts.oldLog, check: (t) => missingFrom(t, facts), emit });
-  const { supplements, text } = gaps;
-  if (gaps.reasons.length) return { reasons: gaps.reasons, session, supplements };
   // checked again before the old session goes: a monitor that ran at the first check can end before the move commits (a
   // remote tail whose ssh dropped with code 255 after its first lines, live 2026-10-20 23:51Z), and a new session is not
   // told when a monitor ends
   const stopped = facts.monitors.length ? missingMonitors(facts.monitors, readManifest(manifestPath(deps.config.sessionsDir, facts.cwd, session)), deps.alive, deps.home, deps.clock.now()) : [];
-  if (stopped.length) return { reasons: [`monitors stopped in ${pane} after the first check: ${stopped.join(", ")}`], session, supplements };
-  const asks = section(text, "Questions");
-  if (asks && !/^none\.?$/i.test(asks)) emit(`HANDOVER_QUESTIONS ${facts.lane.key}: ${asks.replace(/\s+/g, " ").slice(0, 400)} (the lead answers them in the new pane; the old log is ${facts.oldLog ?? "not found"})`);
-  return { reasons: [], session, supplements, ...(shown.account ? { account: shown.account } : {}) };
+  if (stopped.length) return { reasons: [`monitors stopped in ${pane} after the first check: ${stopped.join(", ")}`], session };
+  return { reasons: [], session, ...(shown.account ? { account: shown.account } : {}) };
 };
 
 // Only once the old session's local chains are gone may the new session restart them: two copies of one chain would run

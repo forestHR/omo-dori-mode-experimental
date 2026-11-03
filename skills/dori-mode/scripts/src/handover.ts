@@ -491,7 +491,7 @@ export const renderNote = (f: HandoverFacts, at: string): string => [
   "## Do this first",
   "1. Arm every monitor under Monitors again as a persistent monitor, with the same command and filter; one marked LAUNCHES_WORK gets the watch-only monitor its line describes instead, never its own command. Take each command, filter and description from its line under Monitors, where they are JSON strings: put them into the tool call as they are (a JSON string is a valid JS string), not retyped and not from the conversation summary, where a copy can differ. Arm each one once. Start each watcher under Watchers that says how. The handover checks that the monitors run in this session and runs each watcher's check.",
   `2. A line with ${PROBE} <id>, typed into this session or arriving as an inbox event, is a check of this handover: run the dori handover ack command the line gives (with its --state) and nothing else.`,
-  `3. A [LEAD] ${UNDERSTAND} <id> line asks what you understood. Read this whole note first, then write it to the file the line names, under the headings ${LEAD_UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}: under Goal the old session's goal quoted; under Owner's words each of the owner's recent messages and each quote in the old lead's notes, quoted exactly; under Open lanes every lane key of the table with what it waits on; under Open work each todo; under Open cards each card id with its question; under Timers each timer's unit name; under Promised follow-ups what the old lead promised the owner; under Questions only what neither this note nor the old log answers, or none. The handover already wrote into that file, word for word, what its records and the old lead's notes hold under those headings: keep those lines as they are (do not translate, shorten or merge them), add what you understood below them, and write ## ${LEAD_OWN.join(" and ## ")} yourself. Then run the ack command the line gives. A [LEAD] HANDOVER_SUPPLEMENT <id> line names a file with what your restatement left out and the old log lines behind it: add those items to the same file, keep the rest, and run the ack command it gives.`,
+  `3. A [LEAD] HANDOVER_SUPPLEMENT <id> line comes from the audit after the commit: it names a file with what you were missing and the old log lines behind it; write those items into the file it names (create it if it is not there), keep them in mind as the note's, and run the ack command it gives. No restatement is asked before the commit.`,
   `4. Until a [LEAD] ${COMMITTED} line arrives answer no one, act on no event and change nothing besides that file: the handover can still roll back. The old session stays quiet meanwhile and is closed once the checks pass.`,
   `5. After ${COMMITTED}, carry on: open lanes, owner questions, todos, timers, promised follow-ups and the old lead's notes; answer the owner where his last messages left off. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you or a lane find later that an old session knew something its handover did not carry and it cost something (asking again, redoing, guessing), run dori handover gap <lane key or lead> --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>".`,
   "",
@@ -658,32 +658,13 @@ const verify = async (deps: HandoverDeps, facts: HandoverFacts, to: Target, veri
     await deps.clock.sleep(POLL_MS);
   }
   if (problems.length) return { reasons: problems, session };
-  // the new lead says what it understood before the old one is gone: a gap is filled in from the records and the old
-  // log for supplementRounds rounds, and only a gap that outlasts them rolls the move back
-  // what the handover holds goes into the restatement before the new lead writes, word for word, so it starts there
-  // instead of coming back in supplement rounds
-  if (!existsSync(understood)) writeFileSync(understood, seedRestatement("lead: what the new session understood", LEAD_UNDERSTOOD_HEADINGS, LEAD_OWN, (t) => missingLeadFrom(t, facts)));
-  const id = deps.nonce();
-  if (!(await sendVerified(deps.run, deps.clock, deps.config, to.pane, `[LEAD] ${UNDERSTAND} ${id}: write what you understood to ${understood} (${LEAD_UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds what the handover carried word for word: keep it, add yours) as step 3 of the handover note says, then run ${ack(id)} and nothing else for this line.`)))
-    return { reasons: [`the restatement request did not reach ${to.pane}`], session };
-  emit(`${UNDERSTAND}_SENT ${id} -> ${to.pane}`);
-  let by: string | undefined;
-  for (let j = 0; j < Math.max(tries - i, ROUND_TRIES) && by === undefined; j++) {
-    await deps.clock.sleep(POLL_MS);
-    by = ackedBy(deps.config.stateDir, id);
-  }
-  if (by === undefined) return { reasons: [`no ack for the restatement request ${id}`], session };
-  if (by !== to.pane) return { reasons: [`the restatement request was acked from ${by || "an unknown pane"}, not ${to.pane}`], session };
-  const gaps = await fillGaps({ clock: deps.clock, stateDir: deps.config.stateDir, nonce: deps.nonce, tell: (pane, text) => sendVerified(deps.run, deps.clock, deps.config, pane, text).catch(() => false), ackedBy: (x) => ackedBy(deps.config.stateDir, x) },
-    { who: "lead", pane: to.pane, understood, headings: LEAD_UNDERSTOOD_HEADINGS, rounds: deps.config.handover.supplementRounds, oldLog: facts.oldLog, check: (text) => missingLeadFrom(text, facts), emit });
-  if (gaps.reasons.length) return { reasons: gaps.reasons, session, supplements: gaps.supplements };
+  // No restatement before the commit (owner Q476, 2026-11-03): the probes' acks show the new lead reads its pane and its
+  // inbox and runs dori; the note carries the owner's words word for word, and the audit after the commit checks the rest.
   // checked again before the old lead goes: a monitor that ran at the first check can end before the move commits (a
   // remote tail whose ssh dropped), and a new session is not told when a monitor ends
   const stopped = facts.monitors.length ? missingMonitors(facts.monitors, readManifest(manifestPath(deps.config.sessionsDir, facts.cwd, session)), deps.alive, deps.home, deps.clock.now()) : [];
-  if (stopped.length) return { reasons: [`monitors stopped in ${to.pane} after the first check: ${stopped.join(", ")}`], session, supplements: gaps.supplements };
-  const asks = section(gaps.text, "Questions");
-  if (asks && !/^none\.?$/i.test(asks)) emit(`HANDOVER_QUESTIONS lead: ${asks.replace(/\s+/g, " ").slice(0, 400)} (the old log is ${facts.oldLog ?? "not found"})`);
-  return { reasons: [], session, supplements: gaps.supplements };
+  if (stopped.length) return { reasons: [`monitors stopped in ${to.pane} after the first check: ${stopped.join(", ")}`], session };
+  return { reasons: [], session };
 };
 
 export type HandoverResult = { readonly code: number; readonly note?: string; readonly to?: string };

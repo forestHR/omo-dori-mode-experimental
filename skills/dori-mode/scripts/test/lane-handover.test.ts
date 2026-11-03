@@ -404,7 +404,7 @@ test("moves the lane: same cwd, model and thinking, registry and cards repointed
   expect(new QuestionStore(join(state.dir, "discord")).get("Q1")).toMatchObject({ tmux: NEW });
   expect(printed).toContain(`HANDOVER_STATUS_OK ${NEW} claude-opus-5-5 thinking high`);
   expect(printed).toContain(`HANDOVER_MONITORS_OK 2 in ${NEW} (session new-sid)`);
-  const probeAt = w.calls.findIndex((c) => c[1] === "send-keys" && c.includes(`=${NEW}:`) && (c.at(-1) ?? "").startsWith("[LEAD] HANDOVER_PROBE n1: write what you understood to"));
+  const probeAt = w.calls.findIndex((c) => c[1] === "send-keys" && c.includes(`=${NEW}:`) && (c.at(-1) ?? "").startsWith("[LEAD] HANDOVER_PROBE n1: once you have read the whole handover note, run dori handover ack n1"));
   const stopAt = w.calls.findIndex((c) => c[0] === "aoe" && c[1] === "session" && c[2] === "stop" && c[3] === OLD_ID);
   expect(probeAt).toBeGreaterThan(-1);
   expect(stopAt).toBeGreaterThan(probeAt);
@@ -429,8 +429,8 @@ test("moves the lane: same cwd, model and thinking, registry and cards repointed
   expect(firstAt).toBeGreaterThan(-1);
   expect(printed).toContain(`HANDOVER_FROZEN demo agent 11 in ${OLD}`);
   expect(printed.indexOf("HANDOVER_THAWED demo agent 11")).toBeGreaterThan(printed.findIndex((l) => l.startsWith("HANDOVER_DONE")));
-  // the new session restated what it understood before the commit
-  expect(printed).toContain(`HANDOVER_UNDERSTOOD ${(r.note ?? "").replace(/\.md$/, ".understood.md")}`);
+  // no restatement before the commit (owner Q476): the probe ack is enough
+  expect(printed.some((l) => l.startsWith("HANDOVER_UNDERSTOOD") || l.startsWith("HANDOVER_SUPPLEMENT"))).toBe(false);
   expect(note).toContain("## Conversation summary (written by the old session)");
   expect(note).toContain(`Its full log is ${join(sessionDirFor(join(state.dir, "sessions"), CWD), "2026-10-11T10-00-00-000Z_old-sid.jsonl")}`);
 });
@@ -1058,104 +1058,6 @@ test("a chain that outlives the close is not restarted, and a new account is log
   expect(readRollovers(state.dir)[0]).toMatchObject({ accounts: { from: "x", to: "orientpine" } });
 });
 
-test("a tried fix the restatement leaves out is filled in from the fix ledger and the old log, and one supplement round commits; questions go to the lead", async () => {
-  // Given
-  const deps = await setup();
-  ready(deps, [15]);
-  await deps.registry.patch("demo", { fixes: [{ at: "2026-10-11T16:00:00Z", metric: "loss", hypothesis: "lr too high", via: "report" }] });
-  oldSays("the owner: lr too high was already tried, do not retry it");
-  sim.restate = RESTATE.replace("## Questions\nnone", "## Questions\nwhich seed is the baseline?");
-  // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
-  // Then
-  expect(r.code).toBe(0);
-  const note = readFileSync(r.note ?? "", "utf8");
-  expect(note).toContain("## Fix attempts in the old session (1)");
-  expect(note).toContain("- 2026-10-11T16:00:00Z loss / lr too high (report)");
-  expect(printed.find((l) => l.startsWith("HANDOVER_QUESTIONS demo: which seed is the baseline?"))).toBeDefined();
-  const sup = (r.note ?? "").replace(/\.md$/, ".supplement-1.md");
-  expect(printed).toContain(`HANDOVER_SUPPLEMENT demo round 1/2: 1 left out (tried fix: lr too high); ${sup}`);
-  expect(sent(w).some((x) => x.startsWith(`[LEAD] HANDOVER_SUPPLEMENT n2 (round 1/2): your restatement left out 1 item(s). Read ${sup}, add them to`))).toBe(true);
-  const text = readFileSync(sup, "utf8");
-  expect(text).toContain("## 1. tried fix: lr too high");
-  expect(text).toContain('- old log line 2 (user): "the owner: lr too high was already tried, do not retry it"');
-  expect(printed).toContain("HANDOVER_SUPPLEMENT_OK demo after 1 round(s)");
-  expect(sent(w).some((x) => x.startsWith("[LEAD] HANDOVER_COMMITTED"))).toBe(true);
-  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", supplementRounds: 1, supplements: [{ round: 1, items: [{ kind: "tried fix", text: "lr too high" }], evidence: 1, file: sup }] });
-});
-
-test("the owner's words and decisions the restatement leaves out are filled in from the summary, the owner's line quoted from the old log", async () => {
-  // Given
-  const deps = await setup();
-  ready(deps, [15], undefined, OLD, `## Owner's words and constraints\n- Owner: "never restart the sleep chain while an old copy runs"\n## Decisions and why\n- Keep the eval seed fixed at three for every rerun. Why: the owner asked\n## Ruled out\nnone\n## In progress\nE7\n## Next step\ntrain E7\n`);
-  oldSays("never restart the sleep chain while an old copy runs");
-  // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
-  // Then
-  expect(r.code).toBe(0);
-  expect(printed.find((l) => l.startsWith("HANDOVER_SUPPLEMENT demo round 1/2: 2 left out (owner's words: never restart the sleep chain while an old copy runs; decision: Keep the eval seed fixed at three for every rerun.)"))).toBeDefined();
-  const sup = readFileSync((r.note ?? "").replace(/\.md$/, ".supplement-1.md"), "utf8");
-  expect(sup).toContain('- old log line 2 (user): "never restart the sleep chain while an old copy runs"');
-  expect(sup).toContain("Evidence: no matching line in the old log.");
-  const understood = readFileSync((r.note ?? "").replace(/\.md$/, ".understood.md"), "utf8");
-  expect(understood).toContain("never restart the sleep chain while an old copy runs");
-  expect(understood).toContain("Keep the eval seed fixed at three");
-  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", supplementRounds: 1 });
-});
-
-test("the restatement starts with the goal, the owner's words, the decisions and the tried fixes word for word, so a new session that keeps them and adds its own commits without a supplement round", async () => {
-  // Given: a summary with an owner quote and an English decision, a fix in the ledger, and a new session that keeps the
-  // handover's lines and writes only its next step and questions
-  const deps = await setup();
-  ready(deps, [15], undefined, OLD, `## Owner's words and constraints\n- Owner: "never restart the sleep chain while an old copy runs"\n## Decisions and why\n- Keep the eval seed fixed at three for every rerun. Why: the owner asked\n## Ruled out\nnone\n## In progress\nE7\n## Next step\ntrain E7\n`);
-  await deps.registry.patch("demo", { fixes: [{ at: "2026-10-11T16:00:00Z", metric: "loss", hypothesis: "lr too high", via: "report" }] });
-  sim.keepSeed = true;
-  // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
-  // Then
-  expect(r.code).toBe(0);
-  expect(printed.filter((l) => l.startsWith("HANDOVER_SUPPLEMENT"))).toEqual([]);
-  const understood = readFileSync((r.note ?? "").replace(/\.md$/, ".understood.md"), "utf8");
-  expect(understood).toContain('## Goal\n(carried by the handover, word for word: keep these lines as they are, in their own language; add what you understood below them)\n- "레인에도 적용"');
-  expect(understood).toContain('## Owner\'s words\n(carried by the handover, word for word: keep these lines as they are, in their own language; add what you understood below them)\n- "never restart the sleep chain while an old copy runs"');
-  expect(understood).toContain("- Keep the eval seed fixed at three for every rerun.");
-  expect(understood).toContain("## Ruled out\n(carried by the handover, word for word: keep these lines as they are, in their own language; add what you understood below them)\n- lr too high");
-  expect(missingFrom(understood, JSON.parse(readFileSync((r.note ?? "").replace(/\.md$/, ".json"), "utf8")) as LaneFacts)).toEqual([]);
-  expect(sent(w).some((x) => x.startsWith("[LEAD] HANDOVER_COMMITTED"))).toBe(true);
-  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done" });
-  expect(readRollovers(state.dir).at(-1)).not.toHaveProperty("supplementRounds");
-});
-
-test("a restatement that still leaves out a tried fix after the supplement rounds fails the check, and everything moves back", async () => {
-  // Given
-  const deps = await setup();
-  ready(deps, [15]);
-  await deps.registry.patch("demo", { fixes: [{ at: "2026-10-11T16:00:00Z", metric: "loss", hypothesis: "lr too high", via: "report" }] });
-  sim.supplement = "ignore";
-  // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
-  // Then
-  expect(r.code).toBe(3);
-  expect(printed.filter((l) => l.startsWith("HANDOVER_SUPPLEMENT demo round ")).map((l) => l.split(":")[0])).toEqual(["HANDOVER_SUPPLEMENT demo round 1/2", "HANDOVER_SUPPLEMENT demo round 2/2"]);
-  expect(printed.find((l) => l.startsWith("HANDOVER_VERIFY_FAIL"))).toContain("still leaves out after 2 supplement round(s): tried fix: lr too high");
-  expect((await readLane(deps)).pane).toBe(OLD);
-  expect(sent(w).some((x) => x.startsWith("[LEAD] HANDOVER_COMMITTED"))).toBe(false);
-  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "rolled-back", supplementRounds: 2 });
-});
-
-test("a restatement without the owner's goal gets it from the registry and commits after the round", async () => {
-  // Given
-  const deps = await setup();
-  ready(deps, [15]);
-  sim.restate = RESTATE.replace("레인에도 적용: ", "");
-  // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
-  // Then
-  expect(r.code).toBe(0);
-  expect(printed.find((l) => l.startsWith("HANDOVER_SUPPLEMENT demo round 1/2: 1 left out (owner goal: 레인에도 적용)"))).toBeDefined();
-  expect(readFileSync((r.note ?? "").replace(/\.md$/, ".supplement-1.md"), "utf8")).toContain("Source: the lane's registry entry (the owner's words at launch). Goes under: ## Goal.");
-});
-
 test("an owner's line with escaped quotes inside is one item, and it counts as restated either way", () => {
   // Given
   const facts = { lane: { ...lane(), goal: "" }, laneNote: `## Owner's words and constraints\n- Brief: "put only \\"none\\" under Ruled out on purpose"\n` } as unknown as LaneFacts;
@@ -1163,37 +1065,6 @@ test("an owner's line with escaped quotes inside is one item, and it counts as r
   expect(missingFrom(RESTATE, facts).map((m) => m.text)).toEqual(['put only "none" under Ruled out on purpose']);
   expect(missingFrom(`${RESTATE}- "put only \\"none\\" under Ruled out on purpose"\n`, facts)).toEqual([]);
   expect(missingFrom(`${RESTATE}- put only "none" under Ruled out on purpose\n`, facts)).toEqual([]);
-});
-
-test("a new session that does not answer a supplement fails the check", async () => {
-  // Given
-  const deps = await setup();
-  ready(deps, [15]);
-  await deps.registry.patch("demo", { fixes: [{ at: "2026-10-11T16:00:00Z", metric: "loss", hypothesis: "lr too high", via: "report" }] });
-  sim.supplement = "silent";
-  // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
-  // Then
-  expect(r.code).toBe(3);
-  expect(printed.find((l) => l.startsWith("HANDOVER_VERIFY_FAIL"))).toContain("no ack for the supplement n2");
-  expect((await readLane(deps)).pane).toBe(OLD);
-});
-
-test("a new session that writes nothing into the restatement the handover started fails the check, and everything moves back", async () => {
-  // Given
-  const deps = await setup();
-  ready(deps, [15]);
-  sim.restate = "";
-  sim.supplement = "ignore";
-  // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { ...OK, verifyMin: 1 });
-  // Then
-  expect(r.code).toBe(3);
-  // the handover wrote what it carries; the headings the session writes itself are still missing
-  expect(printed.find((l) => l.startsWith("HANDOVER_SUPPLEMENT demo round 1/2: 2 left out (heading: ## Next step; heading: ## Questions)"))).toBeDefined();
-  expect(printed.find((l) => l.startsWith("HANDOVER_VERIFY_FAIL"))).toContain("restatement");
-  expect((await readLane(deps)).pane).toBe(OLD);
-  expect(sigs).toEqual(["SIGSTOP 11", "SIGCONT 11"]);
 });
 
 test("a job started from the pane's shell dies with it too: it counts as a local chain", async () => {

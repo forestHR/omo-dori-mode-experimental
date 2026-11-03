@@ -18,6 +18,7 @@
 // once through the same supplement path the handover uses, asking it to write what only the conversation held into the
 // cwd's AGENTS.md or its memory; the check after its ack decides "fixed". Rows hold a short summary, never a secret value.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeFrozen, readFrozen } from "./frozen.ts";
 import { basename, dirname, join } from "node:path";
 
 import { ChallengeError, checkReviewers, reviewerOrder, reviewers } from "./challenge.ts";
@@ -131,7 +132,8 @@ export type Committed = {
 };
 
 export const markerFile = (note: string): string => note.replace(/\.md$/, ".audit.json");
-export type Marker = { readonly at: string; readonly status: "queued" | "started" | "done"; readonly pid?: number; readonly rows?: number; readonly line?: string };
+// ms, calls, tokensEst: what a finished audit cost (its time, its model calls, their tokens estimated from the text size)
+export type Marker = { readonly at: string; readonly status: "queued" | "started" | "done"; readonly pid?: number; readonly rows?: number; readonly line?: string; readonly ms?: number; readonly calls?: number; readonly tokensEst?: number };
 
 export const committedHandovers = (stateDir: string): Committed[] => {
   const out: Committed[] = [];
@@ -270,7 +272,8 @@ const launchNote = (m: MonitorSpec, home: string): string => (m.command && (m.la
 export type Verdict = { readonly verdict: "STANDING" | "CARRIED" | "DONE" | "CHATTER"; readonly risk?: Risk; readonly why: string };
 // has: what the new session holds in words of its own (its restatement, the brief, the directive ledger's rules): an item
 // it holds in other words is CARRIED, not a gap
-export type Classify = (items: readonly Candidate[], ctx: { readonly who: Who; readonly key: string; readonly title: string; readonly goal: string; readonly state: string; readonly model: string; readonly has: string; readonly reports: string }) => Promise<{ readonly verdicts?: readonly Verdict[]; readonly model?: string; readonly error?: string }>;
+// cost: the model calls made and the text they carried (prompt, system and reply), for the audit's cost line
+export type Classify = (items: readonly Candidate[], ctx: { readonly who: Who; readonly key: string; readonly title: string; readonly goal: string; readonly state: string; readonly model: string; readonly has: string; readonly reports: string }) => Promise<{ readonly verdicts?: readonly Verdict[]; readonly model?: string; readonly error?: string; readonly cost?: { readonly calls: number; readonly chars: number } }>;
 
 export const CLASSIFY_SYSTEM = "You sort what an agent session's conversation held when its work moved to a new session. You answer only in the requested line format. You never ask questions and never translate quotes.";
 
@@ -322,17 +325,20 @@ export const reviewerClassify = (deps: LaneHandoverDeps): Classify => async (ite
     failures.push(e.message);
   }
   const prompt = classifyPrompt(items, ctx);
+  const cost = { calls: 0, chars: 0 };
   for (const c of checks) {
     if (!c.call) {
       failures.push(`${c.listed}: ${c.note}`);
       continue;
     }
     const r = await deps.run(fill(cfg.command, { model: c.call, prompt, system: CLASSIFY_SYSTEM }), { timeoutMs: cfg.minutes * 60_000 });
+    cost.calls++;
+    cost.chars += prompt.length + CLASSIFY_SYSTEM.length + r.out.length;
     const got = r.code === 0 ? parseVerdicts(r.out, items.length) : [];
-    if (got.filter(Boolean).length * 2 >= items.length && got.some(Boolean)) return { verdicts: got.map((v) => v ?? { verdict: "STANDING", risk: "MEDIUM", why: "not sorted by the reviewer" }), model: c.call };
+    if (got.filter(Boolean).length * 2 >= items.length && got.some(Boolean)) return { verdicts: got.map((v) => v ?? { verdict: "STANDING", risk: "MEDIUM", why: "not sorted by the reviewer" }), model: c.call, cost };
     failures.push(`${c.call}: ${r.code !== 0 ? `exit ${r.code} ${r.err.split("\n").find((l) => l.trim())?.slice(0, 120) ?? ""}` : `${got.filter(Boolean).length}/${items.length} items sorted`}`);
   }
-  return { error: failures.join(" | ") || "no reviewer of another family in reviewers.models" };
+  return { error: failures.join(" | ") || "no reviewer of another family in reviewers.models", cost };
 };
 
 // --- one handover's audit ---
@@ -352,6 +358,9 @@ export const RECORD_TEXT = "Some of these lived only in the old conversation: wr
 export const auditHandover = async (deps: LaneHandoverDeps, c: Committed, opts: AuditOptions = {}): Promise<AuditResult> => {
   const { config } = deps;
   const at = iso(deps.clock);
+  const started = deps.clock.now();
+  let cost: { readonly calls: number; readonly chars: number } = { calls: 0, chars: 0 };
+  let unsorted = false;
   const emit = (line: string): void => {
     deps.print(line);
     if (!opts.dryRun) watchLog(config.watchLog, deps.clock, { source: "handover", line });
@@ -412,6 +421,8 @@ export const auditHandover = async (deps: LaneHandoverDeps, c: Committed, opts: 
     const classify = opts.classify ?? reviewerClassify(deps);
     const state = [lane?.lastReport ?? "", section(summaryText, "In progress"), section(summaryText, "Next step"), section(restated(), "Next step")].filter(Boolean).join(" | ").replace(/\s+/g, " ").slice(0, 1500);
     const r = await classify(candidates, { who: c.who, key: c.key, title: lane?.title ?? laneFacts?.lane.title ?? "", goal: lane?.goal ?? laneFacts?.lane.goal ?? "", state, model: lane?.model ?? config.defaultModel, reports: reportsIn(oldLog, c.key).slice(-60).map((x) => `- ${x.at.slice(0, 16)} ${x.text.slice(0, 350)}`).join("\n"), has: [restated(), beforeGenerated(readText(brief)), ...ledger].join("\n").replace(/\n{3,}/g, "\n\n") });
+    cost = r.cost ?? cost;
+    unsorted = !r.verdicts;
     if (!r.verdicts) emit(`HANDOVER_AUDIT_UNSORTED ${c.key} ${c.stamp}: ${candidates.length} items only the old conversation held were not sorted (${r.error ?? "no answer"}); none is recorded`);
     sortedBy = r.model ?? "";
     (r.verdicts ?? []).forEach((v, i) => {
@@ -437,7 +448,8 @@ export const auditHandover = async (deps: LaneHandoverDeps, c: Committed, opts: 
   const monitors = laneFacts?.monitors ?? leadFacts?.monitors ?? [];
   const manifest = (): ReturnType<typeof readManifest> => (session ? readManifest(manifestPath(config.sessionsDir, cwd, session)) : []);
   if (session) for (const m of monitors) if (!armed(m, manifest(), deps.home)) gaps.push({ kind: "monitor", text: m.description || m.command || m.path || "?", under: "Next step", source: `the old session's monitor${m.command ? ` (${m.command.slice(0, 120)})` : ""}; never armed in the new session${launchNote(m, deps.home)}` });
-  if (laneFacts) for (const m of missingFrom(restated(), laneFacts)) if (m.kind !== "owner goal" && !gaps.some((g) => flat(g.text) === flat(m.text))) gaps.push({ ...m, conversation: m.kind === "decision" || m.kind === "owner's words" });
+  // only a restatement written before the commit (handovers before owner Q476) is measured against the note
+  if (laneFacts && existsSync(understood)) for (const m of missingFrom(restated(), laneFacts)) if (m.kind !== "owner goal" && !gaps.some((g) => flat(g.text) === flat(m.text))) gaps.push({ ...m, conversation: m.kind === "decision" || m.kind === "owner's words" });
 
   // what the supplement rounds before the commit filled in
   const rows: AuditRow[] = [];
@@ -492,8 +504,20 @@ export const auditHandover = async (deps: LaneHandoverDeps, c: Committed, opts: 
     return { code: 0, rows, line };
   }
   appendAudit(config.stateDir, rows);
-  writeMarker(c.note, { at: iso(deps.clock), status: "done", rows: rows.length, line });
+  // what the audit cost (owner Q476): its time, and the model's tokens estimated from the text it read and wrote (4
+  // characters a token; the reviewer command reports no usage)
+  const ms = deps.clock.now() - started;
+  const tokensEst = Math.ceil(cost.chars / 4);
+  writeMarker(c.note, { at: iso(deps.clock), status: "done", rows: rows.length, line, ms, calls: cost.calls, tokensEst });
   emit(line);
+  emit(`HANDOVER_AUDIT_COST ${c.key} ${c.stamp}: ${Math.round(ms / 1000)} s, ${cost.calls} model call(s), ~${tokensEst} tokens (estimated from the text size)`);
+  // the old lead stays frozen only until its audit passed (owner Q476: 17 freezes, no thaw in three weeks): it is closed
+  // now; an audit that left something out, or could not sort, keeps it frozen until handover.frozenCloseH
+  if (c.who === "lead") {
+    const rec = readFrozen(config.stateDir).find((f) => f.to === c.to);
+    const passed = !unsorted && rows.every((r) => r.fixed);
+    if (rec && !rec.keepFor?.length) emit(passed ? `${await closeFrozen(deps, config.stateDir, rec)} (the audit after the handover passed)` : `HANDOVER_OLD_KEPT_FROZEN ${rec.pane}: the audit ${unsorted ? "could not sort what the old conversation held" : `left ${rows.filter((r) => !r.fixed).length} item(s) not filled in`}; it stays frozen until ${rec.closeAt ?? "it is closed by hand"} (dori handover thaw ${rec.pane} resumes it)`);
+  }
   return { code: 0, rows, line };
 };
 

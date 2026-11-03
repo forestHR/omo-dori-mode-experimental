@@ -752,59 +752,7 @@ test("an automatic lead rollover tells the owner afterwards with what it crossed
   expect(readRollovers(state.dir).at(-1)).toMatchObject({ decidedBy: "auto", ownerReport: { message: "msg-9" } });
 });
 
-test("the new lead restates what it understood; an open lane it leaves out comes back from the registry in one supplement round, and then the move commits", async () => {
-  // Given
-  const deps = await setup();
-  sim.restate = "omit-lane";
-  // When
-  const r = await handover(deps, { approvedBy: APPROVED, title: "lead2" });
-  // Then
-  expect(r).toMatchObject({ code: 0, to: NEW });
-  const understood = (r.note ?? "").replace(/\.md$/, ".understood.md");
-  const sup = (r.note ?? "").replace(/\.md$/, ".supplement-1.md");
-  expect(printed).toContain(`HANDOVER_SUPPLEMENT lead round 1/2: 1 left out (open lane: demo); ${sup}`);
-  expect(readFileSync(sup, "utf8")).toContain("## 1. open lane: demo\nSource: the lane registry: working, pane aoe_demo_12345678, thread discord:12345678, last report [REPORT] demo / milestone / half way. Goes under: ## Open lanes.");
-  expect(printed).toContain("HANDOVER_SUPPLEMENT_OK lead after 1 round(s)");
-  expect(printed).toContain(`HANDOVER_UNDERSTOOD ${understood}`);
-  // the restatement and its supplement come before the old lead is frozen and the new one committed
-  const supAt = w.calls.findIndex((c) => c[1] === "send-keys" && c.includes(`=${NEW}:`) && (c.at(-1) ?? "").startsWith("[LEAD] HANDOVER_SUPPLEMENT"));
-  expect(supAt).toBeGreaterThan(-1);
-  expect(w.calls.findIndex((c) => c[1] === "send-keys" && c.includes(`=${NEW}:`) && (c.at(-1) ?? "").startsWith("[LEAD] HANDOVER_COMMITTED"))).toBeGreaterThan(supAt);
-  expect(sigs).toEqual(["SIGSTOP 11", "SIGSTOP 12", "SIGSTOP 13"]);
-  expect(readRollovers(state.dir).at(-1)).toMatchObject({ who: "lead", result: "done-frozen", supplementRounds: 1, supplements: [{ round: 1, items: [{ kind: "open lane", text: "demo" }], file: sup }] });
-});
-
-test("a new lead whose restatement still leaves out an open lane after the supplement rounds fails the check: everything moves back and the old lead stays", async () => {
-  // Given
-  const deps = await setup();
-  sim.restate = "omit-lane";
-  sim.supplement = "ignore";
-  // When
-  const r = await handover(deps, { approvedBy: APPROVED, title: "lead2" });
-  // Then
-  expect(r.code).toBe(3);
-  expect(printed.find((l) => l.startsWith("HANDOVER_VERIFY_FAIL"))).toContain("still leaves out after 2 supplement round(s): open lane: demo");
-  expect(stopped()).toBe(false);
-  expect(leadPaneInConfig()).toBe(OLD);
-  expect(new QuestionStore(join(state.dir, "discord")).get("Q1")?.tmux).toBe(OLD);
-  expect(sent(w).some((t) => t.startsWith(`[LEAD] Handover to ${NEW} failed`))).toBe(true);
-  expect(sent(w).some((t) => t.includes("HANDOVER_COMMITTED:"))).toBe(false);
-  expect(readRollovers(state.dir).at(-1)).toMatchObject({ who: "lead", result: "rolled-back", supplementRounds: 2 });
-});
-
-test("a new lead that never writes its restatement fails the check", async () => {
-  // Given
-  const deps = await setup();
-  sim.restate = "silent";
-  // When
-  const r = await handover(deps, { approvedBy: APPROVED, title: "lead2", verifyMin: 1 });
-  // Then
-  expect(r.code).toBe(3);
-  expect(printed.find((l) => l.startsWith("HANDOVER_VERIFY_FAIL"))).toContain("no ack for the restatement request n3");
-  expect(leadPaneInConfig()).toBe(OLD);
-});
-
-test("the owner's recent messages and the old lead's summary go into the note and are checked: his words, decisions and promised follow-ups left out come back with the old log line", async () => {
+test("the owner's recent messages and the old lead's summary go into the note word for word, and the move commits on the probes alone: no restatement, no supplement round before the commit", async () => {
   // Given
   const deps = await setup();
   const withOwner: HandoverDeps = { ...deps, ownerIds: [OWNER, "owner1"] };
@@ -824,40 +772,11 @@ test("the owner's recent messages and the old lead's summary go into the note an
   const note = readFileSync(r.note ?? "", "utf8");
   expect(note).toContain("## The owner's recent messages (1, last 24 h, newest last)\n- 2026-10-11T16:20:00Z (thread 777, message m1): \"auto rollover loses no context, right?\"");
   expect(note).toContain(`Its full log is ${log}`);
-  const sup = readFileSync((r.note ?? "").replace(/\.md$/, ".supplement-1.md"), "utf8");
-  expect(sup).toContain("owner's words: keep the eval seed fixed at three");
-  expect(sup).toContain('(user): "and keep the eval seed fixed at three for every run"');
-  const last = readRollovers(state.dir).at(-1);
-  const kinds = (last?.kind === "rollover" ? (last.supplements ?? []) : []).flatMap((x) => x.items.map((i) => i.kind));
-  expect(kinds).toEqual(["owner's words", "owner's words", "decision", "promised follow-up"]);
-  const understood = readFileSync((r.note ?? "").replace(/\.md$/, ".understood.md"), "utf8");
-  expect(understood).toContain("auto rollover loses no context, right?");
-  expect(understood).toContain("report the E7 render to the owner by 22:00 KST");
-});
-
-test("the new lead's restatement starts with the open lanes, work, cards, timers, the owner's messages and the summary word for word, so keeping them commits without a supplement round", async () => {
-  // Given
-  const deps = await setup();
-  const withOwner: HandoverDeps = { ...deps, ownerIds: [OWNER, "owner1"] };
-  writeFileSync(join(state.dir, "inbox.jsonl"), `${readFileSync(join(state.dir, "inbox.jsonl"), "utf8")}${JSON.stringify({ ts: "2026-10-11T16:20:00Z", id: "m1", scope: "thread", channel_id: "777", author_id: "owner1", content: "auto rollover loses no context, right?" })}\n`);
-  const summary = join(state.dir, "summary.md");
-  writeFileSync(summary, SUMMARY);
-  sim.restate = "keep-seed";
-  // When
-  const r = await handover(withOwner, { approvedBy: APPROVED, title: "lead2", note: summary });
-  // Then
-  expect(r).toMatchObject({ code: 0, to: NEW });
-  expect(printed.filter((l) => l.startsWith("HANDOVER_SUPPLEMENT"))).toEqual([]);
-  const understood = readFileSync((r.note ?? "").replace(/\.md$/, ".understood.md"), "utf8");
-  expect(understood).toContain('- "auto rollover loses no context, right?"');
-  expect(understood).toContain('- "keep the eval seed fixed at three"');
-  expect(understood).toContain("- moved the digest to the morning because the owner reads it then");
-  expect(understood).toContain("- report the E7 render to the owner by 22:00 KST");
-  expect(understood).toMatch(/## Open lanes\n.*\n- demo \(the lane registry: /);
-  expect(understood).toContain("- Q1 (the open question cards:");
-  const last = readRollovers(state.dir).at(-1);
-  expect(last).toMatchObject({ result: "done-frozen" });
-  expect(last).not.toHaveProperty("supplementRounds");
+  // the summary goes into the note word for word, and no restatement is asked before the commit (owner Q476)
+  expect(note).toContain("report the E7 render to the owner by 22:00 KST");
+  expect(printed.filter((l) => l.startsWith("HANDOVER_UNDERSTAND") || l.startsWith("HANDOVER_SUPPLEMENT"))).toEqual([]);
+  expect(existsSync((r.note ?? "").replace(/\.md$/, ".supplement-1.md"))).toBe(false);
+  expect(readRollovers(state.dir).at(-1)).not.toHaveProperty("supplementRounds");
 });
 
 test("the quotes in the old lead's conversation that its summary does not hold go into the note, the owner's only with proof", async () => {
