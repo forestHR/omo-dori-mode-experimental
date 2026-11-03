@@ -149,6 +149,14 @@ test("every status change leaves exactly one status mark in front of the title",
   expect(await renamed("🔄 [done] fix login", "working", defaultDiscordWords)).toBe("[working] fix login");
 });
 
+test("an Autophagy closing word is one mark too: it is never stacked on, and done keeps it, so a failure never shows ✅", async () => {
+  expect(await renamed("✅ 완료 · ✉️ 메일 발신 · x", "working")).toBe("🔄 ✉️ 메일 발신 · x");
+  expect(await renamed("⛔ 취소 · 🔄 x", "working")).toBe("🔄 x");
+  expect(await renamed("⛔ 취소 · ↩️ 메일 회신 · x", "done")).toBe("⛔ 취소 · ↩️ 메일 회신 · x");
+  expect(await renamed("✅ ❗ 실패 · 🔐 묶음 승인 · x", "done")).toBe("❗ 실패 · 🔐 묶음 승인 · x");
+  expect(await renamed("⌛ 만료 · ✉️ x", "waiting")).toBe("⏸️ ✉️ x");
+});
+
 test("a thread that cannot be renamed is a warning, the lane still closes; a lane without a thread or sharing it with an open lane is not touched", async () => {
   const refused = fakeThread("🔄 fix login", false, true);
   const r = await closeLane(at(T0, refused.close), lane, "closed", SUMMARY);

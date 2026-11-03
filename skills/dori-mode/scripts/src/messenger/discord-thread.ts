@@ -32,23 +32,44 @@ export const statusMark = (status: ThreadMark, words: DiscordWords): string => (
 // The name without any leading status marks: "🔄 🔄 x" and "✅ 🔄 x" both give "x". A title passed in with its own
 // mark, or an earlier rename that kept one, would otherwise stack marks. Any one bracket in front goes (an older
 // words setting); after that only emoji and this setting's [word] marks do, so a title's own "[tag]" stays.
-export const bareThreadName = (name: string, words: DiscordWords): string => {
+// The closing word an approval thread of Autophagy (Yoodori) gets from its own code ("✅ 완료 · ", "⛔ 취소 · "):
+// one mark too. It is stripped like ours, so neither side stacks on the other ("✅ ⛔ 취소 · x", "🔄 완료 · x").
+const OUTCOME_PREFIX = /^(?:✅ 완료|⛔ 취소|⌛ 만료|❗ 실패) · /u;
+
+const splitMarks = (name: string, words: DiscordWords): { readonly outcome?: string; readonly rest: string } => {
   const marks = new Set<string>(["working", "waiting", "done"].map((s) => `[${words[s as ThreadStatus]}]`));
-  let rest = name.trimStart().replace(STATUS_PREFIX, "");
+  let outcome: string | undefined;
+  let rest = name.trimStart();
+  let first = true;
   for (;;) {
+    const closing = OUTCOME_PREFIX.exec(rest)?.[0];
     const word = /^\[[^\]]{1,20}\]/u.exec(rest)?.[0];
-    const next = word && marks.has(word) ? rest.slice(word.length).trimStart() : rest.replace(EMOJI_PREFIX, "");
-    if (next === rest) return rest;
+    const next = closing
+      ? rest.slice(closing.length).trimStart()
+      : first
+        ? rest.replace(STATUS_PREFIX, "")
+        : word && marks.has(word)
+          ? rest.slice(word.length).trimStart()
+          : rest.replace(EMOJI_PREFIX, "");
+    if (closing) outcome ??= closing.slice(0, -" · ".length);
+    if (next === rest && !first) return { outcome, rest };
+    first = false;
     rest = next;
   }
 };
+
+export const bareThreadName = (name: string, words: DiscordWords): string => splitMarks(name, words).rest;
 
 // 📌 is not a status mark to every other name, so a title of its own that starts with one stays: only a standing mark
 // being set (one 📌, not two) or released (unpin) takes it off.
 export const unpinnedName = (name: string, words: DiscordWords): string => bareThreadName(name, words).replace(/^(?:📌\uFE0F?\s*)+/u, "");
 
-export const threadName = (status: ThreadMark, title: string, words: DiscordWords, unpin = false): string =>
-  `${statusMark(status, words)} ${unpin || status === "standing" ? unpinnedName(title, words) : bareThreadName(title, words)}`;
+// Done keeps how an Autophagy request ended (⛔ 취소 stays ⛔ 취소, ❗ 실패 never turns into ✅); every other status replaces it.
+export const threadName = (status: ThreadMark, title: string, words: DiscordWords, unpin = false): string => {
+  const outcome = status === "done" ? splitMarks(title, words).outcome : undefined;
+  const rest = unpin || status === "standing" ? unpinnedName(title, words) : bareThreadName(title, words);
+  return outcome ? `${outcome} · ${rest}` : `${statusMark(status, words)} ${rest}`;
+};
 
 export const isDoneName = (name: string, words: DiscordWords): boolean => name.startsWith(STATUS_EMOJI.done) || name.startsWith(`[${words.done}]`);
 
