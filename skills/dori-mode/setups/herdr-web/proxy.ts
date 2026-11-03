@@ -1,6 +1,4 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { run, type Runner } from "../../scripts/src/run.ts";
-import { cachedState } from "./state.ts";
 import { injectStateBar } from "./state-bar.ts";
 
 type Config = {
@@ -8,6 +6,8 @@ type Config = {
   readonly upstreamPort: number;
   readonly passphrase: string;
   readonly origin: string;
+  readonly statePort: number;
+  readonly stateSecret: string;
 };
 
 const loginPage = `<!doctype html><html lang="en"><meta charset="utf-8">
@@ -24,8 +24,7 @@ button{background:#9dd5c4;border:0;border-radius:6px}label{display:block}
 const digest = (value: string) => createHash("sha256").update(value).digest();
 const hopHeaders = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "trailer"] as const;
 
-export function startProxy(config: Config, runner: Runner = run) {
-  const state = cachedState(runner);
+export function startProxy(config: Config) {
   const cookieName = `herdr_session_${config.port}`;
   const token = randomBytes(32).toString("hex");
   const authorized = (request: Request) =>
@@ -60,7 +59,16 @@ export function startProxy(config: Config, runner: Runner = run) {
       if (!authorized(request)) return upgrading || url.pathname === "/__dori/state"
         ? new Response("Unauthorized", { status: 401, headers: { "cache-control": "no-store" } }) : login();
       if (url.pathname === "/__dori/state" && request.method === "GET") {
-        return Response.json(await state(), { headers: { "cache-control": "no-store" } });
+        // Only the terminal account can inspect its herdr server and process tree.
+        const response = await fetch(`http://127.0.0.1:${config.statePort}/state`, {
+          headers: { authorization: `Bearer ${config.stateSecret}` },
+          signal: AbortSignal.timeout(10_000),
+          redirect: "error",
+        });
+        return new Response(response.ok ? response.body : "State unavailable", {
+          status: response.ok ? 200 : 502,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        });
       }
       const target = `http://127.0.0.1:${config.upstreamPort}${url.pathname}${url.search}`;
       if (upgrading) {
@@ -128,11 +136,15 @@ if (import.meta.main) {
   const upstreamPort = Number(process.env.HERDR_TTYD_PORT);
   const passphrase = passphraseFrom(process.env);
   const origin = process.env.HERDR_WEB_ORIGIN;
+  const statePort = Number(process.env.HERDR_STATE_PORT);
+  const stateSecret = process.env.HERDR_STATE_SECRET;
   if (!Number.isInteger(port) || port < 1 || port > 65535 ||
       !Number.isInteger(upstreamPort) || upstreamPort < 1 || upstreamPort > 65535 ||
-      port === upstreamPort || !passphrase || !origin ||
+      !Number.isInteger(statePort) || statePort < 1 || statePort > 65535 ||
+      port === upstreamPort || statePort === port || statePort === upstreamPort ||
+      !passphrase || !origin || !stateSecret ||
       !["http:", "https:"].includes(new URL(origin).protocol) || new URL(origin).origin !== origin) {
-    throw new TypeError("Set valid HERDR_WEB_PORT, HERDR_TTYD_PORT, HERDR_WEB_ORIGIN and HERDR_WEB_PASSPHRASE (or AOE_SERVE_PASSPHRASE)");
+    throw new TypeError("Set valid HERDR_WEB_PORT, HERDR_TTYD_PORT, HERDR_WEB_ORIGIN, HERDR_WEB_PASSPHRASE (or AOE_SERVE_PASSPHRASE), HERDR_STATE_PORT and HERDR_STATE_SECRET");
   }
-  startProxy({ port, upstreamPort, passphrase, origin });
+  startProxy({ port, upstreamPort, passphrase, origin, statePort, stateSecret });
 }

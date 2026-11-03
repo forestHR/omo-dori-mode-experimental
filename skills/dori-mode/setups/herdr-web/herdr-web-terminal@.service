@@ -1,5 +1,7 @@
 [Unit]
 Description=Loopback herdr browser terminal for port %i
+Requires=herdr-web-state@%i.service
+After=herdr-web-state@%i.service
 
 [Service]
 Type=simple

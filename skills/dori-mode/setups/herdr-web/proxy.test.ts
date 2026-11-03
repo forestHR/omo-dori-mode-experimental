@@ -1,19 +1,24 @@
 import { afterEach, expect, test } from "bun:test";
 import { passphraseFrom, startProxy } from "./proxy.ts";
 import { cachedState } from "./state.ts";
+import { startStateServer } from "./state-server.ts";
 import type { Runner } from "../../scripts/src/run.ts";
 
-const servers: ReturnType<typeof startProxy>[] = [];
+const servers: Pick<ReturnType<typeof startProxy>, "stop">[] = [];
 afterEach(() => { for (const server of servers.splice(0)) server.stop(true); });
 
 function fixture(upstreamPort = 1, runner?: Runner) {
+  const helper = startStateServer({ port: 0, secret: "test-state-secret" }, runner);
+  servers.push(helper);
+  if (helper.port === undefined) throw new TypeError("Expected a TCP port");
   // Reserve an ephemeral port; no real Dori endpoint is touched.
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   const port = reservation.port;
   reservation.stop(true);
   if (port === undefined) throw new TypeError("Expected a TCP port");
   const origin = `http://127.0.0.1:${port}`;
-  const server = startProxy({ port, upstreamPort, passphrase: "test-only-passphrase", origin }, runner);
+  const server = startProxy({ port, upstreamPort, passphrase: "test-only-passphrase", origin,
+    statePort: helper.port, stateSecret: "test-state-secret" });
   servers.push(server);
   return { origin, port };
 }

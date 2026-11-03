@@ -1,0 +1,14 @@
+[Unit]
+Description=Account-local herdr pane state for web port %i
+PartOf=herdr-web-terminal@%i.service
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/herdr/web-%i.env
+UnsetEnvironment=HERDR_PANE_ID HERDR_SOCKET HERDR_SESSION TMUX TMUX_PANE
+ExecStart=%h/.bun/bin/bun %h/.dori/src/skills/dori-mode/setups/herdr-web/state-server.ts
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+UMask=0077
