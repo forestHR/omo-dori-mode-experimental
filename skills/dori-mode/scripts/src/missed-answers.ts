@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { aoeSessions, sessionFor } from "./aoe.ts";
+import { liveSessions, sessionFor } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import type { Question } from "./messenger/discord-cards.ts";
@@ -57,7 +57,7 @@ export const missedAnswersTick = async (deps: FlowDeps): Promise<string[]> => {
   const marks = readMarks(deps);
   const due = cards.filter((q) => !marks[q.id]?.sent && (marks[q.id]?.tries ?? 0) < MAX_TRIES && (q.tmux || deps.config.leadPane));
   if (!due.length) return [];
-  const [sessions, table] = await Promise.all([aoeSessions(deps.run), procTable(deps.run)]);
+  const [sessions, table] = await Promise.all([liveSessions(deps.run), procTable(deps.run)]);
   const out: string[] = [];
   const transcripts = new Map<string, string | undefined>();
   for (const q of due) {

@@ -494,9 +494,9 @@ test("a pending lane whose done claim was rejected (not-done) is still read: thr
   expect((await watchWith("none", IDLE))[0]).toStartWith(`LANE_NO_GOAL smoke ${pendingPane}`);
 });
 
-// herdr has no lane death check of its own, and a herdr lane's background jobs are read from its exact session's transcript
-const herdrWatch = (sessions: string): FlowDeps => {
-  const base = depsFor(world, fakeClock(T0), state.dir, { sessionsDir: sessions });
+// a herdr agent that is no omo has no lane death check, and a herdr lane's background jobs are read from its exact session's transcript
+const herdrWatch = (sessions: string, agentCommand = ["claude", "{prompt}"]): FlowDeps => {
+  const base = depsFor(world, fakeClock(T0), state.dir, { sessionsDir: sessions, agentCommand });
   return { ...base, readGoal: async () => "none", run: async (argv, o) => (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "process-info" ? { code: 0, out: JSON.stringify({ result: { process_info: { shell_pid: 500 } } }), err: "" } : base.run(argv, o)) };
 };
 
@@ -515,6 +515,7 @@ test("a herdr pending lane waiting on a background job of its own is not told; o
   expect((await deps.registry.read("hp"))?.pendingGoal).toBeUndefined();
   expect((await watchTick(deps)).filter((l) => /^LANE_NO_GOAL/.test(l))).toEqual([]);
 });
+
 
 test("a job record from before the agent's own start (a restarted session) keeps no first turn on: three idle reads say LANE_NO_GOAL", async () => {
   const sessions = join(state.dir, "sessions");
@@ -681,7 +682,7 @@ test("exact session id: a herdr omo lane gets launch's own --session-id after th
   const input = (key: string) => ({ noThread: "test lane", key, title: key, brief, done: "file /tmp/ok", cwd: "/tmp/w" });
   let id = "";
   const r = await launchLane(herdr(["omo", "--model", "{model}", "{prompt}"], (cmd) => {
-    id = /^omo --session-id ([0-9a-f-]{36}) --model /.exec(cmd)?.[1] ?? "";
+    id = /(?:^|\s)omo --session-id ([0-9a-f-]{36}) --model /.exec(cmd)?.[1] ?? "";
     session("44444444-4444-4444-8444-444444444444", "You are the hd lane; report", "active");
     session(id, "You are the hd lane; report", "active");
   }), input("hd"));
@@ -697,12 +698,12 @@ test("exact session id: a herdr omo lane gets launch's own --session-id after th
   // --continue picks the session itself: no second selector, and no id to read
   let continued = "";
   const r3 = await launchLane(herdr(["omo", "--continue", "--model", "{model}", "{prompt}"], (cmd) => { continued = cmd; }), input("hd3"));
-  expect(continued).toStartWith("omo --continue --model ");
+  expect(continued).toMatch(/(?:^|\s)omo --continue --model /);
   expect(r3.startup).toStartWith("STARTUP_UNCONFIRMED hd3 w:p9: the agent runs but its command line names no session id");
   // --session with a partial uuid is resolved by omo itself: the prefix is not the session's id, so no goal file is guessed
   let partial = "";
   const r4 = await launchLane(herdr(["omo", "--session", "99999999", "--model", "{model}", "{prompt}"], (cmd) => { partial = cmd; session(ID, cmd, "active"); }), input("hd4"));
-  expect(partial).toStartWith("omo --session 99999999 --model ");
+  expect(partial).toMatch(/(?:^|\s)omo --session 99999999 --model /);
   expect(r4.startup).toStartWith("STARTUP_UNCONFIRMED hd4 w:p9: the agent runs but its command line names no session id");
   // --session with a whole uuid names that session exactly
   const r5 = await launchLane(herdr(["omo", "--session", ID, "--model", "{model}", "{prompt}"], (cmd) => session(ID, cmd, "active")), input("hd5"));

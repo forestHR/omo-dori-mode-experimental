@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 
-import { aoeSessions, captureTmux, listAoePanes, paneLife, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
+import { captureTmux, listAoePanes, liveSessions, paneLife, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
 import type { Backend, DoriConfig } from "./config.ts";
+import { isHerdrPane } from "./herdr.ts";
 import { replacementOf } from "./frozen.ts";
 import type { Clock, Runner } from "./run.ts";
-import { AGENT, descendants, procTable } from "./session-id.ts";
+import { procTable, topAgent } from "./session-id.ts";
 import { type PaneKeys, submitText, type Submitted } from "./submit.ts";
 import { watchLog } from "./watch-log.ts";
 
@@ -28,10 +30,9 @@ export const listPanes = async (run: Runner, backend: Backend): Promise<Pane[]> 
   return (JSON.parse(r.out) as { result: { panes: Pane[] } }).result.panes;
 };
 
-export const readScreen = async (run: Runner, backend: Backend, pane: string, lines?: number): Promise<string> =>
-  backend === "aoe"
-    ? captureTmux(run, pane, lines)
-    : (await run(["herdr", "pane", "read", pane, "--source", lines ? "recent" : "visible", ...(lines ? ["--lines", String(lines)] : [])])).out;
+// a tmux name is read through tmux and a herdr pane id through herdr, whatever the config says (captureTmux dispatches on
+// the pane id: only a herdr pane id holds ":")
+export const readScreen = async (run: Runner, _backend: Backend, pane: string, lines?: number): Promise<string> => captureTmux(run, pane, lines);
 
 // tmux refuses one send-keys argument much longer than 16 KB (2026-10-19: 15,000 bytes typed, 20,000 refused), so a long
 // text (a directive block, a report) is typed in pieces of at most this many bytes, whole characters only, before the Enter.
@@ -73,7 +74,7 @@ export const transcriptHas = (transcript: string, text: string, since: number): 
 };
 
 export const paneTranscript = async (run: Runner, sessionsDir: string, pane: string): Promise<string | undefined> => {
-  const cwd = sessionFor(await aoeSessions(run), pane)?.path;
+  const cwd = sessionFor(await liveSessions(run), pane)?.path;
   return cwd ? (await sessionFile(run, sessionsDir, pane, cwd))?.path : undefined;
 };
 
@@ -109,33 +110,46 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
   if (!shell) return undefined;
   const table = await procTable(run);
   // the pane's own process counts too: a pane started with the agent as its command has no shell above it
-  const agent = [...table.filter((p) => p.pid === shell), ...descendants(table, shell)].find((p) => AGENT.test(p.cmd) && !/\bmcp\b/.test(p.cmd));
+  const agent = topAgent(table, shell);
   return agent?.stat?.startsWith("T") ? agent.pid : undefined;
 };
 
-const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): PaneKeys =>
-  config.backend === "aoe"
-    ? {
-        type: async (text) => {
-          // named, so a lead does not read a missing pane as a busy one (the prompt check below would say "no ❯ prompt")
-          const life = await paneLife(run, pane);
-          if (!life.live) return life.how === "gone" ? `PANE_GONE: there is no tmux session ${pane} (it ended, or the name is wrong); nothing was typed` : `PANE_DEAD: the program in ${pane} exited (status ${life.status}); nothing was typed`;
-          const stopped = await stoppedAgent(run, pane);
-          if (stopped) return `the agent in the pane is stopped (pid ${stopped}, frozen): nothing would read the text, so it was not typed`;
-          if (!(await waitForPrompt(run, clock, pane, 10, 1_000))) return "no ❯ prompt in the pane";
-          for (const part of sendChunks(text)) if ((await run(["tmux", "send-keys", "-t", target(pane), "-l", "--", part])).code !== 0) return "tmux send-keys failed";
-          return undefined;
-        },
-        enter: async () => { await run(["tmux", "send-keys", "-t", target(pane), "Enter"]); },
-        read: () => captureTmux(run, pane),
-        clear: async () => { await run(["tmux", "send-keys", "-t", target(pane), "C-u"]); },
-        delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
-      }
-    : {
-        type: async (text) => ((await run(["herdr", "pane", "send-text", pane, text])).code === 0 ? undefined : "herdr send-text failed"),
-        enter: async () => { await run(["herdr", "pane", "send-keys", pane, "enter"]); },
-        read: () => readScreen(run, config.backend, pane),
-      };
+// An aoe session, and a herdr pane (an id with ":", herdr.ts) of a Dori that runs omo there, get the same checks: a gone,
+// dead or frozen pane is named and nothing is typed, the text waits for omo's ❯ prompt, and the session's transcript is
+// evidence of delivery. A herdr Dori whose agentCommand is no omo keeps the bare herdr keys.
+// Whether dori drives omo in this session the aoe way: every tmux session (also under a herdr config while the Dori
+// moves), and the herdr panes of a Dori whose agentCommand is omo.
+export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || basename(config.agentCommand[0] ?? "") === "omo";
+export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
+
+const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): PaneKeys => {
+  const herdr = isHerdrPane(pane);
+  if (!omoPane(config, pane))
+    return {
+      type: async (text) => ((await run(["herdr", "pane", "send-text", pane, text])).code === 0 ? undefined : "herdr send-text failed"),
+      enter: async () => { await run(["herdr", "pane", "send-keys", pane, "enter"]); },
+      read: () => readScreen(run, config.backend, pane),
+    };
+  const send = (part: string) => run(herdr ? ["herdr", "pane", "send-text", pane, part] : ["tmux", "send-keys", "-t", target(pane), "-l", "--", part]);
+  const key = (name: "enter" | "clear") => run(herdr ? ["herdr", "pane", "send-keys", pane, name === "enter" ? "enter" : "ctrl+u"] : ["tmux", "send-keys", "-t", target(pane), name === "enter" ? "Enter" : "C-u"]);
+  const where = herdr ? `herdr pane ${pane}` : `tmux session ${pane}`;
+  return {
+    type: async (text) => {
+      // named, so a lead does not read a missing pane as a busy one (the prompt check below would say "no ❯ prompt")
+      const life = await paneLife(run, pane);
+      if (!life.live) return life.how === "gone" ? `PANE_GONE: there is no ${where} (it ended, or the name is wrong); nothing was typed` : `PANE_DEAD: the program in ${pane} exited (${life.status < 0 ? "no agent runs in it" : `status ${life.status}`}); nothing was typed`;
+      const stopped = await stoppedAgent(run, pane);
+      if (stopped) return `the agent in the pane is stopped (pid ${stopped}, frozen): nothing would read the text, so it was not typed`;
+      if (!(await waitForPrompt(run, clock, pane, 10, 1_000))) return "no ❯ prompt in the pane";
+      for (const part of sendChunks(text)) if ((await send(part)).code !== 0) return herdr ? "herdr send-text failed" : "tmux send-keys failed";
+      return undefined;
+    },
+    enter: async () => { await key("enter"); },
+    read: () => captureTmux(run, pane),
+    clear: async () => { await key("clear"); },
+    delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
+  };
+};
 
 // A slash command (/goal pause) runs in omo itself and never becomes a user message of the transcript, so it cannot be
 // confirmed the way submitToPane confirms a text; the caller reads its effect back instead. Typed into a live aoe pane

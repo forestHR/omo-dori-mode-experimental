@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { aoeSessions, sessionFor } from "./aoe.ts";
+import { liveSessions, sessionFor } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { sendVerified } from "./panes.ts";
@@ -156,7 +156,7 @@ export const autoturnTick = async (deps: FlowDeps): Promise<string[]> => {
   const lanes = (await deps.registry.open()).filter((l) => l.pane && ["working", "not-done", "paused"].includes(statusOf(l)));
   const lead = deps.config.leadPane;
   if (!lanes.length && !lead) return [];
-  const [sessions, table] = await Promise.all([aoeSessions(deps.run), procTable(deps.run)]);
+  const [sessions, table] = await Promise.all([liveSessions(deps.run), procTable(deps.run)]);
   const now = deps.clock.now();
   const max = deps.config.autoturnResumeMax;
   const every = deps.config.autoturnLongTurns;

@@ -1,11 +1,13 @@
 import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
+import { closeHerdrSession, herdrAgentPid, herdrLife, herdrRead, herdrSessions, herdrShellPid, isHerdrPane, openHerdrSession, procEnv } from "./herdr.ts";
 import type { Pane } from "./panes.ts";
 import type { Clock, Runner } from "./run.ts";
 import { turnRunning } from "./submit.ts";
 
-export type AoeSession = { readonly id: string; readonly title: string; readonly path: string; readonly tool?: string; readonly profile?: string };
+// pane: the herdr pane id of a herdr session (herdr.ts); aoe sessions are matched by their tmux name
+export type AoeSession = { readonly id: string; readonly title: string; readonly path: string; readonly tool?: string; readonly profile?: string; readonly pane?: string; readonly tab?: string };
 
 // "=name:" makes tmux match the session name exactly instead of by prefix
 export const target = (name: string): string => `=${name}:`;
@@ -14,6 +16,14 @@ export const aoeSessions = async (run: Runner): Promise<AoeSession[]> => {
   const r = await run(["aoe", "list", "--json", "--state", "live"]);
   if (r.code !== 0) throw new Error(`aoe list failed: ${r.err || r.out}`);
   return JSON.parse(r.out) as AoeSession[];
+};
+
+// The live sessions of both backends: aoe's and the herdr server's panes, so a Dori whose lanes are split between them
+// during its move finds each. One that fails counts as none; both failing is aoe's error.
+export const liveSessions = async (run: Runner): Promise<AoeSession[]> => {
+  const [aoe, herdr] = await Promise.all([aoeSessions(run).then((s) => ({ s }), (e: unknown) => ({ e })), herdrSessions(run)]);
+  if ("e" in aoe && !herdr.length) throw aoe.e;
+  return [...("s" in aoe ? aoe.s : []), ...herdr];
 };
 
 const tmuxNames = async (run: Runner): Promise<string[]> => {
@@ -36,7 +46,7 @@ export const listAoePanes = async (run: Runner): Promise<Pane[]> => {
 };
 
 export const sessionFor = (sessions: readonly AoeSession[], pane: string): AoeSession | undefined =>
-  sessions.find((s) => pane === `aoe_${s.title}${suffixOf(s)}`) ?? sessions.find((s) => pane.endsWith(suffixOf(s)));
+  isHerdrPane(pane) ? sessions.find((s) => s.pane === pane) : (sessions.find((s) => !s.pane && pane === `aoe_${s.title}${suffixOf(s)}`) ?? sessions.find((s) => !s.pane && pane.endsWith(suffixOf(s))));
 
 const idFor = (sessions: readonly AoeSession[], pane: string): string | undefined => sessionFor(sessions, pane)?.id;
 
@@ -60,13 +70,14 @@ export const QUESTION_MARK = /Ask user ·|\(\d+\/\d+ answered\)/;
 export type Activity = "busy" | "running" | "waiting" | "error" | "question" | "idle";
 
 // What each live pane's agent is doing, from aoe ps plus its screen. Panes aoe does not list are left out.
+// A herdr pane has no such state: one whose agent runs is judged from its screen alone, idle when nothing shows.
 export const paneActivity = async (run: Runner, panes: readonly string[]): Promise<Map<string, Activity>> => {
   const out = new Map<string, Activity>();
-  if (!panes.length) return out;
-  const [sessions, states] = await Promise.all([aoeSessions(run), aoeStates(run)]);
+  const tmuxPanes = panes.filter((p) => p && !isHerdrPane(p));
+  const [sessions, states] = tmuxPanes.length ? await Promise.all([aoeSessions(run), aoeStates(run)]) : [[], new Map<string, string>()];
   for (const pane of panes) {
-    const id = idFor(sessions, pane);
-    const state = id ? states.get(id) : undefined;
+    const id = isHerdrPane(pane) ? ((await herdrLife(run, pane)).live ? pane : undefined) : idFor(sessions, pane);
+    const state = id ? (isHerdrPane(pane) ? "idle" : states.get(id)) : undefined;
     if (!state) continue;
     const screen = await captureTmux(run, pane);
     if (turnRunning(screen)) out.set(pane, "busy");
@@ -78,7 +89,9 @@ export const paneActivity = async (run: Runner, panes: readonly string[]): Promi
   return out;
 };
 
+// a herdr pane is read through herdr (herdr.ts), the same visible screen or last lines
 export const captureTmux = async (run: Runner, pane: string, lines?: number): Promise<string> => {
+  if (isHerdrPane(pane)) return herdrRead(run, pane, lines);
   const out = (await run(["tmux", "capture-pane", "-p", "-J", "-t", target(pane), ...(lines ? ["-S", `-${lines}`] : [])])).out;
   return lines ? out.split("\n").slice(-lines).join("\n") : out;
 };
@@ -87,13 +100,16 @@ export type PaneLife = { readonly live: true } | { readonly live: false; readonl
 
 // gone: no tmux session of that name; dead: the session is there, its pane's program exited (remain-on-exit)
 export const paneLife = async (run: Runner, pane: string): Promise<PaneLife> => {
+  if (isHerdrPane(pane)) return herdrLife(run, pane);
   if ((await run(["tmux", "has-session", "-t", `=${pane}`])).code !== 0) return { live: false, how: "gone" };
   const r = await run(["tmux", "display-message", "-p", "-t", `=${pane}:`, "#{pane_dead} #{pane_dead_status}"]);
   const [dead = "", status = ""] = r.out.trim().split(" ");
   return r.code === 0 && dead === "1" ? { live: false, how: "dead", status: Number(status) } : { live: true };
 };
 
+// the pane's shell: a herdr pane's from herdr pane process-info
 export const tmuxPanePid = async (run: Runner, pane: string): Promise<number> => {
+  if (isHerdrPane(pane)) return herdrShellPid(run, pane);
   const r = await run(["tmux", "display-message", "-p", "-t", target(pane), "#{pane_pid}"]);
   return r.code === 0 ? Number(r.out.trim()) || 0 : 0;
 };
@@ -131,8 +147,16 @@ export const forwardEnv = async (run: Runner, names: readonly string[]): Promise
 };
 
 // The launchEnv variables a session did not get as asked, as "NAME=want(got)" (empty when all match).
+// A herdr session's variables are those its agent process started with (openHerdrSession sets them on its command line).
 export const envMismatch = async (run: Runner, pane: string, env: Readonly<Record<string, string | undefined>>): Promise<string[]> => {
   const out: string[] = [];
+  if (isHerdrPane(pane)) {
+    if (!Object.keys(env).length) return out;
+    const pid = await herdrAgentPid(run, pane);
+    const have = pid ? procEnv(pid) : new Map<string, string>();
+    for (const [name, want] of Object.entries(env)) if (have.get(name) !== want) out.push(`${name}=${want ?? "(unset)"}(${have.get(name) ?? "unset"})`);
+    return out;
+  }
   for (const [name, want] of Object.entries(env)) {
     const r = await run(["tmux", "show-environment", "-t", `=${pane}`, name]);
     const got = r.code === 0 && r.out.startsWith(`${name}=`) ? r.out.slice(name.length + 1) : undefined;
@@ -207,13 +231,31 @@ export const withPi = (path: string, tool: string): string => {
 // thinking goes in as its own --thinking flag: omo 5.1.30 can start a session at medium although the model id ends in :high.
 // env: laneEnv for the session (see forwardEnv); left out or {} touches neither tmux nor aoe's environment.
 // PATH: sessionPath of this process's PATH, with withPi, passed to aoe add only when it differs; no node at all refuses (NO_NODE).
-export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>> }): Promise<string> => {
-  const env = opts.env && Object.keys(opts.env).length ? opts.env : undefined;
+// backend herdr: a herdr tab labelled title instead (herdr.ts openHerdrSession, in workspace when given), its agent started
+// with a new --session-id so its session is known exactly, as aoe pins one; the herdr pane id is returned.
+// The PATH an agent session gets (sessionPath with withPi; see there), or NO_NODE when there is no node anywhere. Every
+// herdr opener puts it on the agent's command line: a herdr pane takes the server's environment, not this caller's.
+export const agentPath = (tool: string): string => {
   const callerPath = process.env.PATH ?? "";
   const nvmDir = process.env.NVM_DIR || join(process.env.HOME ?? "", ".nvm");
   const node = sessionPath(callerPath, nvmDir);
-  const path = node === undefined ? undefined : withPi(node, opts.tool);
-  if (path === undefined) throw new AoeError(`NO_NODE no node on PATH (${callerPath}) or in ${nvmDir}: the session's senpi task model probe and omo hooks run #!/usr/bin/env node and would exit 127; install node with nvm or put it on the caller's PATH`);
+  if (node === undefined) throw new AoeError(`NO_NODE no node on PATH (${callerPath}) or in ${nvmDir}: the session's senpi task model probe and omo hooks run #!/usr/bin/env node and would exit 127; install node with nvm or put it on the caller's PATH`);
+  return withPi(node, tool);
+};
+
+export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly backend?: "aoe" | "herdr"; readonly workspace?: string }): Promise<string> => {
+  const env = opts.env && Object.keys(opts.env).length ? opts.env : undefined;
+  const callerPath = process.env.PATH ?? "";
+  const path = agentPath(opts.tool);
+  if (opts.backend === "herdr") {
+    const argv = [opts.tool, "--session-id", crypto.randomUUID(), "--model", opts.model, ...(opts.thinking ? ["--thinking", opts.thinking] : [])];
+    try {
+      // a herdr pane takes the server's environment, not this caller's: the checked PATH always goes on its command line
+      return (await openHerdrSession(run, clock, { title: opts.title, cwd: opts.cwd, argv, env: { ...env, PATH: path }, ...(opts.workspace ? { workspace: opts.workspace } : {}) })).pane;
+    } catch (e) {
+      throw new AoeError(e instanceof Error ? e.message : String(e));
+    }
+  }
   if (env) await forwardEnv(run, Object.keys(env));
   const addEnv = path === callerPath ? env : { ...env, PATH: path };
   const added = await run(["aoe", "add", opts.cwd, "-t", opts.title, "--tool", opts.tool, "-l", "--extra-args", `--model ${opts.model}${opts.thinking ? ` --thinking ${opts.thinking}` : ""}`], addEnv ? { env: addEnv } : undefined);
@@ -229,6 +271,7 @@ export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly
 
 // stop the agent and move the session to the aoe trash (restorable; never --purge here)
 export const closeAoeSession = async (run: Runner, pane: string): Promise<string> => {
+  if (isHerdrPane(pane)) return closeHerdrSession(run, pane);
   const id = await aoeIdFor(run, pane);
   if (!id) return `aoe session for ${pane} not found`;
   const stopped = await run(["aoe", "session", "stop", id]);
@@ -236,7 +279,13 @@ export const closeAoeSession = async (run: Runner, pane: string): Promise<string
   return removed.code === 0 ? `aoe session ${id} (${pane}) stopped and trashed` : `aoe session ${id} not trashed: ${(removed.err || removed.out || stopped.err).slice(0, 160)}`;
 };
 
+// whether closeAoeSession closed the session (aoe: stopped and trashed; herdr: stopped and closed)
+export const isClosedLine = (line: string): boolean => / stopped and (trashed|closed)$/.test(line);
+
+// the session this process runs in: its herdr pane (herdr sets HERDR_PANE_ID in each pane; a $TMUX there is only inherited
+// from where the herdr server was started), else its tmux session
 export const currentTmuxSession = async (run: Runner): Promise<string> => {
+  if (process.env.HERDR_PANE_ID) return process.env.HERDR_PANE_ID;
   if (!process.env.TMUX) return "";
   const r = await run(["tmux", "display-message", "-p", "#S"]);
   return r.code === 0 ? r.out.trim() : "";

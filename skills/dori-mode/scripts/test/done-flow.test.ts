@@ -43,7 +43,8 @@ test("five quiet minutes after a claim the lane is closed, its thread marked don
   expect(closedVia()).toHaveLength(0);
   const lines = await watchTick(at(T0 + 5 * MIN + 1));
   expect(lines).toEqual(["CLOSE_SUMMARY demo-lane from the lane", expect.stringMatching(/^LANE_CLOSED demo-lane /)]);
-  expect(closedVia()).toEqual([["herdr", "pane", "close", "w:p1"]]);
+  // the lane's pane is all its tab holds, so the tab closes (aoe.ts closeAoeSession for a herdr pane)
+  expect(closedVia()).toEqual([["herdr", "tab", "close", "w:t-p1"]]);
   // the owner's thread gets the lane's summary for him; the claim's evidence stays in the lane's record
   expect(world.calls).toContainEqual(["notify", "chat:team/123", SUMMARY]);
   expect(world.calls.some((c) => c[0] === "notify" && c[2]?.includes("abc123"))).toBe(false);
@@ -287,7 +288,7 @@ test("the close refuses a PR of a gated repo merged without dori merge, even aft
 
 test("text still sitting in the pane input after a poll window gets one more Enter", async () => {
   world.stuckReads = SUBMIT_TIMING.clearPolls;
-  expect(await sendVerified(at(T0).run, at(T0).clock, { ...at(T0).config, backend: "herdr" }, "w:p1", "[LEAD] stuck text still here")).toBe(true);
+  expect(await sendVerified(at(T0).run, at(T0).clock, { ...at(T0).config, backend: "herdr", agentCommand: ["claude", "{prompt}"] }, "w:p1", "[LEAD] stuck text still here")).toBe(true);
   expect(world.calls.filter((c) => c[2] === "send-keys")).toHaveLength(2);
 });
 
