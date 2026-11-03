@@ -11,6 +11,7 @@ import type { FixAttempt, Lane } from "./registry.ts";
 import type { DoriConfig } from "./config.ts";
 import { flat } from "./restatement.ts";
 import { parseWatchLine } from "./watch-log.ts";
+import type { Runner } from "./run.ts";
 
 // stuck: the highest rung of the stuck ladder the lane reached in its current session (rung 4 makes a rollover due);
 // repeats: written by older versions (the most attempts of one same fix), still shown by rollover-stats
@@ -76,7 +77,59 @@ export type RolloverEntry =
       // the old lead frozen at the commit: how many processes, and when freshness closes it (null: by hand)
       readonly frozen?: { readonly pids: number; readonly closeAt: string | null };
       readonly sizes?: Sizes;
-    };
+    }
+  // what a lane moved for being stuck (rung 4) did after the move, written once when it ends: its done claim's one line
+  // (resolved, or not when the lane says the move did not solve it) or the lead's close note when it closed without a
+  // claim (resolved absent: unknown, since a lane is also closed when the owner drops or changes the work); rolloverAt
+  // names the rollover
+  | { readonly kind: "outcome"; readonly at: string; readonly key: string; readonly rolloverAt: string; readonly resolved?: boolean; readonly line: string; readonly by: "claim-done" | "close" };
+
+type Rollover = Extract<RolloverEntry, { kind: "rollover" }>;
+type Outcome = Extract<RolloverEntry, { kind: "outcome" }>;
+
+// A lane rollover that committed while the lane stood at rung 4 of the stuck ladder (whoever decided it).
+const stuckMove = (e: RolloverEntry): e is Rollover => e.kind === "rollover" && e.who === "lane" && e.result.startsWith("done") && (e.signals.stuck?.rung ?? 0) >= 4;
+
+// The move that started the lane's current session, when it was a stuck one with no outcome yet: what its done claim or
+// close is asked to describe. An earlier stuck move followed by any other committed move is not asked about (rollover-stats
+// shows it as moved again), so the last session's result is never credited to it.
+export const pendingStuck = (entries: readonly RolloverEntry[], key: string): Rollover | undefined => {
+  const last = entries.findLast((e): e is Rollover => e.kind === "rollover" && e.who === "lane" && e.key === key && e.result.startsWith("done"));
+  if (!last || !stuckMove(last)) return undefined;
+  return entries.some((e) => e.kind === "outcome" && e.key === key && e.rolloverAt === last.at) ? undefined : last;
+};
+
+// The one line a lane gives at its done claim (or the lead's close note): one line, at most 300 characters.
+export const outcomeLine = (text: string): string => text.replace(/\s+/g, " ").trim().slice(0, 300);
+
+// The ask when a stuck-moved lane claims done without its line (asked only then, never while it works).
+export const outcomeMissing = (key: string, r: Rollover): string =>
+  `ROLLOVER_OUTCOME_MISSING ${key}: this lane moved to a new session at ${r.at} while stuck on ${JSON.stringify(r.signals.stuck?.metric ?? "?")} (${r.signals.stuck?.n ?? "?"} attempts); claim again with --rollover-outcome "<one line: what this session did differently after the move, and whether that solved it>"`;
+
+const minutesBetween = (from: string, to: string): number => Math.round((Date.parse(to) - Date.parse(from)) / 60_000);
+
+// Each stuck rollover of a Dori's log and what came of it: the summary line (n moved, m resolved by a done claim) and one
+// line each with the lane's own words. A rollover with no outcome is "moved again" when the lane rolled over later, else
+// the lane is still open or closed before outcomes were kept; both count as unknown.
+export const stuckOutcomeLines = (entries: readonly RolloverEntry[], who = "here"): string[] => {
+  const moves = entries.filter(stuckMove);
+  const outcomes = new Map<string, Outcome>();
+  for (const e of entries) if (e.kind === "outcome") outcomes.set(`${e.key}\n${e.rolloverAt}`, e);
+  const lines = moves.map((r) => {
+    const o = outcomes.get(`${r.key}\n${r.at}`);
+    const later = entries.find((e): e is Rollover => e.kind === "rollover" && e.who === "lane" && e.key === r.key && e.at > r.at && e.result.startsWith("done"));
+    const what = o
+      ? `${o.resolved === true ? "resolved" : o.resolved === false ? "not resolved" : "unknown"} ${minutesBetween(r.at, o.at)} min after (${o.by}): ${o.line}`
+      : later
+        ? `moved again at ${later.at}, no line`
+        : "no line yet (open, or closed before outcomes were recorded)";
+    return `STUCK_ROLLOVER ${who} ${r.key} ${r.at} by ${r.decidedBy ?? "-"} on ${JSON.stringify(r.signals.stuck?.metric ?? "?")} (${r.signals.stuck?.n ?? "?"}x) -> ${what}`;
+  });
+  const count = (v: boolean) => moves.filter((r) => outcomes.get(`${r.key}\n${r.at}`)?.resolved === v).length;
+  const auto = moves.filter((r) => r.decidedBy === "auto").length;
+  // unknown: closed by the lead without a claim, moved again, still open, or logged before outcomes were kept
+  return [`STUCK_OUTCOMES ${who} stuck_rollovers=${moves.length} (auto ${auto}) resolved=${count(true)} not_resolved=${count(false)} unknown=${moves.length - count(true) - count(false)}`, ...lines];
+};
 
 // afterCompactK: thousands of tokens the session still held right after its last compaction (0 or absent is off)
 export type Limits = { readonly contextPct: number; readonly compactions: number; readonly ageH: number; readonly afterCompactK?: number };
@@ -481,15 +534,35 @@ export const appendRollover = (stateDir: string, entry: RolloverEntry): void => 
 
 export const readRollovers = (stateDir: string): RolloverEntry[] => {
   const file = rolloverLog(stateDir);
-  if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8").split("\n").flatMap((l) => {
+  return existsSync(file) ? parseRollovers(readFileSync(file, "utf8")) : [];
+};
+
+// The stuck rollovers of each other Dori on this host (handover.statsPeers "<user>:<absolute path>"), read as that
+// account; a log that cannot be read is one STUCK_OUTCOMES <user> UNREADABLE line, never a silent zero.
+export const peerStuckLines = async (run: Runner, peers: readonly string[]): Promise<string[]> => {
+  const out: string[] = [];
+  for (const peer of peers) {
+    const m = /^([a-z_][a-z0-9_-]*):(\/\S+)$/.exec(peer);
+    if (!m) {
+      out.push(`STUCK_OUTCOMES ${peer} UNREADABLE: give <user>:<absolute path of its rollover-log.jsonl>`);
+      continue;
+    }
+    const [, user = "", path = ""] = m;
+    const r = await run(["sudo", "-n", "-u", user, "cat", path], { timeoutMs: 15_000 });
+    if (r.code === 0) out.push(...stuckOutcomeLines(parseRollovers(r.out), user));
+    else out.push(`STUCK_OUTCOMES ${user} UNREADABLE: ${(r.err || r.out || `exit ${r.code}`).replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+  return out;
+};
+
+export const parseRollovers = (text: string): RolloverEntry[] =>
+  text.split("\n").flatMap((l) => {
     try {
       return l.trim() ? [JSON.parse(l) as RolloverEntry] : [];
     } catch {
       return [];
     }
   });
-};
 
 export const lastProposal = (entries: readonly RolloverEntry[], key: string): Extract<RolloverEntry, { kind: "proposal" }> | undefined =>
   entries.findLast((e): e is Extract<RolloverEntry, { kind: "proposal" }> => e.kind === "proposal" && e.key === key);
@@ -553,7 +626,7 @@ export const rolloverStats = (entries: readonly RolloverEntry[], watchLines: rea
     out.push(`ROLLOVER ${r.who} ${r.key} ${r.at} ${r.result} ${r.from} -> ${r.to ?? "-"} ${fmtSignals(r.signals)}; approval ${r.approvalMin ?? "-"} min (by ${r.approvedBy ?? "-"})${fmtDecision(r)}; steps ${r.steps.map((s) => `${s.step} ${Math.round(s.ms / 1000)}s${s.ok ? "" : " FAIL"}`).join(", ") || "-"}${r.reasons.length ? `; reasons: ${r.reasons.join("; ")}` : ""}${r.accounts && r.accounts.from !== r.accounts.to ? `; account ${r.accounts.from || "?"} -> ${r.accounts.to || "?"}` : ""}${r.supplementRounds ? `; supplements ${r.supplementRounds} (${(r.supplements ?? []).map((s) => s.items.length).join("+")} items)` : ""}${fmtSizes(r, now, readK)}`);
     out.push(`QUALITY ${r.key} ${r.at} before ${windowH}h: ${fmtCounts(countsIn(watchLines, r.key, at - span, at))} | after ${afterH}h: ${fmtCounts(countsIn(watchLines, r.key, at, at + span))}`);
   }
-  return out;
+  return [...out, ...stuckOutcomeLines(entries)];
 };
 
 // The owner's own messages a lane handover note carries, since the lane's last handover: those in the lane's thread and

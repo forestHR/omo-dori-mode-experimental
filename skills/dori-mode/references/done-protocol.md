@@ -15,6 +15,8 @@ The evidence is for the lead; the summary is what the owner reads in your work t
 
 The key is in your brief's lane footer. If you leave it out, the lane registered for your pane is used.
 
+If your lane was moved to a new session because it was stuck (rung 4 of the stuck ladder), add one line on what you did differently after the move: `--rollover-outcome "<what changed, and whether that solved it>"`, plus `--rollover-unresolved` when the move did not solve it and you finished another way. Without it the claim is refused once (`ROLLOVER_OUTCOME_MISSING`, nothing recorded); claim again with the line.
+
 ## What happens next
 
 1. The Dori gets a `LANE_DONE_CLAIMED` event, and you get a `[LEAD]` line saying when the lane closes.

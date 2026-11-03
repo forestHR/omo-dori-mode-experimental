@@ -22,7 +22,7 @@ import { findLead, LeadError } from "./lead.ts";
 import { accountHome, ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers, windowsDetachRefusal } from "./handover.ts";
 import { laneHandover, type LaneHandoverDeps, markReady, paneSignals, SUMMARY_TEMPLATE } from "./lane-handover.ts";
 import { auditHandover, auditSummary, type Committed, findCommitted, markerFile, reportGap, sendAuditSummary, summaryWeek } from "./rollover-audit.ts";
-import { appendRollover, dueReasons, holdTyped, LEAD_PREFIX, limitsFor, quietReason, readRollovers, type RolloverRequest, rolloverStats, sessionStart } from "./rollover.ts";
+import { appendRollover, dueReasons, holdTyped, LEAD_PREFIX, limitsFor, outcomeLine, peerStuckLines, pendingStuck, quietReason, readRollovers, type RolloverRequest, rolloverStats, sessionStart, stuckOutcomeLines } from "./rollover.ts";
 import { procTable, resolveSession } from "./session-id.ts";
 import { restartService } from "./update-ready.ts";
 import { ConfigError, configPath, envFilePath, fill, loadConfig, loadEnvFile, resolveInstance } from "./config.ts";
@@ -196,13 +196,16 @@ const USAGE = `dori <command> [options]
                                        print the lane's caps (supervision.defaults, then supervision.lanes.<key>, then its own);
                                        with flags, set its own (none: off). At a cap freshness tells the lead once (LANE_CAP);
                                        the lane is never stopped or told
-  claim-done [<key>] --evidence TEXT [--summary TEXT] [--posted ID|LINK] [--post-summary]
+  claim-done [<key>] --evidence TEXT [--summary TEXT] [--posted ID|LINK] [--post-summary] [--rollover-outcome TEXT [--rollover-unresolved]]
                                        key defaults to the lane registered for this pane (the tmux session it runs in, else
                                        $HERDR_PANE_ID); --summary: 2 to 5 plain lines for the owner's thread in his language.
                                        The result reaches the thread once: when this lane's session posted in its work thread
                                        (dori send, dori thread) in the last 30 minutes, or --posted names that message, it is
                                        the result (RESULT_ALREADY_POSTED) and the close posts no summary; --post-summary: that
-                                       post was not the result, post the summary anyway
+                                       post was not the result, post the summary anyway. A lane moved to a new session at
+                                       rung 4 of the stuck ladder gives --rollover-outcome: one line on what it did
+                                       differently after the move (--rollover-unresolved: the move did not solve it); without
+                                       it the claim is ROLLOVER_OUTCOME_MISSING, exit 2, nothing recorded
                                        (what changed, what is left, when it reaches where it is used), posted before the close
                                        marks the thread done; paths, commit hashes, backticks or report heads are refused
                                        (SUMMARY_REFUSED, exit 2). Without it the close has a model write one from the lane's
@@ -301,7 +304,8 @@ const USAGE = `dori <command> [options]
                                        done and archived when DORI_DISCORD_TOKEN is set; a thread another open lane or an
                                        open card uses only gets the summary posted. With the result already in the thread
                                        (the claim's RESULT_ALREADY_POSTED, or --posted for one the lead relayed) and no
-                                       --summary, nothing is posted: CLOSE_SUMMARY_SKIPPED
+                                       --summary, nothing is posted: CLOSE_SUMMARY_SKIPPED. A lane moved for being stuck that
+                                       closes with no outcome line gets the --note as one, counted unknown (ROLLOVER_OUTCOME)
   watch                                long-running: emits LANE_* lines every 30 s
   update [--pull] [--dry-run]           apply changed scripts to configured services and report unset new config keys
   notify-change --summary TEXT [--file PATH ...]
@@ -462,8 +466,12 @@ const USAGE = `dori <command> [options]
                                        writes (ROLLOVER_PROPOSAL), logged to <stateDir>/rollover-log.jsonl; then run the
                                        handover with --approved-by "lead:<reason and signal>" (or "lead:<reason>,
                                        owner <message id>" when the owner asked for it: checked against the inbox)
-  rollover-stats [--window H]          proposals and rollovers from the log: signal values, approval time, each step's time
-                                       and result, and the lane's watch-log quality signals H hours (24) before and after
+  rollover-stats [--window H] [--stuck]
+                                       proposals and rollovers from the log: signal values, approval time, each step's time
+                                       and result, and the lane's watch-log quality signals H hours (24) before and after;
+                                       then STUCK_OUTCOMES: stuck (rung 4) rollovers, resolved / not resolved / unknown, and
+                                       one STUCK_ROLLOVER line each with the lane's own words. --stuck prints only that, for
+                                       this Dori and each handover.statsPeers Dori
   handover ready [<key>] --note FILE   run by a lane in its own pane at a safe point: the local chains running now may end
                                        with the old session; FILE is the lane's conversation summary (its headings: handover
                                        ready --template) and goes into the note (valid handover.readyMin minutes)
@@ -574,7 +582,7 @@ const flags = parseArgs({
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
     rule: { type: "string" }, outcome: { type: "string" }, lesson: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
-    reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
+    reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" }, "rollover-outcome": { type: "string" }, "rollover-unresolved": { type: "boolean" }, stuck: { type: "boolean" },
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
     "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
     "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
@@ -1084,7 +1092,11 @@ try {
       if (summary !== undefined) postable(summary, `claim-done --summary ${l.key}`);
       const bad = summary === undefined ? undefined : plainSummaryProblem(summary, config.discord.locale, config.discord.ownerSpeech);
       if (bad) die(`SUMMARY_REFUSED ${l.key}: ${bad}; write it for the owner in plain words`, 2);
-      console.log(await claimDone(deps, l, need("evidence"), summary, { posted: postedId(), postSummary: Boolean(flags.values["post-summary"]) }));
+      const outcome = opt("rollover-outcome");
+      if (flags.values["rollover-unresolved"] && outcome === undefined) die("--rollover-unresolved goes with --rollover-outcome \"<one line>\"", 2);
+      const claimed = await claimDone(deps, l, need("evidence"), summary, { posted: postedId(), postSummary: Boolean(flags.values["post-summary"]), ...(outcome !== undefined ? { rolloverOutcome: { line: outcome, resolved: !flags.values["rollover-unresolved"] } } : {}) });
+      if (claimed.startsWith("ROLLOVER_OUTCOME_MISSING ")) die(claimed, 2);
+      console.log(claimed);
       break;
     }
     case "object-done": {
@@ -1309,8 +1321,17 @@ try {
       const target = await lane(key ?? die("close needs a lane key"));
       // --lesson: kept after a successful close, its evidence the Done line unless --evidence names one; never blocks the close
       const rule = opt("lesson");
-      const r = await closeLane(deps, target, opt("note") ?? "closed by the lead", summary, postedId(), rule === undefined ? undefined : { rule, evidence: opt("evidence") ?? target.done });
+      const note = opt("note") ?? "closed by the lead";
+      const r = await closeLane(deps, target, note, summary, postedId(), rule === undefined ? undefined : { rule, evidence: opt("evidence") ?? target.done });
       for (const line of r.lines) console.log(line);
+      // a lane moved for being stuck that closes without its outcome line: the lead's note stands in, counted unknown (the
+      // owner may have dropped or changed the work), so rollover-stats still lists it
+      const stuck = r.closed ? pendingStuck(readRollovers(config.stateDir), target.key) : undefined;
+      if (stuck) {
+        const line = outcomeLine(note);
+        appendRollover(config.stateDir, { kind: "outcome", at: new Date().toISOString(), key: target.key, rolloverAt: stuck.at, line, by: "close" });
+        console.log(`ROLLOVER_OUTCOME ${target.key} unknown (rollover ${stuck.at}): ${line}`);
+      }
       process.exit(r.closed ? 0 : 2);
     }
     case "watch":
@@ -2207,6 +2228,10 @@ try {
     case "rollover-stats": {
       const window = opt("window") ? Number(opt("window")) : 24;
       if (!(window > 0)) die("--window must be a positive number of hours");
+      if (flags.values.stuck) {
+        for (const line of [...stuckOutcomeLines(readRollovers(config.stateDir)), ...(await peerStuckLines(run, config.handover.statsPeers))]) console.log(line);
+        break;
+      }
       const watch = existsSync(config.watchLog) ? readFileSync(config.watchLog, "utf8").split("\n") : [];
       for (const line of rolloverStats(readRollovers(config.stateDir), watch, Date.now(), window)) console.log(line);
       break;
