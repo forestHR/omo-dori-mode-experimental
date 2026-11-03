@@ -282,6 +282,21 @@ test("answering with dori send slack takes the watcher's eyes off the messages i
   expect(unreacted(slack).at(-1)).toBe("C1 1700000000.000300 eyes bot");
 });
 
+test("an answer in the channel itself, with no thread, takes the eyes off the channel's earlier messages, not those inside a thread", async () => {
+  // Given a name-addressed owner message in the channel, a mention inside another message's thread, and one in a second channel
+  const slack = fakeSlack();
+  const w = await watcher(slack);
+  slack.event({ type: "app_mention", channel: "C1", user: "UOWNER", text: "<@UBOT> 올려줘", ts: "1700000000.000400" });
+  slack.event({ type: "app_mention", channel: "C1", user: "UGUEST", text: "<@UBOT> 여기", ts: "1700000000.000420", thread_ts: "1700000000.000410" });
+  slack.event({ type: "app_mention", channel: "C2", user: "UOWNER", text: "<@UBOT> 저기", ts: "1700000000.000430" });
+  await slack.until("three SLACK_MSG lines", () => w.msgs().length === 3);
+  // When the lead answers in C1 with no --thread (the owner asked for answers in the channel)
+  const top = await send(w, slack, ["--to", "C1", "--text", "올렸어"]);
+  // Then only the C1 channel message loses the bot's eyes
+  expect([top.code, top.out.trim().split("\n").length]).toEqual([0, 1]);
+  expect(unreacted(slack)).toEqual(["C1 1700000000.000400 eyes bot"]);
+});
+
 test("taking the eyes off: no reactions:write is one SLACK_UNEYE_SKIPPED line and the answer still goes out; eyes already gone are quiet; a member's token never unreacts", async () => {
   // Given an addressed DM
   const slack = fakeSlack();
