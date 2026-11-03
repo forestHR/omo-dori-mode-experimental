@@ -7,11 +7,11 @@ import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { leadAlert } from "./autoturn.ts";
 import { taskOpen, taskRecord } from "./background.ts";
-import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, statusLine } from "./lane-handover.ts";
-import { COMMITTED, crossed, dueReasons, limitsFor, readRollovers, type RolloverEntry, type Signals, type Who } from "./rollover.ts";
+import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, statusLine, waitingRequest } from "./lane-handover.ts";
+import { COMMITTED, crossed, dueReasons, limitsFor, readRollovers, type RolloverEntry, type RolloverRequest, type Signals, type Who } from "./rollover.ts";
 import { auditDue, type Committed, weeklyDue, writeMarker } from "./rollover-audit.ts";
 import { dailyAuditSince, linksDue } from "./directive-audit.ts";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { watchLog } from "./watch-log.ts";
 
@@ -79,13 +79,17 @@ export const scrubForThread = (line: string, home: string): string =>
     .replace(/`/g, "'")
     .trim();
 
-export type SweepAct = { readonly kind: "nudged" | "nudge-failed" | "posted" | "no-report" | "stuck" | "research_started" | "research_not_started" | "rollover_due" | "rollover_auto" | "rollover_audit" | "audit_summary" | "lead_compaction_stuck" | "directive_audit" | "directive_links"; readonly lane: string; readonly detail: string };
+export type SweepAct = { readonly kind: "nudged" | "nudge-failed" | "posted" | "no-report" | "stuck" | "research_started" | "research_not_started" | "rollover_due" | "rollover_auto" | "rollover_audit" | "audit_summary" | "lead_compaction_stuck" | "directive_audit" | "directive_links" | "ready_resume"; readonly lane: string; readonly detail: string };
 
 export type RolloverHooks = {
   // the length signals of the session in a pane: context use, compactions, age
   readonly signals: (pane: string, model: string) => Promise<Signals>;
   // starts a rollover without asking (handover.autoRolloverLanes / autoRolloverLead on); the line says what it started
   readonly auto?: (who: Who, key: string) => Promise<string>;
+  // starts again, detached, a lane handover the lead (or the owner) approved that was refused while the lane was busy,
+  // with the same approval and the options that run was given, once the lane marked ready (readyResume); started false
+  // when it could not be started
+  readonly resume?: (key: string, approvedBy: string, request: RolloverRequest) => Promise<{ readonly started: boolean; readonly line: string }>;
   // whether a process still runs (a handover's lock holder, the chain pids a refusal named); process.kill(pid, 0) by default
   readonly alive?: (pid: number) => boolean;
   // whether a background task (st_...) a refusal named has ended: its senpi record under home has a final status (a task
@@ -264,6 +268,54 @@ const rolloverDue = async (deps: FlowDeps, hooks: RolloverHooks, who: Who, key: 
   return acts;
 };
 
+// A lead's handover of a busy lane is refused (HANDOVER_REFUSED, blocked work or busy) and the lane is asked to mark a
+// safe point with dori handover ready; that mark alone moved nothing until someone ran the handover again by hand (the
+// lane tournament-public marked ready at 05:57Z on 2026-11-03 and waited until a hand-run at 06:12Z). So the first sweep
+// that sees a mark written after such a refused request, in the same pane, starts that request again with the same
+// approval, detached and waiting for the lane's idle moment; a mark with no refused request before it starts nothing.
+// One start per mark: the mark's time is claimed in <key>.ready-resume.json before the start (a start that could not be
+// launched gives the claim back). A mark older than handover.readyMin starts nothing either: the lead hears of it once.
+// the dori handover --lane options that give a run started again what the refused run was given
+export const resumeArgs = (r: RolloverRequest): string[] => [...(r.note ? ["--note", r.note] : []), ...(r.model ? ["--model", r.model] : []), ...(r.thinking ? ["--thinking", r.thinking] : []), ...(r.keepOld ? ["--keep-old"] : []), ...(r.verifyMin ? ["--minutes", String(r.verifyMin)] : [])];
+const resumeFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.ready-resume.json`);
+const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pane: string): Promise<SweepAct[]> => {
+  if (!hooks.resume) return [];
+  const stateDir = deps.config.stateDir;
+  const mark = readJson<ReadyMark>(readyFile(stateDir, key));
+  const markAt = Date.parse(mark?.at ?? "");
+  if (!mark || Number.isNaN(markAt) || mark.pane !== pane) return [];
+  const claimed = resumeFile(stateDir, key);
+  if (readJson<{ readyAt?: string }>(claimed)?.readyAt === mark.at) return [];
+  const asked = waitingRequest(readRollovers(stateDir), key, pane);
+  if (!asked || Date.parse(asked.at) >= markAt) return [];
+  if (handoverRunning(stateDir, "lane", key, hooks.alive ?? pidAlive)) return [];
+  const now = deps.clock.now();
+  const min = deps.config.handover.readyMin;
+  // a refusal logged before its options were kept (no request) is not started again: it could drop --keep-old and close
+  // the old session; the lead runs it again
+  const why = !asked.request ? "the request was logged before its options were kept, so a start now could drop them (--keep-old, --note, --model)" : now - markAt > min * 60_000 ? `the ready mark is older than ${min} min` : "";
+  const by = (asked.approvedBy ?? "").trim();
+  mkdirSync(join(stateDir, "handover", "lanes"), { recursive: true });
+  writeFileSync(claimed, `${JSON.stringify({ readyAt: mark.at, at: new Date(now).toISOString(), request: asked.at, approvedBy: by, result: why ? "skipped" : "started" })}\n`);
+  const log = (line: string): SweepAct[] => {
+    watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line });
+    return [{ kind: "ready_resume", lane: key, detail: line.slice(line.indexOf(" ", line.indexOf(" ") + 1) + 1) }];
+  };
+  if (why) {
+    const lead = deps.config.leadPane;
+    const text = asked.request
+      ? `[DORI] ${key}: the handover you asked for at ${asked.at} was not started again: the lane marked ready at ${mark.at}, more than handover.readyMin (${min} min) ago. Ask the lane to run dori handover ready ${key} --note <file> again (the handover then starts by itself), or run it again yourself.`
+      : `[DORI] ${key}: the lane marked ready at ${mark.at} after the handover you asked for at ${asked.at}, but that request was logged before its options were kept, so it was not started again. Run dori handover --lane ${key} again with the same approval and options now.`;
+    const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, text) : false;
+    return log(`HANDOVER_READY_RESUME_SKIPPED ${key} skipped: the ready mark of ${mark.at} in ${pane} follows the request of ${asked.at} (refused ${asked.blocked}), not started again: ${why}; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
+  }
+  const r = await hooks.resume(key, by, asked.request ?? {});
+  if (!r.started) rmSync(claimed, { force: true });
+  return log(r.started
+    ? `HANDOVER_READY_RESUMED ${key} started: the ready mark of ${mark.at} in ${pane} follows the request of ${asked.at} (refused ${asked.blocked}); started again with the same approval ${JSON.stringify(by)}: ${r.line}`
+    : `HANDOVER_READY_RESUME_FAILED ${key} failed: the request of ${asked.at} could not be started again (${r.line}); the next sweep tries again`);
+};
+
 // The line freshness prints when it starts: whether rollovers start by themselves, on what, and how often they are retried.
 export const autoReadyLine = (h: DoriConfig["handover"]): string => {
   const side = (who: Who, on: boolean): string => {
@@ -304,6 +356,9 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
     // a lane told "not done" keeps working: it is moved to a new session like a working one (cyto-p2-timers carried 306k
     // after its 13th compaction on 10-19 and was never started); its reports, nudges and posts stay as they were
     if (statusOf(lane) === "not-done") {
+      const resumed = await readyResume(deps, hooks, lane.key, lane.pane);
+      acts.push(...resumed);
+      if (resumed.some((a) => a.detail.startsWith("started"))) continue;
       acts.push(...(await rolloverDue(deps, hooks, "lane", lane.key, lane.pane, lane.model ?? deps.config.defaultModel, lane.rolloverDue, stuckTop(lane), (due) => deps.registry.patch(lane.key, { rolloverDue: due }))));
       continue;
     }
@@ -333,7 +388,10 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
       const r = await researchCheck(deps, lane);
       if (r.verdict === "started" || r.verdict === "not-started") acts.push({ kind: r.verdict === "started" ? "research_started" : "research_not_started", lane: lane.key, detail: r.line.replace(/^RESEARCH_\w+ \S+ /, "") });
     }
-    acts.push(...(await rolloverDue(deps, hooks, "lane", lane.key, lane.pane, lane.model ?? deps.config.defaultModel, current.rolloverDue, stuckTop(current), (due) => deps.registry.patch(lane.key, { rolloverDue: due }))));
+    const resumed = await readyResume(deps, hooks, lane.key, lane.pane);
+    acts.push(...resumed);
+    // the start just made holds the lane: no automatic start beside it in this sweep
+    if (!resumed.some((a) => a.detail.startsWith("started"))) acts.push(...(await rolloverDue(deps, hooks, "lane", lane.key, lane.pane, lane.model ?? deps.config.defaultModel, current.rolloverDue, stuckTop(current), (due) => deps.registry.patch(lane.key, { rolloverDue: due }))));
     const heard = lastHeard(current);
     const silentMin = Math.round((now - heard) / 60_000);
     if (silentMin >= deps.config.nudgeAfterMin && (current.lastNudgeAt ?? 0) < heard) {

@@ -17,7 +17,7 @@ import { findLead, LeadError } from "./lead.ts";
 import { ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers } from "./handover.ts";
 import { laneHandover, type LaneHandoverDeps, markReady, paneSignals, SUMMARY_TEMPLATE } from "./lane-handover.ts";
 import { auditHandover, auditSummary, type Committed, findCommitted, markerFile, reportGap, sendAuditSummary, summaryWeek } from "./rollover-audit.ts";
-import { appendRollover, dueReasons, holdTyped, LEAD_PREFIX, limitsFor, quietReason, readRollovers, rolloverStats, sessionStart } from "./rollover.ts";
+import { appendRollover, dueReasons, holdTyped, LEAD_PREFIX, limitsFor, quietReason, readRollovers, type RolloverRequest, rolloverStats, sessionStart } from "./rollover.ts";
 import { procTable, resolveSession } from "./session-id.ts";
 import { restartService } from "./update-ready.ts";
 import { ConfigError, configPath, envFilePath, fill, loadConfig, loadEnvFile, resolveInstance } from "./config.ts";
@@ -32,7 +32,7 @@ import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
 import { claimDone, closeLane, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
 import { ownerSpeechProblem, plainSummaryProblem } from "./close-summary.ts";
 import { literalNewlineProblem } from "./messenger/literal-newline.ts";
-import { autoReadyLine, freshnessTick } from "./freshness.ts";
+import { autoReadyLine, freshnessTick, resumeArgs } from "./freshness.ts";
 import { sampleUsage } from "./heavy-headroom.ts";
 import { gpuRoom, neverFits, parseMem, readMeminfo, spawnScoped } from "./heavy-mem.ts";
 import { heavyJobCommand, HeavyJobError, heavyServe } from "./heavy-queue.ts";
@@ -1322,6 +1322,15 @@ try {
             mkdirSync(join(config.stateDir, "handover"), { recursive: true });
             const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", ...(who === "lane" ? ["--lane", k, "--wait-idle", String(config.handover.autoWaitMin)] : []), "--approved-by", `auto:handover.autoRollover${who === "lane" ? "Lanes" : "Lead"}`]);
             return r.code === 0 ? `started unit=${unit} log=${log}` : `could not start: ${(r.err || r.out).trim().slice(0, 160)}`;
+          },
+          // a lead's lane handover refused while the lane was busy, started again once the lane marked ready: a detached run
+          // with the same approval and options that waits for the lane's idle moment like an automatic one
+          resume: async (k: string, approvedBy: string, request: RolloverRequest) => {
+            const unit = `dori-rollover-${k}-${Date.now()}`;
+            const log = join(config.stateDir, "handover", "run.log");
+            mkdirSync(join(config.stateDir, "handover"), { recursive: true });
+            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "--lane", k, "--wait-idle", String(config.handover.autoWaitMin), "--approved-by", approvedBy, ...resumeArgs(request)]);
+            return r.code === 0 ? { started: true, line: `unit=${unit} log=${log}` } : { started: false, line: `could not start: ${(r.err || r.out).trim().slice(0, 160)}` };
           },
           // the audit after a committed handover: a detached run, so its supplement round does not hold up the sweep
           audit: async (c: Committed) => {

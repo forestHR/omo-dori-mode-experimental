@@ -39,6 +39,8 @@ export type OwnerReport = { readonly message?: string; readonly error?: string }
 // and its last once checked; newLog is the new session's log, where rollover-stats reads the context an hour later.
 export type Sizes = { readonly oldK?: number; readonly firstK?: number; readonly checkedK?: number; readonly newLog?: string };
 
+export type RolloverRequest = { readonly note?: string; readonly model?: string; readonly thinking?: string; readonly keepOld?: boolean; readonly verifyMin?: number };
+
 export type RolloverEntry =
   | { readonly kind: "proposal"; readonly who: Who; readonly at: string; readonly key: string; readonly card?: string; readonly pane: string; readonly signals: Signals; readonly crossed: readonly string[]; readonly note?: string; readonly blockers: string }
   | {
@@ -64,6 +66,9 @@ export type RolloverEntry =
       readonly pids?: readonly number[];
       // the old session's background tasks that still ran (st_...), so an automatic start knows when they ended
       readonly tasks?: readonly string[];
+      // a lane run refused while the lane was busy: the options it was given, so the start again after the lane's ready mark
+      // (freshness readyResume) moves it the way it was asked
+      readonly request?: RolloverRequest;
       // the subscription accounts of the old and new session ("" when the status line did not show one)
       readonly accounts?: { readonly from: string; readonly to: string };
       readonly supplementRounds?: number;

@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { autoReadyLine, freshnessTick } from "../src/freshness.ts";
+import { autoReadyLine, freshnessTick, resumeArgs } from "../src/freshness.ts";
 import { closeDueFrozen, readFrozen } from "../src/frozen.ts";
 import { ackHandover, manifestPath } from "../src/handover.ts";
 import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
@@ -1520,6 +1520,118 @@ test("a lane given up by an older version (gaveUp after autoMaxTries) is started
   expect(await tick(0)).toEqual(["rollover_auto start 7 (context 85% >= 80%): started"]);
   expect(await tick(29)).toEqual([]);
   expect(await tick(30)).toEqual(["rollover_auto start 8 (context 85% >= 80%): started"]);
+});
+
+test("a lead's handover refused while the lane was busy starts again once, with the same approval, when the lane marks ready; a mark alone or past readyMin starts nothing", async () => {
+  // Given: tournament-public on 2026-11-03 marked ready at 05:57Z after its lead's refused handover and waited until a hand-run
+  const base = await setup();
+  const T0 = Date.parse("2026-10-11T16:35:00Z");
+  const clock = fakeClock(T0);
+  const deps = { ...base, clock, config: { ...base.config, handover: { ...base.config.handover, readyMin: 30 } } };
+  const LEAD_OK = "lead:STUCK rung 4 on loss after research";
+  const running = new Set<number>();
+  const resumes: string[] = [];
+  let launches = true;
+  const hooks = {
+    signals: async () => ({}),
+    alive: (pid: number) => running.has(pid),
+    resume: async (key: string, approvedBy: string) => {
+      resumes.push(`${key} ${approvedBy}`);
+      return launches ? { started: true, line: "unit=u1" } : { started: false, line: "could not start: no bus" };
+    },
+  };
+  const tick = async (min: number): Promise<string[]> => {
+    clock.at = T0 + min * 60_000;
+    await deps.registry.patch("demo", { lastReplyAt: clock.at });
+    return (await freshnessTick(deps, "/home/test", hooks)).filter((a) => a.kind === "ready_resume").map((a) => `${a.lane} ${a.detail.split(":")[0]}`);
+  };
+  const refused = (min: number, approvedBy: string, blocked?: "work" | "busy", from = OLD, legacy = false) =>
+    appendRollover(state.dir, { kind: "rollover", who: "lane", at: new Date(T0 + min * 60_000).toISOString(), key: "demo", from, approvedBy, signals: {}, steps: [], result: "refused", reasons: ["a turn is running"], ...(blocked ? { blocked, ...(legacy ? {} : { request: {} }) } : {}) });
+  const at = (min: number) => new Date(T0 + min * 60_000).toISOString();
+  // When / Then: a ready mark with no request before it starts nothing
+  ready(deps, [], at(1));
+  expect(await tick(2)).toEqual([]);
+  // nor after an automatic run (rolloverDue brings those back), a refusal for want of approval, or a lead request from another pane
+  refused(3, "auto:handover.autoRolloverLanes", "busy");
+  ready(deps, [], at(4));
+  expect(await tick(5)).toEqual([]);
+  refused(6, "lead:no signal");
+  ready(deps, [], at(7));
+  expect(await tick(8)).toEqual([]);
+  refused(9, LEAD_OK, "busy", "aoe_demo_00000000");
+  ready(deps, [], at(10));
+  expect(await tick(11)).toEqual([]);
+  // a lead request refused busy, with the mark written before it: nothing (that run already saw the mark)
+  refused(12, LEAD_OK, "busy");
+  expect(await tick(13)).toEqual([]);
+  // the mark from another pane: nothing
+  ready(deps, [], at(14), "aoe_demo_00000000");
+  expect(await tick(15)).toEqual([]);
+  // the lane marks ready after the refused request: one start with the same approval, logged
+  ready(deps, [], at(16));
+  expect(await tick(17)).toEqual(["demo started"]);
+  expect(resumes).toEqual([`demo ${LEAD_OK}`]);
+  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUMED demo started: the ready mark of ${at(16)} in ${OLD} follows the request of ${at(12)} (refused busy); started again with the same approval "${LEAD_OK}": unit=u1`);
+  // the same mark never starts it twice, in this sweep's process or the next one's
+  expect(await tick(18)).toEqual([]);
+  expect(await tick(25)).toEqual([]);
+  expect(resumes).toHaveLength(1);
+  // the restarted run was refused again (work would die): a new mark starts it again, but not while a handover holds the lock
+  refused(26, LEAD_OK, "work");
+  running.add(77);
+  writeFileSync(join(state.dir, "handover", "lanes", "demo.lock"), JSON.stringify({ pid: 77, at: "x" }));
+  ready(deps, [], at(27));
+  expect(await tick(28)).toEqual([]);
+  running.delete(77);
+  // a start that could not be launched gives the mark back: the next sweep tries again
+  launches = false;
+  expect(await tick(29)).toEqual(["demo failed"]);
+  launches = true;
+  expect(await tick(30)).toEqual(["demo started"]);
+  expect(resumes).toHaveLength(3);
+  // a mark older than readyMin by the time a sweep sees it: no start, the lead hears of it once
+  refused(31, LEAD_OK, "busy");
+  ready(deps, [], at(32));
+  expect(await tick(63)).toEqual(["demo skipped"]);
+  expect(await tick(64)).toEqual([]);
+  expect(resumes).toHaveLength(3);
+  expect(sent(w).filter((t) => t.startsWith("[DORI] demo: the handover you asked for"))).toHaveLength(1);
+  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUME_SKIPPED demo skipped: the ready mark of ${at(32)} in ${OLD} follows the request of ${at(31)} (refused busy), not started again: the ready mark is older than 30 min`);
+  // a refusal logged by an older version (no request: its --keep-old or --note unknown) is never started again; the lead
+  // hears of it once and runs it again
+  refused(65, LEAD_OK, "busy", OLD, true);
+  ready(deps, [], at(66));
+  expect(await tick(67)).toEqual(["demo skipped"]);
+  expect(await tick(68)).toEqual([]);
+  expect(resumes).toHaveLength(3);
+  expect(sent(w).filter((t) => t.includes("that request was logged before its options were kept"))).toHaveLength(1);
+});
+
+test("the lead's refusal of a busy lane says that the lane's ready mark starts it again, and that start is given the options the refused run was given", async () => {
+  // Given
+  const base: LaneHandoverDeps = { ...(await setup()), reportOwner: async () => "msg-1" };
+  const cwd = process.cwd();
+  process.chdir(state.dir);
+  writeFileSync(join(state.dir, "lead-note.md"), "keep the old one open\n");
+  // a refusal with no options still logs them (empty), so it is told apart from one an older version logged
+  await laneHandover(base, "demo", "aoe_lead_x", { approvedBy: "lead:STUCK rung 4 on loss after research" });
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "refused", blocked: "work", request: {} });
+  printed.length = 0;
+  // When: the lane's chain 15 would die
+  const r = await laneHandover(base, "demo", "aoe_lead_x", { approvedBy: "lead:STUCK rung 4 on loss after research", note: "lead-note.md", model: "anthropic/claude-x", thinking: "high", keepOld: true, verifyMin: 9 }).finally(() => process.chdir(cwd));
+  // Then
+  expect(r.code).toBe(2);
+  expect(printed.find((l) => l.startsWith("HANDOVER_REFUSED demo"))).toContain("once it marks ready within 30 min, freshness starts this handover again by itself with the same approval");
+  const request = { note: join(state.dir, "lead-note.md"), model: "anthropic/claude-x", thinking: "high", keepOld: true, verifyMin: 9 };
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "refused", blocked: "work", request });
+  // the lane marks ready: the start again carries every option
+  const given: unknown[] = [];
+  const at = new Date(base.clock.now() + 60_000).toISOString();
+  ready(base, [15], at);
+  const clock = fakeClock(base.clock.now() + 120_000);
+  await freshnessTick({ ...base, clock }, "/home/test", { signals: async () => ({}), alive: () => false, resume: async (_key, approvedBy, req) => { given.push(approvedBy, req); return { started: true, line: "unit=u" }; } });
+  expect(given).toEqual(["lead:STUCK rung 4 on loss after research", request]);
+  expect(resumeArgs(request)).toEqual(["--note", join(state.dir, "lead-note.md"), "--model", "anthropic/claude-x", "--thinking", "high", "--keep-old", "--minutes", "9"]);
 });
 
 test("an automatic lane rollover tells the owner afterwards with what it crossed; a refused one is only in the log", async () => {
