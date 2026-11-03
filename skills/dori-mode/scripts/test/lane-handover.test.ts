@@ -1631,6 +1631,75 @@ test("a safe-point request that did not reach the lane is kept on the waiting re
   expect(readFileSync(deps.config.watchLog, "utf8")).toContain("HANDOVER_SAFE_POINT_ASKED demo");
 });
 
+test("a run that waited twice keeps the pane it first found: the lane moved meanwhile by the run it waited on is not moved again (review 320 round 9)", async () => {
+  // Given: this forcing run first found the lane in OLD; the winner repointed it to NEW and still finishes (its journal)
+  const base = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  mkdirSync(lanes, { recursive: true });
+  await base.registry.patch("demo", { pane: NEW });
+  writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid: 77, at: "2026-10-11T16:30:00Z", from: OLD, to: NEW, note: join(lanes, "demo-20261011-163000.md") }));
+  live.add(77);
+  const deps: LaneHandoverDeps = { ...base, reportOwner: async () => "msg-1", clock: { ...base.clock, sleep: async () => {
+    // the winner finishes within the wait: journal gone, process ended
+    rmSync(pendingFile(state.dir, "demo"), { force: true });
+    live.delete(77);
+    simulate();
+  } } };
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true, boundPane: OLD });
+  // Then
+  expect(r.code).toBe(0);
+  expect(printed).toContain(`HANDOVER_ALREADY_MOVED demo: the lane moved from ${OLD} to ${NEW} while this run waited; it is not moved again`);
+  expect(opened()).toBe(false);
+});
+
+test("a safe-point ask whose cause quotes a backtick or $( still reaches the lane, and a sweep that cannot type it goes on with the other lanes (review 320 round 9)", async () => {
+  // Given: a chain whose command line has a backtick and $( (an ordinary shell command)
+  const base = await setup();
+  table = aoeTable().map((p) => (p.pid === 15 ? { ...p, cmd: "bash -c echo `date` $(hostname); sleep 7200" } : p));
+  // When
+  const r = await laneHandover(base, "demo", "aoe_lead_x", OK);
+  // Then: the ask went out with the characters written safely, and the row says so
+  expect(r.code).toBe(2);
+  const ask = sent(w).find((t) => t.startsWith("[LEAD] The lead moves demo to a new session"));
+  expect(ask).toContain("echo 'date' $ (hostname)");
+  expect(rolloverRows().at(-1)).toMatchObject({ blocked: "work", safePoint: { told: true } });
+  // a row whose ask did not go out, its cause quoting them, is asked again without a throw
+  appendRollover(state.dir, { ...WAITING, at: "2026-10-11T16:40:00.000Z", blocked: "work", pids: [15], safePoint: { why: "1 local chain(s) would die: 15 bash -c echo `date` $(hostname)", told: false } });
+  await base.registry.patch("demo", { lastReplyAt: base.clock.now() });
+  const hooks = { signals: async () => ({}), alive: (pid: number) => live.has(pid), resume: async () => ({ started: false, line: "not now" }) };
+  await freshnessTick(base, "/home/test", hooks);
+  expect(readFileSync(base.config.watchLog, "utf8")).toContain("HANDOVER_SAFE_POINT_ASKED demo");
+});
+
+test("an ask that did not reach the lane outlives the resumed run's own refusal: busy, then work on the --wait-idle path, and freshness asks once the pane takes text (review 320 round 9)", async () => {
+  // Given: the lane's pane refuses text; the lead's request is refused busy
+  const base = await setup();
+  let deliver = false;
+  const asks = () => sent(w).filter((t) => t.startsWith("[LEAD] The lead moves demo to a new session"));
+  const deps: LaneHandoverDeps = {
+    ...base,
+    run: async (argv, opts) => (!deliver && argv[0] === "tmux" && argv[1] === "send-keys" && argv.some((a) => a.startsWith("[LEAD] The lead moves demo")) ? { code: 1, out: "", err: "pane refused" } : base.run(argv, opts)),
+  };
+  table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
+  w.screens[OLD] = BUSY;
+  const busy = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // When: the resumed run (freshness starts it with --wait-idle) finds a long chain started meanwhile and is refused for work
+  table = aoeTable();
+  w.screens[OLD] = HIGH;
+  const resumed = await laneHandover(deps, "demo", "aoe_lead_x", { ...OK, waitIdleMin: 20 });
+  const row = rolloverRows().at(-1);
+  deliver = true;
+  const hooks = { signals: async () => ({}), alive: (pid: number) => live.has(pid), resume: async () => ({ started: false, line: "not now" }) };
+  await deps.registry.patch("demo", { lastReplyAt: deps.clock.now() });
+  await freshnessTick(deps, "/home/test", hooks);
+  await freshnessTick(deps, "/home/test", hooks);
+  // Then
+  expect([busy.code, resumed.code]).toEqual([2, 2]);
+  expect(row).toMatchObject({ result: "refused", blocked: "work", safePoint: { told: false } });
+  expect(asks()).toHaveLength(1);
+});
+
 // omo's input box sits between two ─ borders; the status lines under it can quote "esc to interrupt" (here the cwd and a
 // session title), while omo's own running-turn mark is on the box's top border
 const QUOTED = HIGH.replace("old transcript line\n❯ \n────", "old transcript line\n────\n❯ \n────").replace("~/work •", "~/work/esc to interrupt •").replace("(OmO) mem:x", "(OmO) Fix esc to interrupt indicator");

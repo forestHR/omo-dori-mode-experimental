@@ -7,7 +7,7 @@ import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { leadAlert } from "./autoturn.ts";
 import { taskOpen, taskRecord } from "./background.ts";
-import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, safePointText, statusLine, waitingRequest } from "./lane-handover.ts";
+import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, safePointFile, safePointText, statusLine, waitingRequest } from "./lane-handover.ts";
 import { COMMITTED, crossed, dueReasons, limitsFor, readRollovers, type RolloverEntry, type RolloverRequest, type Signals, type Who } from "./rollover.ts";
 import { auditDue, type Committed, weeklyDue, writeMarker } from "./rollover-audit.ts";
 import { dailyAuditSince, linksDue } from "./directive-audit.ts";
@@ -295,9 +295,11 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
   if (!asked) return [];
   // the safe-point ask the pane did not take (a herdr question open, a pane gone for a moment) is typed again each sweep
   // until it is, once per request: without it the lane never learns it should mark ready (review 320 round 8)
-  const askFile = join(stateDir, "handover", "lanes", `${key}.safe-point.json`);
+  const askFile = safePointFile(stateDir, key);
   if (asked.safePoint && !asked.safePoint.told && readJson<{ request?: string }>(askFile)?.request !== asked.at && !handoverRunning(stateDir, "lane", key, hooks.alive ?? pidAlive)) {
-    if (await sendVerified(deps.run, deps.clock, deps.config, pane, safePointText(key, asked.safePoint.why, "lead"))) {
+    // a text the pane refuses outright (an unsafe character) is a failed delivery, tried again next sweep, never a throw that
+    // ends the sweep for every lane after this one (review 320 round 9)
+    if (await sendVerified(deps.run, deps.clock, deps.config, pane, safePointText(key, asked.safePoint.why, "lead")).catch(() => false)) {
       mkdirSync(join(stateDir, "handover", "lanes"), { recursive: true });
       writeFileSync(askFile, `${JSON.stringify({ request: asked.at, at: new Date(deps.clock.now()).toISOString() })}\n`);
       watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line: `HANDOVER_SAFE_POINT_ASKED ${key} asked: the safe-point request of the handover asked at ${asked.at} reached ${pane} now` });

@@ -352,11 +352,18 @@ const ancestors = (table: readonly Proc[], pid: number): Set<number> => {
 
 // what the lane is asked when a rollover finds it busy (an automatic one, or the lead's approved one): reach a safe point,
 // write the summary, mark ready, go idle
-export const safePointText = (key: string, why: string, by: "auto" | "lead"): string =>
+// the causes quote command lines, and a backtick or $( is never typed into a pane (sendVerified refuses the whole text):
+// they are written as ' and $ ( so the ask still reaches the lane (review 320 round 9)
+const typeSafe = (text: string): string => text.replace(/`/g, "'").replace(/\$\(/g, "$ (");
+export const safePointText = (key: string, cause: string, by: "auto" | "lead"): string =>
+  safePointBody(key, typeSafe(cause), by);
+const safePointBody = (key: string, why: string, by: "auto" | "lead"): string =>
   `[LEAD] ${by === "auto" ? `An automatic rollover of ${key} to a new session is due` : `The lead moves ${key} to a new session`}, but the lane is busy (${why}). At your next safe point: start no new work, write your conversation summary (dori handover ready --template prints its headings) to a file, run dori handover ready ${key} --note <file>, then end your turn.${/background task\(s\) still run/.test(why) ? " The ready mark does not cover your background tasks: the move waits until they end, so start no new ones and let these finish (or end them yourself if their work is no longer needed)." : ""} The local chains that command lists end with this session: if one must keep running (a training, eval or deploy run), let it finish or move it out of the session (setsid, systemd-run) first, and say so in your report. The move starts by itself once you are idle; nothing else to do.`;
 
 export const readyFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.ready.json`);
 export const pendingFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.pending.json`);
+// the waiting request whose safe-point ask freshness typed after the refusing run could not (request: that row's time)
+export const safePointFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.safe-point.json`);
 
 // The handover a lead (or the owner) approved and that was refused because the lane was busy (a turn ran, or work would
 // die): the lane's last handover run, approved by anyone but the automation, refused with blocked work or busy, in the
@@ -366,6 +373,14 @@ export const waitingRequest = (entries: readonly RolloverEntry[], key: string, p
   const last = entries.findLast((e): e is Extract<RolloverEntry, { kind: "rollover" }> => e.kind === "rollover" && e.who === "lane" && e.key === key);
   const by = last?.approvedBy?.trim() ?? "";
   return last && last.result === "refused" && (last.blocked === "work" || last.blocked === "busy") && last.from === pane && by && decidedBy(by) !== "auto" ? last : undefined;
+};
+
+// The safe-point ask of the lane's waiting request that has not reached the lane yet: neither the refusing run nor freshness
+// got it through. A later refusal of the same request (a resumed run, which asks nothing itself) carries it on, so freshness
+// goes on asking until the pane takes it (review 320 round 9).
+const untoldAsk = (stateDir: string, key: string, pane: string): { readonly why: string; readonly told: boolean } | undefined => {
+  const prev = waitingRequest(readRollovers(stateDir), key, pane);
+  return prev?.safePoint && !prev.safePoint.told && readJson<{ request?: string }>(safePointFile(stateDir, key))?.request !== prev.at ? prev.safePoint : undefined;
 };
 
 // The pids of the monitors omo runs for the session in a pane (they are re-armed, not lost).
@@ -576,8 +591,9 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     if (borrowed) return { code: 2 };
     // a run refused while the lane was busy keeps the options it was given (the note as an absolute path): a ready mark
     // starts it again with them (freshness readyResume)
+    const safePoint = held?.safePoint ?? (held && fromPane && opts.approvedBy?.trim() && decidedBy(opts.approvedBy.trim()) !== "auto" ? untoldAsk(config.stateDir, key, fromPane) : undefined);
     const request: RolloverRequest = { ...(opts.note ? { note: resolve(opts.note) } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}), ...(opts.keepOld ? { keepOld: true } : {}), ...(opts.verifyMin ? { verifyMin: opts.verifyMin } : {}) };
-    if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), request, ...(held.safePoint ? { safePoint: held.safePoint } : {}) } : {}) });
+    if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), request, ...(safePoint ? { safePoint } : {}) } : {}) });
     return { code: 2 };
   };
   if (borrowed) return refuse(`a lane moves to a new session only with an approval: ${approvalProblem(opts.approvedBy, () => undefined, { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, "", [])} (--dry-run needs none)`);
@@ -599,7 +615,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
       // last and outlives that run dying before it repointed (review 320 round 8)
       const stop = await handOver(deps, key, { pid: pending.pid, at: pending.at }, opts, at, emit);
       if (stop) return stop;
-      return attempt(deps, key, here, { ...opts, boundPane: lane.pane }, granted);
+      return attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? lane.pane }, granted);
     }
     if (opts.dryRun) return refuse(`an interrupted handover (${pending.from} -> ${pending.to}, ${pending.at}) left ${pendingFile(config.stateDir, key)}; run without --dry-run to repair it first`);
     emit(`HANDOVER_INTERRUPTED ${key}: the run from ${pending.at} (pid ${pending.pid}) ended between opening ${pending.to} and finishing; repairing`);
@@ -634,7 +650,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     // the holder is gone. The request is for the session this run found in the lane's pane: one that moved meanwhile (another
     // run that waited beside this one moved it) is not moved again (plan challenge, review 320). Else start over, so an
     // interrupted move the holder left (its pending journal) is repaired first and the registry is read again.
-    return attempt(deps, key, here, { ...opts, boundPane: lane.pane }, granted);
+    return attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? lane.pane }, granted);
   }
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
   if (!old) return refuse(`no live session for pane ${lane.pane}`);
@@ -755,11 +771,11 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const lockedHere = !opts.dryRun && !opts.idle;
   if (lockedHere) {
     const locked = takeLock(lockFile, deps.alive, at);
-    if (locked) return lockHolder(lockFile, deps.alive) ? attempt(deps, key, here, { ...opts, boundPane: lane.pane }, granted) : refuse(locked);
+    if (locked) return lockHolder(lockFile, deps.alive) ? attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? lane.pane }, granted) : refuse(locked);
     const after = await deps.registry.read(key);
     if (after?.pane !== lane.pane || readPending(config.stateDir, key)) {
       rmSync(lockFile, { force: true });
-      return attempt(deps, key, here, { ...opts, boundPane: lane.pane }, granted);
+      return attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? lane.pane }, granted);
     }
   }
   try {
