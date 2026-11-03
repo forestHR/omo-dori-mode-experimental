@@ -21,6 +21,7 @@ const keysFor = (screens: readonly string[]) => {
     type: async (text) => { log.typed.push(text); return undefined; },
     enter: async () => { log.enters++; },
     read: async () => screens[Math.min(log.reads++, screens.length - 1)] ?? "",
+    runsOmoCommands: true,
   };
   return { keys, log };
 };
@@ -66,6 +67,65 @@ test("a text omo took from the box but never put in the transcript stays NOT_SUB
   const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "[LEAD] hello");
   expect(r.status).toBe("NOT_SUBMITTED");
   expect(r.reason).toStartWith("input box empty but no running turn");
+  expect(r.reason).toContain("the text is not in the session's transcript");
+});
+
+// A slash command runs in omo itself: no user message in the transcript (/goal pause writes nothing there at all), and omo
+// rewrites its last status line in place, so a repeated /thinking low changes nothing on screen. Shaped after test pane w1:p17
+// on 2026-11-03, where /thinking low applied but read NOT_SUBMITTED.
+const slashTyped = (above: readonly string[], text: string) => [...above, BORDER, `❯ ${text}`, BORDER, " ~/qa • effort low"].join("\n");
+const slashDone = (above: readonly string[]) => [...above, BORDER, "❯ ", BORDER, " ~/qa • effort low"].join("\n");
+
+test("a command omo runs itself, typed into a box seen empty, is SUBMITTED once the box is empty again, with nothing else to show", async () => {
+  const above = [" Update Available", " Thinking level: low"];
+  for (const text of ["/thinking low", "/goal pause"]) {
+    const { keys, log } = keysFor([slashDone(above), slashDone(above)]);
+    const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), text);
+    expect(r).toEqual({ status: "SUBMITTED", reason: "input box empty: omo took the command from it to run it" });
+    expect(log.enters).toBe(1);
+  }
+});
+
+test("a command left in the box (startup still running) is NOT_SUBMITTED after 2 Enters", async () => {
+  const { keys, log } = keysFor([slashDone([]), slashTyped([" Startup is still in progress"], "/thinking low")]);
+  const r = await submitText(keys, fakeClock(0), "/thinking low");
+  expect(r.status).toBe("NOT_SUBMITTED");
+  expect(r.reason).toStartWith("text still in the input box after 2 Enters: /thinking low");
+  expect(log.enters).toBe(2);
+});
+
+// review of #313: omo treats a skill, a prompt template and a command it does not know as ordinary input, which it can hold
+test("a skill, a template or an unknown /text is no command omo runs: an emptied box alone is NOT_SUBMITTED", async () => {
+  for (const text of ["/skill:review the diff", "/nosuchcmd qa", "/thinkingx low", "/settings now"]) {
+    const { keys } = keysFor([slashDone([])]);
+    const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), text);
+    expect(r.status).toBe("NOT_SUBMITTED");
+    expect(r.reason).toContain("the text is not in the session's transcript");
+  }
+});
+
+test("a screen that shows no input box (the pane went away, a read failed) does not count as an emptied box for a command", async () => {
+  for (const screens of [[""], [slashDone([]), ""]]) {
+    const { keys } = keysFor(screens);
+    expect((await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/thinking low")).status).toBe("NOT_SUBMITTED");
+  }
+});
+
+test("a pane that runs another agent gets no omo command shortcut: its emptied box alone is NOT_SUBMITTED", async () => {
+  const { keys } = keysFor([slashDone([])]);
+  const r = await submitText({ ...keys, runsOmoCommands: false }, fakeClock(0), "/goal pause");
+  expect(r).toEqual({ status: "NOT_SUBMITTED", reason: `input box empty but no running turn ("esc to interrupt") within 15s` });
+});
+
+test("a command typed after a draft in the box is one ordinary message, so an emptied box alone is NOT_SUBMITTED", async () => {
+  const { keys } = keysFor([slashTyped([], "owner draft"), slashDone([])]);
+  expect((await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/thinking low")).status).toBe("NOT_SUBMITTED");
+});
+
+test("a text of more than one line that starts with a slash still needs a turn, the Steering queue or the transcript", async () => {
+  const { keys } = keysFor([slashDone([])]);
+  const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/goal pause\nthen report");
+  expect(r.status).toBe("NOT_SUBMITTED");
   expect(r.reason).toContain("the text is not in the session's transcript");
 });
 

@@ -176,6 +176,20 @@ test("upstream #66/#70 on herdr: an omo pane with a question open, and a bare-ag
   expect(sent(world)).toEqual([]);
 });
 
+test("on herdr, /goal pause that empties the box with no turn is SUBMITTED in an omo pane only: another agent may take it as a prompt", async () => {
+  world.screens = { "w1:p2": ["transcript", "─".repeat(40), "❯ ", "─".repeat(40), " ~/repo"].join("\n") };
+  // the box empties and no turn starts, as with a command omo runs itself
+  const noTurn = (run: Runner): Runner => async (argv, o) => { const r = await run(argv, o); world.started = []; return r; };
+  const bare = omo({ agentCommand: ["claude", "{prompt}"] });
+  const other = await submitToPane(noTurn(bare.run), bare.clock, bare.config, "w1:p2", "/goal pause");
+  expect(other.status).toBe("NOT_SUBMITTED");
+  expect(other.reason).toStartWith("input box empty but no running turn");
+  const deps = omo();
+  const own = await submitToPane(noTurn(deps.run), deps.clock, deps.config, "w1:p2", "/goal pause");
+  expect(own).toMatchObject({ status: "SUBMITTED", reason: "input box empty: omo took the command from it to run it" });
+  expect(sent(world)).toEqual(["/goal pause", "/goal pause"]);
+});
+
 test("a handover's new herdr session keeps agentCommand's own options, opens a new session and runs the handover's model and thinking", () => {
   const argv = herdrAgentArgv(["omo", "--session-dir", "/s", "--model", "{model}", "{prompt}"], "m/x", "high");
   expect(argv.slice(0, 2)).toEqual(["omo", "--session-id"]);
