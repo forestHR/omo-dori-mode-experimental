@@ -2547,6 +2547,9 @@ test("a lead's approval without a signal gets the measured one from the records:
   expect(filledApproval("lead:", "compactions 3 >= 3")).toBeUndefined();
   expect(filledApproval("auto:handover.autoRolloverLanes", "compactions 3 >= 3")).toBeUndefined();
   expect(filledApproval("lead:moving it to a fresh session", undefined)).toBeUndefined();
+  // freshness writes context with a decimal (QA lane qa-hsa: "context 4.5% >= 1%" was filled and then refused): it reads as a signal
+  expect(approvalProblem(filledApproval("lead:moving it to a fresh session", "context 4.5% >= 1%"), () => undefined, { on: false, key: "k" }, "demo", OLD, [], true)).toBeUndefined();
+  expect(filledApproval("lead:moving it to a fresh session", "something unmeasured")).toBeUndefined();
 });
 
 test("the lane handover fills a lead's approval from the lane's measured signal and logs it filled; with none measured it is refused as before; a hand-typed auto: stays refused", async () => {

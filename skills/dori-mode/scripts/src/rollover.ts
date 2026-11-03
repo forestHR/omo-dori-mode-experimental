@@ -268,7 +268,7 @@ export const LEAD_PREFIX = "lead:";
 
 // a lead's approval names the signal it acts on (a STUCK rung, an intent-check finding, a measured threshold)
 // whole tokens only: "age" in "message" or 단 in 단계 is no signal (challenge, grok-4.7)
-const SIGNAL_WORD = /(?<![\w])(?:COMPACTION_STUCK|compaction did not complete|STUCK|rung ?4|INTENT_CHECK|VIOLATION|CONTRADICTION|GOAL_LOSS|ROLLOVER_DUE|SAME_FIX_3|fixated|context \d+ ?%|context after compaction \d+ ?k|compactions? \d+|\d+ compactions?|age \d+(?:\.\d+)? ?h)(?![\w])|막힘 ?4 ?단|맥락 (?:이상|단)|압축 \d+/i;
+const SIGNAL_WORD = /(?<![\w])(?:COMPACTION_STUCK|compaction did not complete|STUCK|rung ?4|INTENT_CHECK|VIOLATION|CONTRADICTION|GOAL_LOSS|ROLLOVER_DUE|SAME_FIX_3|fixated|context \d+(?:\.\d+)? ?%|context after compaction \d+ ?k|compactions? \d+|\d+ compactions?|age \d+(?:\.\d+)? ?h)(?![\w])|막힘 ?4 ?단|맥락 (?:이상|단)|압축 \d+/i;
 
 // the thresholds of one side, from handover.lane* or handover.lead*
 export const limitsFor = (who: Who, h: DoriConfig["handover"]): Limits =>
@@ -447,7 +447,8 @@ export const filledApproval = (ref: string | undefined, signal: string | undefin
   const r = ref?.trim() ?? "";
   if (!signal || !r.startsWith(LEAD_PREFIX)) return undefined;
   const why = r.slice(LEAD_PREFIX.length).trim();
-  return why.length < 3 || SIGNAL_WORD.test(why) || OWNER_REF.test(why) ? undefined : `${r}, ${signal} (measured)`;
+  // a measured signal approvalProblem would not read as one fills nothing (it would turn a refusal into a confusing one)
+  return why.length < 3 || SIGNAL_WORD.test(why) || OWNER_REF.test(why) || !SIGNAL_WORD.test(signal) ? undefined : `${r}, ${signal} (measured)`;
 };
 
 // While a session is being replaced it must not talk to the owner: the new one may already answer. dori send, ask and
