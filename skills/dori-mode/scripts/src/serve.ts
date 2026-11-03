@@ -1,6 +1,7 @@
-import { appendFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
+import { configPath, envFilePath } from "./config.ts";
 import type { Clock } from "./run.ts";
 
 // dori serve: one process that keeps a Dori's long-running loops up where there is no systemd and no bash (native
@@ -80,8 +81,24 @@ export const spawnLoop = (argv: readonly string[]): Running => {
   return { lines: linesOf([p.stdout, p.stderr]), exited: p.exited };
 };
 
-export const fileLog = (file: string, clock: Clock) => (line: string): void => appendFileSync(file, `${new Date(clock.now()).toISOString().slice(0, 19)}Z ${line}\n`);
+export const fileLog = (file: string, clock: Clock): ((line: string) => void) => {
+  mkdirSync(dirname(file), { recursive: true });
+  closeSync(openSync(file, "a"));
+  return (line) => appendFileSync(file, `${new Date(clock.now()).toISOString().slice(0, 19)}Z ${line}\n`);
+};
 
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
-export const taskArgv = (bun: string, cli: string, stateDir: string): string[] => ["schtasks", "/Create", "/F", "/TN", TASK_NAME, "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", `"${bun}" "${cli}" serve --log "${join(stateDir, "serve.log")}"`];
+export const taskArgv = (bun: string, cli: string, stateDir: string): string[] => {
+  const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  const state = resolve(stateDir);
+  const entry = join(state, "serve-task.ps1");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(entry, `\uFEFF$env:DORI_CONFIG = ${quote(resolve(configPath()))}
+$env:DORI_ENV_FILE = ${quote(resolve(envFilePath()))}
+$env:DORI_STATE_DIR = ${quote(state)}
+& ${quote(bun)} ${quote(cli)} serve --log ${quote(join(state, "serve.log"))}
+exit $LASTEXITCODE
+`);
+  return ["schtasks", "/Create", "/F", "/TN", TASK_NAME, "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${entry}"`];
+};

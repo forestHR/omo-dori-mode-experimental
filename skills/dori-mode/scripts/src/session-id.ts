@@ -6,7 +6,7 @@ import type { Backend } from "./config.ts";
 import type { Runner } from "./run.ts";
 
 // stat: the ps state letters ("S", "R+", "Z" for a zombie); absent when the table was built without it
-export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string };
+export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string; readonly startedAt?: string };
 export type SessionHit = { readonly id: string; readonly via: "argv" | "child-env" | "start-time" | "none"; readonly pid?: number };
 
 // omo on Linux and macOS (senpi's bundle under bun, or the omo command), and on Windows (the same bundle path with
@@ -17,14 +17,24 @@ export const SESSION_FILE = /^(\d{4}-\d\d-\d\dT\d\d)-(\d\d)-(\d\d)-(\d{3})Z_([0-
 const START_WINDOW_MS = 180_000;
 
 // Windows has no ps: its process table comes from Win32_Process (pid, parent, command line; no state letters)
-export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress"];
+export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,@{Name='StartedAt';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')}}} | ConvertTo-Json -Compress"];
 
 export const winProcs = (json: string): Proc[] => {
   try {
-    const rows = JSON.parse(json || "[]") as { ProcessId?: number; ParentProcessId?: number; CommandLine?: string | null } | { ProcessId?: number; ParentProcessId?: number; CommandLine?: string | null }[];
-    return (Array.isArray(rows) ? rows : [rows]).flatMap((r) => (r.ProcessId ? [{ pid: r.ProcessId, ppid: r.ParentProcessId ?? 0, cmd: r.CommandLine ?? "", stat: "" }] : []));
-  } catch {
-    return [];
+    const rows: unknown = JSON.parse(json || "[]");
+    return (Array.isArray(rows) ? rows : [rows]).flatMap((r: unknown): Proc[] => {
+      if (typeof r !== "object" || r === null || !("ProcessId" in r) || typeof r.ProcessId !== "number" || !r.ProcessId) return [];
+      return [{
+        pid: r.ProcessId,
+        ppid: "ParentProcessId" in r && typeof r.ParentProcessId === "number" ? r.ParentProcessId : 0,
+        cmd: "CommandLine" in r && typeof r.CommandLine === "string" ? r.CommandLine : "",
+        ...("StartedAt" in r && typeof r.StartedAt === "string" ? { startedAt: r.StartedAt } : {}),
+        stat: "",
+      }];
+    });
+  } catch (error) {
+    if (error instanceof SyntaxError) return [];
+    throw error;
   }
 };
 
@@ -54,7 +64,7 @@ export const descendants = (table: readonly Proc[], root: number): Proc[] => {
 export const topAgent = (table: readonly Proc[], shell: number): Proc | undefined =>
   shell ? [...table.filter((p) => p.pid === shell), ...descendants(table, shell)].find((p) => AGENT.test(p.cmd) && !ended(p)) : undefined;
 
-export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(sessionsDir, `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`);
+export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(sessionsDir, `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -91,13 +101,13 @@ export const resolveSession = async (pane: string, cwd: string, table: readonly 
   // a selector omo resolves itself (a partial --session uuid, --continue, --resume, --fork, --rebind) can open an older
   // session, whose file name is no start time: only a child's exact PI_SESSION_ID may name it, never a nearby new session
   const selected = hasSessionSelector(argv);
-  for (const child of descendants(table, agent.pid).slice(0, 40)) {
+  for (const child of process.platform === "win32" ? [] : descendants(table, agent.pid).slice(0, 40)) {
     const env = await deps.run(["ps", "eww", "-o", "command=", "-p", String(child.pid)]);
     const hit = ENV_ID.exec(env.out);
     if (hit?.[1]) return { id: hit[1], via: "child-env", pid: agent.pid };
   }
   if (selected) return { id: "", via: "none", pid: agent.pid };
-  const started = Date.parse((await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out);
+  const started = Date.parse(process.platform === "win32" ? agent.startedAt ?? "" : (await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out);
   if (Number.isNaN(started)) return { id: "", via: "none", pid: agent.pid };
   const list = deps.listDir ?? ((d: string) => { try { return readdirSync(d); } catch { return []; } });
   const near = list(sessionDirFor(deps.sessionsDir, cwd)).flatMap((name) => {

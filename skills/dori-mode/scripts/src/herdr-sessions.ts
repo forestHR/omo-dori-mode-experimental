@@ -73,7 +73,8 @@ export const reviveHerdr = async (run: Runner, clock: Clock, config: Pick<DoriCo
     const tool = config.agentCommand[0] ?? "omo";
     const argv = herdrAgentArgv(config.agentCommand, rec.model || config.defaultModel, undefined, rec.session);
     // the screen is cleared first, so a ❯ the ended agent left there is gone before the new one draws
-    const ran = await run(["herdr", "pane", "run", pane, `clear && ${agentLine(argv, { PATH: agentPath(tool) })}`], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
+    const clear = process.platform === "win32" ? "Clear-Host; " : "clear && ";
+    const ran = await run(["herdr", "pane", "run", pane, `${clear}${agentLine(argv, { PATH: agentPath(tool) })}`], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
     if (ran.code !== 0) return `REVIVE_FAIL ${pane}: herdr pane run failed: ${(ran.err || ran.out).slice(0, 160)}`;
   }
   const how = restored ? ` (herdr had started it again, pid ${restored})` : "";

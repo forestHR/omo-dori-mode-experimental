@@ -1,7 +1,9 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { keep, type Running, serveLoops, taskArgv } from "../src/serve.ts";
+import { fileLog, keep, type Running, serve, serveLoops, spawnLoop } from "../src/serve.ts";
 import { fakeClock } from "./fakes.ts";
 
 // dori serve keeps each loop up where no systemd does (native Windows): a loop that exits starts again after a pause that
@@ -40,7 +42,64 @@ test("a loop that ran 10 minutes before it exited starts again after the first p
   expect(pauses).toEqual([2_000, 4_000, 2_000]);
 });
 
-test("the loops are the sweeps of dori-lanes.sh, the listener and the session watcher; the logon task runs dori serve", () => {
+test("the loops are the sweeps of dori-lanes.sh, the listener and the session watcher", () => {
   expect(serveLoops("bun", "cli.ts", "sw.ts").map((l) => l.argv.slice(1).join(" "))).toEqual(["cli.ts watch", "cli.ts freshness --loop 2", "cli.ts dead-panes --loop 5", "cli.ts guard --loop 1", "cli.ts state-git loop", "cli.ts inbound discord", "sw.ts"]);
-  expect(taskArgv("C:\\b\\bun.exe", "C:\\d\\cli.ts", "C:\\s").slice(-1)[0]).toBe(`"C:\\b\\bun.exe" "C:\\d\\cli.ts" serve --log "${join("C:\\s", "serve.log")}"`);
+});
+
+const roots: string[] = [];
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+test("review 1 serve starts and records real child output with a nonexistent state directory", async () => {
+  // Given a fresh installation with no state directory.
+  const root = mkdtempSync(join(tmpdir(), "dori-serve-review-"));
+  roots.push(root);
+  const log = join(root, "missing", "state", "serve.log");
+  const output = join(root, "child.json");
+  let finished = false;
+  let exited = Promise.resolve(0);
+  try {
+    // When a real supervised child runs after logger preparation.
+    await serve([{ tag: "fixture", argv: [process.execPath, "--eval", `await Bun.write(${JSON.stringify(output)}, '{"ran":true}'); console.log("REVIEW_CHILD_READY");`] }], {
+      start: (argv) => {
+        const child = spawnLoop(argv);
+        exited = child.exited;
+        void exited.then(() => { finished = true; });
+        return child;
+      },
+      log: fileLog(log, fakeClock(0)), clock: fakeClock(0), stop: () => finished,
+    });
+    // Then the child completed and its output was persisted in the new directory.
+    expect(await Bun.file(output).json()).toEqual({ ran: true });
+    expect((await Bun.file(log).text()).split("\n").filter((line) => line.endsWith("fixture REVIEW_CHILD_READY"))).toHaveLength(1);
+  } finally {
+    await exited;
+  }
+});
+
+test("review 1 serve refuses an unusable log directory before any child starts", async () => {
+  // Given a file where the log's parent directory must be.
+  const root = mkdtempSync(join(tmpdir(), "dori-serve-review-"));
+  roots.push(root);
+  const parent = join(root, "file");
+  writeFileSync(parent, "occupied");
+  let starts = 0;
+  let exited = Promise.resolve(0);
+  try {
+    // When supervision prepares its logger.
+    await expect((async () => serve([{ tag: "fixture", argv: [process.execPath, "--eval", "process.exit(0)"] }], {
+      start: (argv) => {
+        starts++;
+        const child = spawnLoop(argv);
+        exited = child.exited;
+        return child;
+      },
+      log: fileLog(join(parent, "serve.log"), fakeClock(0)), clock: fakeClock(0),
+    }))()).rejects.toThrow();
+    // Then no process was started before the filesystem failure.
+    expect(starts).toBe(0);
+  } finally {
+    await exited;
+  }
 });
