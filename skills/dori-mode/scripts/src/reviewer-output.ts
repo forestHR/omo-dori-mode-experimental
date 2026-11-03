@@ -13,6 +13,12 @@ export const KEPT_CHARS = 16_000;
 
 export const reviewerOutputDir = (stateDir: string): string => join(stateDir, "reviewer-output");
 
+// a reviewer's nonzero exit in a line: its code and the end of its stderr, masked; never its stdout, which only the file holds
+export const exitNote = (r: { readonly code: number; readonly err: string }): string => {
+  const err = scrubSecrets(r.err).trim().split("\n").slice(-3).join(" ").slice(0, 300);
+  return err ? `exit ${r.code} ${err}` : `exit ${r.code}`;
+};
+
 export const keepReviewerOutput = (stateDir: string, label: string, out: string): string => {
   if (!out.trim()) return "reviewer stdout was empty";
   // masked before it is cut, so a cut never leaves a secret too short for its pattern

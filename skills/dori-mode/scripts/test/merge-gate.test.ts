@@ -14,7 +14,7 @@ const B = "b".repeat(40);
 const PR = parsePr("acme/app#7");
 const DIR = "/wt/app";
 
-type Gh = { head: string; checkout: string; state: string; dirtyAfterTests?: boolean; tested?: boolean; statusFails?: boolean; queued?: boolean; viewFailsAfterMerge?: boolean; deleteFails?: boolean; mergeRejects?: boolean; autoMerge?: boolean; diff?: string; prompt?: string; pushDuringReview?: string; noVerdict?: { code: number; out: string; times: number }; checks: Record<string, string>[]; testsCode: number; verdict: string; mergedAt: string; calls: string[][] };
+type Gh = { head: string; checkout: string; state: string; dirtyAfterTests?: boolean; tested?: boolean; statusFails?: boolean; queued?: boolean; viewFailsAfterMerge?: boolean; deleteFails?: boolean; mergeRejects?: boolean; autoMerge?: boolean; diff?: string; prompt?: string; pushDuringReview?: string; noVerdict?: { code: number; out: string; times: number; err?: string }; checks: Record<string, string>[]; testsCode: number; verdict: string; mergedAt: string; calls: string[][] };
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -50,7 +50,7 @@ const runner = (w: Gh): Runner => async (argv) => {
   if (argv[0] === "fake-reviewer") {
     if (w.pushDuringReview) w.head = w.pushDuringReview;
     w.prompt = argv.at(-1);
-    if (w.noVerdict && w.noVerdict.times-- > 0) return { code: w.noVerdict.code, out: w.noVerdict.out, err: w.noVerdict.code ? "error: provider overloaded" : "" };
+    if (w.noVerdict && w.noVerdict.times-- > 0) return { code: w.noVerdict.code, out: w.noVerdict.out, err: w.noVerdict.err ?? (w.noVerdict.code ? "error: provider overloaded" : "") };
     return ok(`LOW x:1 nit\nVERDICT: ${w.verdict}\n`);
   }
   return { code: 127, out: "", err: `unexpected ${a}` };
@@ -328,4 +328,15 @@ test("a nonzero exit keeps its stdout tail too and the exit reason, and the next
   expect(readFileSync(file, "utf8")).toBe("partial reviewer output");
   expect(lines.at(-1)).toMatch(new RegExp(`^REVIEW acme/app#7 head=${A} verdict=CLEAR`));
   expect((await readReceipt(d.config.stateDir, PR, A, "review"))?.verdict).toBe("CLEAR");
+});
+
+test("a nonzero exit with empty stderr names its exit code, never its unmasked stdout, in the refusal (review of #302)", async () => {
+  const w = { ...world(), noVerdict: { code: 7, out: "half done\napi_key=ghp_YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY", times: 99, err: "" } };
+  const d = deps(w);
+  const failure = await reviewPr(d, PR, { dir: DIR }).then(() => undefined, (e: unknown) => e);
+  const message = (failure as Error).message;
+  expect(message).toContain(": exit 7; reviewer stdout kept in ");
+  expect(message).not.toContain("ghp_YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY");
+  expect(message).not.toContain("half done");
+  expect(readFileSync(kept(message), "utf8")).toBe("half done\napi_key=[masked]");
 });
