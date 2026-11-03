@@ -8,7 +8,6 @@ import { replacementOf } from "./frozen.ts";
 import type { Clock, Runner } from "./run.ts";
 import { procTable, topAgent } from "./session-id.ts";
 import { isOmoExecutable } from "./executable.ts";
-import { agentDirOf, promptCommandNames } from "./omo-commands.ts";
 import { type PaneKeys, submitText, type Submitted } from "./submit.ts";
 import { watchLog } from "./watch-log.ts";
 
@@ -159,7 +158,7 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
     read: () => captureTmux(run, pane),
     clear: async () => { await key("clear"); },
     delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
-    omoCommands: promptCommandNames(agentDirOf(config.sessionsDir)),
+    refusesUnknownSlash: true,
     runsOmoCommands: true,
   };
 };

@@ -19,9 +19,8 @@ export type PaneKeys = {
   // deletes the input box's text before the cursor, one line per call (omo's ctrl+u; at a line start it joins the line
   // above), so a text that was not submitted is not left behind for the next one to be typed after
   readonly clear?: () => Promise<void>;
-  // the prompt templates and skill:<name> omo runs in this pane (omo-commands.ts, without the /): a /word that is neither
-  // one of them nor, as a whole, a command omo runs itself (isOmoCommand) gets no key at all
-  readonly omoCommands?: ReadonlySet<string>;
+  // an omo pane: a /word that is not, as a whole, a command omo runs itself from its box (isOmoCommand) gets no key at all
+  readonly refusesUnknownSlash?: boolean;
   // the pane runs omo, so a command omo runs itself counts as taken once omo empties the box (isOmoCommand); another
   // agent may take the same /text as an ordinary prompt
   readonly runsOmoCommands?: boolean;
@@ -93,7 +92,9 @@ const WITH_ARGS = new Set(["/model", "/thinking", "/export", "/import", "/rename
 // omo refuses a /word no command of it resolves (a typo, a skill that is not there, senpi core/unknown-command.js
 // findUnknownCommand): it puts the text back under "Unknown command /x." and "Enter again sends it as a message", and
 // keeps that armed in memory only, so a second Enter, or a later retry, sends it to the agent. dori type therefore
-// types such a text nowhere: decided before any key, from the names omo runs, never from the screen. The token is
+// types such a text nowhere: decided before any key, from the commands omo runs itself, never from the screen. Prompt
+// templates and skills (/name, /skill:name) count as unknown too: whether that omo loaded them (--no-prompt-templates,
+// --no-skills, its settings) cannot be read from outside, and one admitted wrongly would be sent. The token is
 // omo's own command shape; a path (/usr/bin/ls) is none and goes as a message, and so does a text that starts with
 // whitespace (unknown-command-feedback.js submitsCommandAsText). A refusal a person left armed in that pane beforehand is
 // out of reach here.
@@ -103,9 +104,9 @@ export const isOmoCommand = (text: string): boolean => {
   const name = text.split(" ")[0] ?? "";
   return OMO_COMMANDS.has(name) && (name === text || WITH_ARGS.has(name));
 };
-export const unknownToOmo = (text: string, prompts: ReadonlySet<string>): string | undefined => {
+export const unknownToOmo = (text: string): string | undefined => {
   const token = text.split(/\s/, 1)[0] ?? "";
-  return COMMAND_TOKEN.test(token) && !isOmoCommand(text) && !prompts.has(token.slice(1)) ? token : undefined;
+  return COMMAND_TOKEN.test(token) && !isOmoCommand(text) ? token : undefined;
 };
 
 // The box is on screen with its ❯ line: an empty box read off a screen that shows none (the pane went away, a read
@@ -145,9 +146,9 @@ const clearOwn = async (keys: PaneKeys, clock: Clock, timing: SubmitTiming, text
 
 export const submitText = async (keys: PaneKeys, clock: Clock, text: string, timing: SubmitTiming = SUBMIT_TIMING): Promise<Submitted> => {
   const failed = (reason: string): Submitted => ({ status: "NOT_SUBMITTED", reason });
-  const unknown = keys.omoCommands && unknownToOmo(text, keys.omoCommands);
+  const unknown = keys.refusesUnknownSlash && unknownToOmo(text);
   if (unknown)
-    return failed(`SLASH_UNKNOWN: omo runs no command ${unknown} as typed (not one of its own in that form, nor a skill or prompt template it has), and would hold the text for one more Enter that sends it as a message; nothing was typed. To send it as a message, put a space before the / (--text " ${text}")`);
+    return failed(`SLASH_UNKNOWN: ${unknown} as typed is no command omo runs itself (a typo, a built-in with words it does not take, a skill or prompt template dori cannot confirm it loaded), so omo could refuse it and hold the text for one more Enter that sends it as a message; nothing was typed. To send it as a message, put a space before the / (--text " ${text}")`);
   const command = !!keys.runsOmoCommands && isOmoCommand(text);
   const first = keys.clear || command ? await keys.read() : "";
   const emptyBefore = keys.clear ? !editorText(first) : false;

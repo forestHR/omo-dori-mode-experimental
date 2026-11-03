@@ -4,7 +4,6 @@ import { defaultConfig } from "../src/config.ts";
 import { writeFrozen } from "../src/frozen.ts";
 import { SEND_CHUNK_BYTES, sendVerified, submitToPane, transcriptHas } from "../src/panes.ts";
 import { editorText, type PaneKeys, SUBMIT_TIMING, submitText } from "../src/submit.ts";
-import { promptCommandNames } from "../src/omo-commands.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { announceChange } from "../src/update-announce.ts";
 import { fakeClock, fakeRunner, newWorld, withState } from "./fakes.ts";
@@ -108,55 +107,53 @@ test("a skill, a template or an unknown /text is no command omo runs: an emptied
 
 // omo refuses a /word none of its commands resolves and keeps "Enter again sends it as a message" armed in memory only
 // (lane type-slash-submitted, 2026-11-03: dori type's second Enter sent it to the agent). So such a text gets no key.
-const counted = (known: ReadonlySet<string>) => {
+const counted = () => {
   const s = { typed: [] as string[], enters: 0, clears: 0 };
   const keys: PaneKeys = {
     type: async (text) => { s.typed.push(text); return undefined; },
     enter: async () => { s.enters++; },
     read: async () => "── • Working (1s • esc to interrupt) ──\n❯ \n──────",
     clear: async () => { s.clears++; },
-    omoCommands: known,
+    refusesUnknownSlash: true,
     runsOmoCommands: true,
   };
   return { keys, s };
 };
-const KNOWN = new Set(["skill:dori-mode", "review"]);
 
 test("a /word omo has no command for gets no key at all: NOT_SUBMITTED SLASH_UNKNOWN with the leading-space hint", async () => {
-  for (const text of ["/notacommand", "/thinkingx low", "/settings now", "/quit please", "/skill:not-installed do it", `/notacommand${"z".repeat(160)}`]) {
-    const { keys, s } = counted(KNOWN);
+  for (const text of ["/notacommand", "/thinkingx low", "/settings now", "/quit please", "/skill:dori-mode do it", "/review", "/zzprobe", `/notacommand${"z".repeat(160)}`]) {
+    const { keys, s } = counted();
     const r = await submitText(keys, fakeClock(0), text);
     expect(r.status).toBe("NOT_SUBMITTED");
-    expect(r.reason).toStartWith(`SLASH_UNKNOWN: omo runs no command ${text.split(" ")[0]} as typed`);
+    expect(r.reason).toStartWith(`SLASH_UNKNOWN: ${text.split(" ")[0]} as typed is no command omo runs itself`);
     expect(r.reason).toEndWith(`put a space before the / (--text " ${text}")`);
     expect([s.typed, s.enters, s.clears]).toEqual([[], 0, 0]);
   }
 });
 
 test("a /word omo runs, a path and a text with a space before the / are typed as before", async () => {
-  for (const text of ["/thinking low", "/goal pause", "/settings", "/skill:dori-mode go", "/review", "/usr/bin/ls -la", " /notacommand", "[LEAD] /notacommand is a typo"]) {
-    const { keys, s } = counted(KNOWN);
+  for (const text of ["/thinking low", "/goal pause", "/settings", "/usr/bin/ls -la", " /notacommand", " /zzprobe", "[LEAD] /notacommand is a typo"]) {
+    const { keys, s } = counted();
     await submitText(keys, fakeClock(0), text);
     expect(s.typed).toEqual([text]);
   }
 });
 
-test("omo's prompt templates and skills are read off disk; a folder without SKILL.md and a non-.md file are none", () => {
-  const state = withState();
-  try {
-    const home = join(state.dir, "home");
-    const agentDir = join(home, ".omo", "agent");
-    for (const d of [join(agentDir, "prompts"), join(agentDir, "skills", "deploy"), join(agentDir, "skills", "empty"), join(home, ".agents", "skills", "shared")]) mkdirSync(d, { recursive: true });
-    writeFileSync(join(agentDir, "prompts", "review.md"), "Review this");
-    writeFileSync(join(agentDir, "prompts", "notes.txt"), "not a template");
-    writeFileSync(join(agentDir, "skills", "deploy", "SKILL.md"), "---\nname: deploy\n---");
-    writeFileSync(join(agentDir, "skills", "solo.md"), "---\nname: solo\n---");
-    writeFileSync(join(home, ".agents", "skills", "shared", "SKILL.md"), "---\nname: shared\n---");
-    const known = promptCommandNames(agentDir, home);
-    for (const name of ["review", "skill:deploy", "skill:solo", "skill:shared"]) expect(known.has(name)).toBe(true);
-    for (const name of ["notes", "skill:empty", "notacommand", "settings"]) expect(known.has(name)).toBe(false);
-  } finally {
-    state.done();
+// dori challenge 2026-11-03T14:35Z: a template on disk proves nothing about the omo that runs (--no-prompt-templates)
+test("a /zzprobe template on omo's disk does not let /zzprobe through: the omo pane gets no key at all", async () => {
+  const agentDir = join(state.dir, "agent");
+  mkdirSync(join(agentDir, "prompts"), { recursive: true });
+  mkdirSync(join(agentDir, "skills", "zzprobe"), { recursive: true });
+  writeFileSync(join(agentDir, "prompts", "zzprobe.md"), "Probe");
+  writeFileSync(join(agentDir, "skills", "zzprobe", "SKILL.md"), "---\nname: zzprobe\n---");
+  const world = newWorld();
+  world.screen = EMPTY;
+  const config = { ...defaultConfig("/home/test"), backend: "aoe" as const, stateDir: state.dir, watchLog: join(state.dir, "lanes.log"), sessionsDir: join(agentDir, "sessions") };
+  for (const text of ["/zzprobe", "/skill:zzprobe go"]) {
+    world.calls = [];
+    const r = await submitToPane(fakeRunner(world), fakeClock(0), config, "aoe_lane_0a1b2c3d", text);
+    expect(r.reason).toStartWith(`SLASH_UNKNOWN: ${text.split(" ")[0]} as typed`);
+    expect(world.calls.filter((c) => c[0] === "tmux" && c[1] === "send-keys")).toEqual([]);
   }
 });
 
