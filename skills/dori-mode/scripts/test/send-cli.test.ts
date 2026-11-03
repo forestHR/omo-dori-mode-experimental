@@ -312,8 +312,11 @@ const fakeSlack = (complete = 200) => {
         calls.push({ path, body: new TextDecoder().decode(bytes) });
         return new Response("OK");
       }
-      const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      // as Slack does: files.getUploadURLExternal reads form fields only and answers a JSON body invalid_arguments
+      const form = (req.headers.get("content-type") ?? "").startsWith("application/x-www-form-urlencoded");
+      const body = (form ? Object.fromEntries(new URLSearchParams(await req.text())) : await req.json().catch(() => ({}))) as Record<string, unknown>;
       calls.push({ path, body });
+      if (path === "/api/files.getUploadURLExternal" && !form) return Response.json({ ok: false, error: "invalid_arguments" });
       if (path === "/api/files.getUploadURLExternal") return Response.json({ ok: true, upload_url: `http://127.0.0.1:${port}/up/${++slots}`, file_id: `F${slots}` });
       if (path === "/api/files.completeUploadExternal") return complete === 200 ? Response.json({ ok: true, files: body.files }) : new Response("unavailable", { status: complete });
       if (path === "/api/chat.postMessage") return Response.json({ ok: true, channel: body.channel, ts: "1700000100.000100" });
@@ -340,9 +343,9 @@ test("send slack --file uploads every file to its own URL, then shares them as o
     const r = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "deck.pdf"), "--file", join(state.dir, "demo.mp4"), "--text", "AX-MVP 발표자료", "--thread", "1700000000.000001"]);
     expect({ code: r.code, out: r.out, calls }).toEqual({
       code: 0, out: "SENT F1,F2", calls: [
-        { path: "/api/files.getUploadURLExternal", body: { filename: "deck.pdf", length: 9 } },
+        { path: "/api/files.getUploadURLExternal", body: { filename: "deck.pdf", length: "9" } },
         { path: "/up/1", body: "pdf bytes" },
-        { path: "/api/files.getUploadURLExternal", body: { filename: "demo.mp4", length: 5 } },
+        { path: "/api/files.getUploadURLExternal", body: { filename: "demo.mp4", length: "5" } },
         { path: "/up/2", body: "video" },
         { path: "/api/files.completeUploadExternal", body: { files: [{ id: "F1", title: "deck.pdf" }, { id: "F2", title: "demo.mp4" }], channel_id: "C1", thread_ts: "1700000000.000001", initial_comment: "AX-MVP 발표자료" } },
       ],

@@ -75,7 +75,7 @@ test("a Slack upload asks for an upload URL per file, sends the bytes there, the
   const r = await new Slack(http, sleeps().clock, { token: "t" }).upload("C1", files, "5.6", "the deck");
   expect(r).toEqual(["F1", "F2"]);
   expect(seen.map((r) => r.url.split("/").pop())).toEqual(["files.getUploadURLExternal", "1", "files.getUploadURLExternal", "2", "files.completeUploadExternal"]);
-  expect(JSON.parse(String(seen[2]?.body))).toEqual({ filename: "deck.pdf", length: 1 });
+  expect([seen[2]?.headers?.["Content-Type"], Object.fromEntries(new URLSearchParams(String(seen[2]?.body)))]).toEqual(["application/x-www-form-urlencoded", { filename: "deck.pdf", length: "1" }]);
   expect(JSON.parse(String(seen[4]?.body))).toEqual({ files: [{ id: "F1", title: "report.png" }, { id: "F2", title: "deck.pdf" }], channel_id: "C1", thread_ts: "5.6", initial_comment: "the deck" });
 });
 
