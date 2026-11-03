@@ -37,5 +37,6 @@ jobs:
             ./test/serve.test.ts `
             ./test/windows-install.test.ts `
             ./test/windows-skills.test.ts `
-            ./test/windows-serve.test.ts
+            ./test/windows-serve.test.ts `
+            ./test/windows-lock.test.ts
           exit $LASTEXITCODE

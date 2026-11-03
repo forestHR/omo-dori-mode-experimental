@@ -40,15 +40,61 @@ type LockOwner = { readonly pid: number; readonly host: string; readonly at: str
 const LOCK_EX = 2;
 const LOCK_NB = 4;
 // libc is opened on first use, not at import: every dori command imports this module, and native Windows has no libc
-// (dlopen at import made the whole CLI fail there); checkpoints themselves are refused on Windows for now.
+// (dlopen at import made the whole CLI fail there). Windows takes the lock its own way (takeWindowsLock below).
 let libc: ReturnType<typeof openLibc> | undefined;
 const openLibc = () => dlopen(process.platform === "darwin" ? "libc.dylib" : "libc.so.6", {
   flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
 });
 const flock = (fd: number, op: number): number => {
-  if (process.platform === "win32") throw new CheckpointError("checkpoints are not supported on native Windows yet (no flock)");
   libc ??= openLibc();
   return libc.symbols.flock(fd, op);
+};
+
+// Native Windows has no flock. The lock there is the lock file opened through CreateFileW without write sharing and with
+// FILE_FLAG_DELETE_ON_CLOSE: a second taker's open fails with a sharing violation while the holder's handle is open, and
+// Windows closes that handle (and so deletes the file) when the holder exits or dies, so, as with flock, a killed writer
+// never locks the lane and nothing is taken over by age. Readers still read the owner record (read and delete are shared).
+let kernel32: ReturnType<typeof openKernel32> | undefined;
+const openKernel32 = () => dlopen("kernel32.dll", {
+  CreateFileW: { args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.i64 },
+  WriteFile: { args: [FFIType.i64, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+  FlushFileBuffers: { args: [FFIType.i64], returns: FFIType.i32 },
+  CloseHandle: { args: [FFIType.i64], returns: FFIType.i32 },
+  GetLastError: { args: [], returns: FFIType.u32 },
+});
+const GENERIC_WRITE = 0x40000000;
+const DELETE = 0x00010000;
+const FILE_SHARE_READ = 1;
+const FILE_SHARE_DELETE = 4;
+const OPEN_ALWAYS = 4;
+const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
+const FILE_ATTRIBUTE_NORMAL = 0x80;
+const ERROR_ACCESS_DENIED = 5; // the file is still being deleted after its holder closed it
+const ERROR_SHARING_VIOLATION = 32;
+
+const takeWindowsLock = (lock: string, record: string, busy: () => CheckpointError): (() => void) => {
+  kernel32 ??= openKernel32();
+  const k = kernel32.symbols;
+  const name = Buffer.from(`${lock}\0`, "utf16le");
+  const handle = k.CreateFileW(name, GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, null, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, null);
+  if (handle === -1n) {
+    const code = k.GetLastError();
+    if (code === ERROR_SHARING_VIOLATION || code === ERROR_ACCESS_DENIED) throw busy();
+    throw new Error(`lock ${lock}: CreateFileW failed (Windows error ${code})`);
+  }
+  const bytes = Buffer.from(record, "utf8");
+  const written = new Uint32Array(1);
+  if (!k.WriteFile(handle, bytes, bytes.length, written, null) || written[0] !== bytes.length || !k.FlushFileBuffers(handle)) {
+    const code = k.GetLastError();
+    k.CloseHandle(handle);
+    throw new Error(`lock ${lock}: writing the owner record failed (Windows error ${code})`);
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    k.CloseHandle(handle);
+  };
 };
 
 const ownerOf = (lock: string): LockOwner | null => {
@@ -76,13 +122,17 @@ const ownerOf = (lock: string): LockOwner | null => {
  */
 export const takeLock = (lock: string, now: number, what: string, key: string): (() => void) => {
   const record = JSON.stringify({ pid: process.pid, host: hostname(), at: new Date(now).toISOString(), nonce: randomUUID() } satisfies LockOwner);
+  const busy = () => {
+    const owner = ownerOf(lock);
+    const since = owner ? Date.parse(owner.at) : NaN;
+    return new CheckpointError(`${what} locked: ${key} (${owner ? `pid ${owner.pid}` : "no owner record"}${Number.isFinite(since) ? `, ${Math.max(0, Math.round((now - since) / 1000))} s old` : ""})`);
+  };
+  if (process.platform === "win32") return takeWindowsLock(lock, record, busy);
   for (let attempt = 0; attempt < 3; attempt++) {
     const fd = openSync(lock, "a+", 0o600);
     if (flock(fd, LOCK_EX | LOCK_NB) !== 0) {
       closeSync(fd);
-      const owner = ownerOf(lock);
-      const since = owner ? Date.parse(owner.at) : NaN;
-      throw new CheckpointError(`${what} locked: ${key} (${owner ? `pid ${owner.pid}` : "no owner record"}${Number.isFinite(since) ? `, ${Math.max(0, Math.round((now - since) / 1000))} s old` : ""})`);
+      throw busy();
     }
     const named = statSync(lock, { throwIfNoEntry: false });
     if (!named || named.ino !== fstatSync(fd).ino) {
