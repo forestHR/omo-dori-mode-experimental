@@ -299,7 +299,7 @@ for (const [name, args, parent, out] of [
 
 // 2026-11-03: the owner wants OkDori to put the AX-MVP deck (pptx, PDF) and demo video into Slack itself; send had no
 // --file, so Slack.upload had no caller and the Dori could only post a Drive link
-const fakeSlack = () => {
+const fakeSlack = (info: "listed" | "broken" = "listed") => {
   const calls: { path: string; body: unknown }[] = [];
   let slots = 0;
   let port = 0;
@@ -319,6 +319,7 @@ const fakeSlack = () => {
       if (path === "/api/files.completeUploadExternal") return Response.json({ ok: true, files: body.files });
       if (path === "/api/chat.postMessage") return Response.json({ ok: true, channel: body.channel, ts: "1700000100.000100" });
       if (path === "/api/reactions.remove") return Response.json({ ok: true });
+      if (path === "/api/files.info" && info === "broken") return new Response("<html>bad gateway</html>");
       if (path === "/api/files.info") return Response.json({ ok: true, file: { shares: { public: { C1: [{ ts: "1700000200.000200" }] } } } });
       return Response.json({ ok: false, error: "unknown_method" });
     },
@@ -348,22 +349,40 @@ test("send slack --file uploads every file to its own URL, then shares them as o
         { path: "/api/files.getUploadURLExternal", body: { filename: "demo.mp4", length: 5 } },
         { path: "/up/2", body: "video" },
         { path: "/api/files.completeUploadExternal", body: { files: [{ id: "F1", title: "deck.pdf" }, { id: "F2", title: "demo.mp4" }], channel_id: "C1", thread_ts: "1700000000.000001", initial_comment: "AX-MVP 발표자료" } },
+        { path: "/api/files.info", body: { file: "F1" } },
         { path: "/api/reactions.remove", body: { channel: "C1", timestamp: "1700000000.000001", name: "eyes" } },
       ],
     });
     // the thread is the Dori's own now, as after a post, so an untagged reply there wakes the lead
-    expect(JSON.parse(readFileSync(join(state.dir, "slack-threads.json"), "utf8")).map((t: { channel: string; rootTs: string }) => [t.channel, t.rootTs])).toEqual([["C1", "1700000000.000001"]]);
+    expect(JSON.parse(readFileSync(join(state.dir, "slack-threads.json"), "utf8")).map((t: { channel: string; rootTs: string; seenTs: string }) => [t.channel, t.rootTs, t.seenTs])).toEqual([["C1", "1700000000.000001", "1700000200.000200"]]);
     // the same files and text again within 10 minutes are not shared twice
     const again = await slackCli(state.dir, server.port, args);
-    expect({ code: again.code, duplicate: again.out.startsWith("SEND_DUPLICATE F1,F2"), calls: calls.length }).toEqual({ code: 0, duplicate: true, calls: 6 });
+    expect({ code: again.code, duplicate: again.out.startsWith("SEND_DUPLICATE F1,F2"), calls: calls.length }).toEqual({ code: 0, duplicate: true, calls: 7 });
     // a file alone needs no text, and a text-only send still posts a message
     const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
     const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--text", "글만"]);
-    expect({ bare: bare.out, share: calls[8]?.body, info: calls[9], text: text.out, post: calls.at(-1) }).toEqual({
+    expect({ bare: bare.out, share: calls[9]?.body, info: calls[10], text: text.out, post: calls.at(-1) }).toEqual({
       bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, info: { path: "/api/files.info", body: { file: "F3" } }, text: "SENT 1700000100.000100", post: { path: "/api/chat.postMessage", body: { channel: "C1", text: "글만" } },
     });
     // the share in the channel is recorded under its own ts, which files.info named
     expect(JSON.parse(readFileSync(join(state.dir, "slack-threads.json"), "utf8")).some((t: { rootTs: string }) => t.rootTs === "1700000200.000200")).toBe(true);
+  } finally {
+    server.stop(true);
+    state.done();
+  }
+});
+
+test("once the files are shared nothing fails the send: files.info answering no JSON leaves them untracked, exit 0, and the same send again shares nothing", async () => {
+  const { calls, server } = fakeSlack("broken");
+  const state = withState();
+  try {
+    writeFileSync(join(state.dir, "deck.pdf"), "pdf bytes");
+    const args = ["slack", "--to", "C1", "--file", join(state.dir, "deck.pdf"), "--text", "발표자료"];
+    const r = await slackCli(state.dir, server.port, args);
+    const again = await slackCli(state.dir, server.port, args);
+    expect({ code: r.code, out: r.out.split("\n").map((l) => l.split(":")[0]), again: [again.code, again.out.startsWith("SEND_DUPLICATE F1")], shares: calls.filter((c) => c.path === "/api/files.completeUploadExternal").length }).toEqual({
+      code: 0, out: ["SLACK_THREAD_UNTRACKED C1", "SENT F1"], again: [0, true], shares: 1,
+    });
   } finally {
     server.stop(true);
     state.done();

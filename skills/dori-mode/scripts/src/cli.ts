@@ -2,7 +2,7 @@
 // allow: SIZE_OK — existing command dispatcher; command behavior lives in separate modules.
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { currentTmuxSession, paneActivity } from "./aoe.ts";
@@ -56,7 +56,8 @@ import { canLaunch } from "./routing.ts";
 import { normFix, recordFix } from "./same-fix.ts";
 import { computeScorecard, dayWindow, formatScorecard, saveScorecard, ScorecardError } from "./scorecard.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
-import { clearEyes, Slack, slackUnreact, type UploadFile } from "./messenger/slack.ts";
+import { clearEyes, Slack, slackUnreact } from "./messenger/slack.ts";
+import { readUploads, UploadRefused } from "./messenger/upload-files.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -547,36 +548,6 @@ const textOrFile = async (inline: string | undefined, usage: string): Promise<st
   const file = opt("text-file");
   if (file && inline) die(`${usage}: give --text-file or the text, not both`);
   return file ? (await Bun.file(file).text()).trim() || die(`${usage}: ${file} is empty`) : inline || die(usage);
-};
-// dori send slack --file: every path is checked before anything goes out (Slack takes up to 1 GB a file and refuses an
-// empty one); the sha256 (streamed, the bytes are read again only for the upload) joins the repeat key, so the same
-// files again within 10 minutes are not reshared
-const SLACK_FILE_MAX = 1024 ** 3;
-const SLACK_FILES_MAX = 10;
-const readUploads = async (paths: readonly string[]): Promise<(UploadFile & { sha: string })[]> => {
-  if (paths.length > SLACK_FILES_MAX) die(`SEND_FILE_REFUSED ${paths.length} files: one send shares at most ${SLACK_FILES_MAX}; nothing was sent`, 2);
-  for (const p of paths) {
-    const st = statSync(p, { throwIfNoEntry: false }) ?? die(`SEND_FILE_MISSING ${p}: no such file; nothing was sent`, 2);
-    if (!st.isFile()) die(`SEND_FILE_REFUSED ${p}: not a regular file; nothing was sent`, 2);
-    const size = st.size;
-    if (size === 0) die(`SEND_FILE_REFUSED ${p}: the file is empty (Slack takes no 0-byte upload); nothing was sent`, 2);
-    if (size > SLACK_FILE_MAX) die(`SEND_FILE_TOO_BIG ${p}: ${size} bytes, over Slack's ${SLACK_FILE_MAX} bytes (1 GB) a file; nothing was sent`, 2);
-  }
-  const out: (UploadFile & { sha: string })[] = [];
-  for (const p of paths) {
-    const hash = new Bun.CryptoHasher("sha256");
-    let length = 0;
-    for await (const chunk of Bun.file(p).stream()) {
-      hash.update(chunk);
-      length += chunk.byteLength;
-    }
-    out.push({ filename: basename(p), length, sha: hash.digest("hex"), read: async () => {
-      const bytes = new Uint8Array(await Bun.file(p).arrayBuffer());
-      if (bytes.byteLength !== length) throw new Error(`SEND_FILE_CHANGED ${p}: ${length} bytes when checked, ${bytes.byteLength} now; the upload stopped before it was shared`);
-      return bytes;
-    } });
-  }
-  return out;
 };
 // a bare --thread (no value) is a thread ref that came out empty, not a lane without a thread
 const threadOpt = (): string | undefined => (flags.values.thread === true ? "" : opt("thread"));
@@ -1675,7 +1646,7 @@ try {
       if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);
       if (filePaths.length && platform !== "slack") die(`SEND_FILE_REFUSED --file is only supported for slack, not ${platform}; nothing was sent`, 2);
       if (filePaths.length && edit) die("SEND_FILE_REFUSED --file is for a new message, not --edit; nothing was sent", 2);
-      const uploads = filePaths.length ? await readUploads(filePaths) : [];
+      const uploads = filePaths.length ? await readUploads(filePaths).catch((e: unknown) => (e instanceof UploadRefused ? die(e.message, 2) : Promise.reject(e))) : [];
       // with --file the text is optional: it goes out as the files' message (initial_comment)
       const body = uploads.length && !opt("text") && !opt("text-file") ? "" : postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE (or --file PATH, slack)"), "send");
       const text = status === "working" || status === "done" ? progressText(status, body, config.discord) : body;
