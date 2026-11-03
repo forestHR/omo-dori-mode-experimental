@@ -64,7 +64,7 @@ test("a quiet done thread in the owner's channel is archived; working, waiting, 
   const { w, dc } = world([
     { id: "301", name: "✅ 도리 상태 파일 깃 관리", lastMin: 40 },
     { id: "302", name: "🔄 완료 스레드 자동 보관", lastMin: 120 },
-    { id: "303", name: "⏸️ HR35 ETH 기준선 대비 개선 실험", lastMin: 3000 },
+    { id: "303", name: "🔔 HR35 ETH 기준선 대비 개선 실험", lastMin: 3000 },
     { id: "304", name: "✅ 방금 닫은 일", lastMin: 10 },
     { id: "305", name: "✅ 완료 · 메일 발신", parent: OTHER_CHANNEL, lastMin: 3000 },
     { id: "306", name: "다이제스트 캘린더", lastMin: 3000 },

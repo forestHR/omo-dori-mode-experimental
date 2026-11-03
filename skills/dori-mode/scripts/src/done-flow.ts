@@ -244,7 +244,7 @@ export const resumeLane = async (deps: FlowDeps, lane: Lane): Promise<string[]> 
   const { pausedFrom: _, pausedGoal: __, ...rest } = lane;
   await deps.registry.write(withStatus(rest, to, "RESUMED", iso(deps.clock), { lastReplyAt: deps.clock.now() }));
   const out = [`LANE_RESUMED ${lane.key} ${to}`, ...(goal ? [goal.line] : [])];
-  // a thread left ⏸️ while this lane was paused (its last working lane closed) is worked in again
+  // a thread left 🔔 while this lane was paused (its last working lane closed) is worked in again
   if (deps.requestThreadStatus && hasThread(lane) && lane.thread.startsWith("discord:")) {
     await deps.requestThreadStatus(lane.thread, "working").catch((e: unknown) => out.push(`THREAD_STATUS_WARN ${lane.key} ${lane.thread}: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`));
   }

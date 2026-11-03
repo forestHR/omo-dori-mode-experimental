@@ -306,7 +306,7 @@ test("with no owner webhook set, a webhook recording in the channel lands transc
 });
 
 test("a tap on a card inside its work thread is taken, lands in the inbox with its session and tmux, and turns the thread working; a tap from an unrelated channel is ignored", async () => {
-  const { listener, cards, gw, inbox, calls } = setup((req) => (req.method === "GET" ? { name: "⏸️ fix login", type: 11 } : req.method === "POST" && req.url.endsWith(`/channels/${THREAD}/messages`) ? { id: "900" } : {}));
+  const { listener, cards, gw, inbox, calls } = setup((req) => (req.method === "GET" ? { name: "🔔 fix login", type: 11 } : req.method === "POST" && req.url.endsWith(`/channels/${THREAD}/messages`) ? { id: "900" } : {}));
   await cards.ask("Ship?", ["Yes", "No"], { thread: THREAD, session: "sess-1", tmux: "aoe_demo_1234abcd" });
   expect(calls()[0]).toBe(`POST /channels/${THREAD}/messages`);
   const before = calls().length;

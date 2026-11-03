@@ -144,17 +144,22 @@ const renamed = async (name: string, status: ThreadStatus, words: DiscordWords =
 test("every status change leaves exactly one status mark in front of the title", async () => {
   expect(await renamed("✅ 🔄 fix login", "working")).toBe("🔄 fix login");
   expect(await renamed("fix login", "working")).toBe("🔄 fix login");
-  expect(await renamed("⏸️⏳ ⏸ 🔄  fix login", "waiting")).toBe("⏸️ fix login");
+  expect(await renamed("🔔⏳ ⏸ 🔄  fix login", "waiting")).toBe("🔔 fix login");
   expect(await renamed("[working] [working] [api] fix login", "done", defaultDiscordWords)).toBe("[done] [api] fix login");
   expect(await renamed("🔄 [done] fix login", "working", defaultDiscordWords)).toBe("[working] fix login");
 });
 
-test("an Autophagy closing word is one mark too: it is never stacked on, and done keeps it, so a failure never shows ✅", async () => {
+test("an Autophagy end mark is one mark too: it is never stacked on, done keeps it, so a failure never shows ✅", async () => {
   expect(await renamed("✅ 완료 · ✉️ 메일 발신 · x", "working")).toBe("🔄 ✉️ 메일 발신 · x");
   expect(await renamed("⛔ 취소 · 🔄 x", "working")).toBe("🔄 x");
-  expect(await renamed("⛔ 취소 · ↩️ 메일 회신 · x", "done")).toBe("⛔ 취소 · ↩️ 메일 회신 · x");
-  expect(await renamed("✅ ❗ 실패 · 🔐 묶음 승인 · x", "done")).toBe("❗ 실패 · 🔐 묶음 승인 · x");
-  expect(await renamed("⌛ 만료 · ✉️ x", "waiting")).toBe("⏸️ ✉️ x");
+  expect(await renamed("⛔ 취소 · ↩️ 메일 회신 · x", "done")).toBe("⛔ ↩️ 메일 회신 · x");
+  expect(await renamed("✅ ❗ 실패 · 🔐 묶음 승인 · x", "done")).toBe("❗ 🔐 묶음 승인 · x");
+  expect(await renamed("✅ ⛔ 취소 · ↩️ x", "done")).toBe("⛔ ↩️ x");
+  expect(await renamed("🔄 완료 · ✉️ x", "done")).toBe("✅ ✉️ x");
+  expect(await renamed("⌛ 만료 · ✉️ x", "done")).toBe("💤 ✉️ x");
+  expect(await renamed("💤 ✉️ x", "done")).toBe("💤 ✉️ x");
+  expect(await renamed("⌛ 만료 · ✉️ x", "waiting")).toBe("🔔 ✉️ x");
+  expect(await renamed("❗ 🔐 x", "waiting")).toBe("🔔 🔐 x");
 });
 
 test("a thread that cannot be renamed is a warning, the lane still closes; a lane without a thread or sharing it with an open lane is not touched", async () => {
@@ -197,7 +202,7 @@ test("two lanes in one thread: the automatic close of the first posts its result
 });
 
 test("with a Discord token the result goes straight to the thread: a waiting shared thread is not renamed, not even to working", async () => {
-  const f = fakeThread("⏸️ shared", false);
+  const f = fakeThread("🔔 shared", false);
   await at(T0).registry.write({ ...lane, key: "fix-b", title: "fix-b", pane: "aoe_fix-b_00000000", status: "paused" });
   const deps = bothHooks(at(T0, { markThreadDone: f.markThreadDone, postInThread: (ref, text) => postInThread(f.dc, ref, text) }));
   expect((await closeLane(deps, lane, "closed", SUMMARY)).closed).toBe(true);
@@ -209,7 +214,7 @@ test("with a Discord token the result goes straight to the thread: a waiting sha
 });
 
 test("a thread with an open question card is not marked done when its only lane closes; the result is posted", async () => {
-  const f = fakeThread("⏸️ dedup", false);
+  const f = fakeThread("🔔 dedup", false);
   const r = await closeLane(bothHooks(at(T0, { markThreadDone: f.markThreadDone, openCards: (ref) => (ref === lane.thread ? ["Q7"] : []) })), lane, "closed", SUMMARY);
   expect(r.closed).toBe(true);
   expect(hookCalls()).toEqual([`reply fix-a: ${SUMMARY}`]);
@@ -248,7 +253,7 @@ test("a standing thread is left waiting, not done and archived, when its last la
   const r = await closeLane(at(T0, { ...f.close, requestThreadStatus, standingThread: (ref) => ref === lane.thread }), lane, "closed", SUMMARY);
   expect(r.closed).toBe(true);
   expect(f.calls().filter((c) => c.startsWith(`POST ${T}/messages`))).toHaveLength(1);
-  expect(f.marks()).toEqual([`GET ${T}`, `PATCH ${T} {"name":"⏸️ upstream ports"}`]);
+  expect(f.marks()).toEqual([`GET ${T}`, `PATCH ${T} {"name":"🔔 upstream ports"}`]);
   expect(JSON.stringify((await read()).receipt)).toContain("thread left open: standing thread; summary posted");
 });
 

@@ -74,7 +74,7 @@ test("a burst of three status changes within a second makes exactly one rename, 
   await q.request(THREAD, "waiting");
   expect(w.patches).toEqual([]);
   await advance(q, DEBOUNCE_MS + 1_000);
-  expect(w.patches).toEqual([{ name: "⏸️ fix login" }]);
+  expect(w.patches).toEqual([{ name: "🔔 fix login" }]);
   expect(w.logs).toEqual([`THREAD_STATUS_APPLIED ${THREAD} waiting`]);
 });
 
@@ -91,13 +91,13 @@ test("a rename refused with 429 waits out retry_after plus jitter, then one retr
   await advance(q, 339_000);
   expect(w.patches).toEqual([]);
   await advance(q, 2_000);
-  expect(w.patches).toEqual([{ name: "⏸️ fix login" }]);
+  expect(w.patches).toEqual([{ name: "🔔 fix login" }]);
   expect(w.logs.at(-1)).toBe(`THREAD_STATUS_APPLIED ${THREAD} waiting`);
   expect(pending()).toEqual({});
 });
 
 test("a rename left pending by a one-shot command is applied by a listener started after it, also after a restart", async () => {
-  const { w, queue, timers, advance, pending } = world("⏸️ fix login");
+  const { w, queue, timers, advance, pending } = world("🔔 fix login");
   w.limited.push(120);
   // the command (no timers) hits the limit and leaves the rename on disk instead of waiting
   expect(await queue().request(THREAD, "working")).toBe("pending");
@@ -141,34 +141,34 @@ const live = (name: string, workingLanes?: (t: string) => Promise<readonly strin
   return { ...wd, q, cards, listener, inbox, tap, say };
 };
 
-test("the owner replying in text while a card is open keeps the thread ⏸️ and tells the lead the card is still open", async () => {
+test("the owner replying in text while a card is open keeps the thread 🔔 and tells the lead the card is still open", async () => {
   const { w, cards, listener, inbox, say } = live("🔄 fix login");
   await cards.ask("Ship to prod?", ["Yes", "No"], { thread: THREAD });
-  expect(w.name).toBe("⏸️ fix login");
+  expect(w.name).toBe("🔔 fix login");
   const renames = w.patches.length;
   await listener.onMessage(say("1001", "yes, ship it"));
-  expect(w.name).toBe("⏸️ fix login");
+  expect(w.name).toBe("🔔 fix login");
   expect(w.patches.length).toBe(renames);
   expect(inbox()[0]).toMatchObject({ id: "1001", scope: "thread", open_cards: ["Q1"], note: 'card Q1 still open, owner replied in text: resolve it with dori resolve Q1 --answer "<the answer, short>" so the card folds' });
   expect(w.logs).toContain(`CARD_STILL_OPEN Q1 thread=${THREAD} card Q1 still open, owner replied in text: resolve it with dori resolve Q1 --answer "<the answer, short>" so the card folds`);
   expect(cards.store.get("Q1")?.status).toBe("open");
 });
 
-test("three cards answered out of step stay ⏸️ until the last open one is resolved, which gives 🔄", async () => {
+test("three cards answered out of step stay 🔔 until the last open one is resolved, which gives 🔄", async () => {
   const { w, cards, listener, tap, say } = live("🔄 fix login");
   for (const text of ["Q70?", "Q71?", "Q72?"]) await cards.ask(text, ["Yes", "No"], { thread: THREAD });
-  expect(w.name).toBe("⏸️ fix login");
+  expect(w.name).toBe("🔔 fix login");
   await listener.onInteraction(tap("Q1"));
-  expect(w.name).toBe("⏸️ fix login");
+  expect(w.name).toBe("🔔 fix login");
   await listener.onInteraction(tap("Q2"));
-  expect(w.name).toBe("⏸️ fix login");
+  expect(w.name).toBe("🔔 fix login");
   await listener.onMessage(say("1002", "the third one: no"));
-  expect(w.name).toBe("⏸️ fix login");
+  expect(w.name).toBe("🔔 fix login");
   expect(await cards.resolve("Q3")).toBe("folded");
   expect(w.name).toBe("🔄 fix login");
 });
 
-test("a lane still working in the thread keeps it 🔄 past an open card and a wait; ⏸️ only once no lane works there (feature-verify 2026-10-12, follow-up a)", async () => {
+test("a lane still working in the thread keeps it 🔄 past an open card and a wait; 🔔 only once no lane works there (feature-verify 2026-10-12, follow-up a)", async () => {
   const working = new Set(["lane-a"]);
   const { w, q, cards, listener, say } = live("🔄 fix login", async () => [...working]);
   await cards.ask("Ship to prod?", ["Yes", "No"], { thread: THREAD });
@@ -181,10 +181,10 @@ test("a lane still working in the thread keeps it 🔄 past an open card and a w
   // no lane works there any more: the open card makes it waiting
   working.clear();
   await listener.onMessage(say("1003", "still thinking"));
-  expect(w.name).toBe("⏸️ fix login");
+  expect(w.name).toBe("🔔 fix login");
 });
 
-// 2026-10-16: a card asked with --thread pointing at the owner's text channel renamed the channel "⏸️-zzangdori" and its
+// 2026-10-16: a card asked with --thread pointing at the owner's text channel renamed the channel "🔔-zzangdori" and its
 // answer queued "🔄". A status mark goes only on a thread (Discord types 10-12); the channel keeps its name, a real thread
 // in the same run still gets its mark.
 test("a status for a text channel never renames it; a thread next to it still gets its mark", async () => {
@@ -214,6 +214,6 @@ test("a status for a text channel never renames it; a thread next to it still ge
   expect(logs.filter((l) => l.startsWith(`THREAD_STATUS_DROPPED ${CHANNEL}`)).length).toBe(5);
   expect(logs[0]).toContain("is not a thread (type 0); its name is left alone");
   expect(await q.request(THREAD, "waiting")).toBe("applied");
-  expect(chans[THREAD]?.name).toBe("⏸️ fix login");
+  expect(chans[THREAD]?.name).toBe("🔔 fix login");
   expect(patched).toEqual([THREAD]);
 });

@@ -224,7 +224,7 @@ dori resolve Q1
 
 带 `--thread` 时，卡片发布在对应工作线程内，并把线程标为等待。回答就在原处折叠成记录，不另发记录行；该线程没有其他未回答问题时回到工作中。`dori reopen` 恢复按钮并再次把线程标为等待。不带 `--thread` 时，新卡片发布到配置的频道。以前发布在频道且关联线程的卡片，仍会在该线程留下不发通知的答案记录。后续工作完成后，`dori resolve` 从跟踪列表移除问题，折叠后的卡片仍留在聊天中。用 resolve 移除一张未回答的卡片时，如果该线程没有其他未回答问题，线程同样回到工作中，不会因为放弃的问题一直停在等待。
 
-`discord.statusStyle: "emoji"` 在线程名开头使用 🔄 工作中、⏸️ 等待、✅ 完成，有意保持开启的线程(`dori thread set <ref> standing`，解除用 `unstanding`)无论状态如何都用 📌；默认 `"words"` 使用 `[working]`、`[waiting]`、`[done]`。标记只加在线程上：把文字频道、论坛或分类当作线程传入(例如 `dori ask --thread` 用了频道 id)时名称保持不变，该状态以 `THREAD_STATUS_DROPPED <id> ... is not a thread` 丢弃。`dori thread reply` / `wait` / `done` 设置这些状态；done 归档，reply/wait 取消归档。所有者在完成线程发消息时，监听器会把它重新打开并标为工作中。服务及卡片文字本地化设置见 [Discord + aoe 设置](skills/dori-mode/setups/discord-aoe/README.md)。
+`discord.statusStyle: "emoji"` 在线程名开头使用 🔄 工作中、🔔 需要所有者回复、✅ 完成(Yoodori 请求另有 ⛔ 取消、💤 被新版本取代或撤回、❗ 失败)，有意保持开启的线程(`dori thread set <ref> standing`，解除用 `unstanding`)无论状态如何都用 📌；默认 `"words"` 使用 `[working]`、`[waiting]`、`[done]`。标记只加在线程上：把文字频道、论坛或分类当作线程传入(例如 `dori ask --thread` 用了频道 id)时名称保持不变，该状态以 `THREAD_STATUS_DROPPED <id> ... is not a thread` 丢弃。`dori thread reply` / `wait` / `done` 设置这些状态；done 归档，reply/wait 取消归档。所有者在完成线程发消息时，监听器会把它重新打开并标为工作中。服务及卡片文字本地化设置见 [Discord + aoe 设置](skills/dori-mode/setups/discord-aoe/README.md)。
 
 ### 用 iPhone 快捷指令发语音指令
 

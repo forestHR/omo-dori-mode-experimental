@@ -330,7 +330,7 @@ export const adoptLane = async (deps: FlowDeps, input: LaunchInput & { readonly 
   return lane;
 };
 
-// A lane put on a thread works there: one left ✅ or ⏸️, or archived (a lane closed in it before), is opened again and
+// A lane put on a thread works there: one left ✅ or 🔔 (or an old ⏸️), or archived (a lane closed in it before), is opened again and
 // marked 🔄, as closeLane and dori resume decide it (a working lane makes its thread working, past an open card). The
 // rename goes through the thread status queue, so Discord's rename limit parks it for the listener instead of failing.
 // A thread already 🔄 and open is only read. Without a Discord token or a discord: ref nothing is done.

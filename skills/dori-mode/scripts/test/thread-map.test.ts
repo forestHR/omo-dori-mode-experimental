@@ -121,7 +121,7 @@ test("thread set honors open-card, while done wins, archives and drops the map",
   const waiting = http().name;
   const result = await cli("set", REF, "done", "--open-card");
   expect({ waiting, result, name: http().name, archived: http().archived, map: map() }).toEqual({
-    waiting: "⏸️ fix login", result: { code: 0, out: "", err: `THREAD_STATUS_APPLIED ${ID} done` }, name: "✅ fix login", archived: true, map: {},
+    waiting: "🔔 fix login", result: { code: 0, out: "", err: `THREAD_STATUS_APPLIED ${ID} done` }, name: "✅ fix login", archived: true, map: {},
   });
 });
 
@@ -193,7 +193,7 @@ test("closing the last working lane of a thread with an open card turns it waiti
   closable("lane-a");
   const closed = await dori("close", "lane-a", "--summary", SUMMARY);
   expect({ code: closed.code, err: closed.err, names: named(), archived: http().archived }).toEqual({
-    code: 0, err: `THREAD_STATUS_APPLIED ${ID} waiting`, names: ["⏸️ fix login"], archived: false,
+    code: 0, err: `THREAD_STATUS_APPLIED ${ID} waiting`, names: ["🔔 fix login"], archived: false,
   });
   expect(closed.out).toContain("thread left open: open card Q1; summary posted\",\"waiting requested: applied");
 });
@@ -210,7 +210,7 @@ test("a thread set standing wears 📌, is listed as standing, and closing its l
   expect(closed.out).toContain("thread left open: standing thread; summary posted");
 });
 
-// owner 2026-11-03 11:10 KST: a thread kept open on purpose looked like it was waiting (⏸️)
+// owner 2026-11-03 11:10 KST: a thread kept open on purpose looked like it was waiting (🔔)
 test("a standing thread keeps 📌 past working, waiting, an open card and a plain done, with no rename", async () => {
   await cli("open", "fix login", "--first", "Start");
   openLane("lane-b");
@@ -240,7 +240,7 @@ test("unstanding takes 📌 off and the normal marks work again; a thread not st
   expect(http().name).toBe("🔄 fix login");
   await cli("set", REF, "standing");
   expect((await cli("set", REF, "unstanding")).out).toBe(`THREAD_UNSTANDING ${REF} applied`);
-  expect({ name: http().name, standing: map()[ID]?.standing }).toEqual({ name: "⏸️ fix login", standing: false });
+  expect({ name: http().name, standing: map()[ID]?.standing }).toEqual({ name: "🔔 fix login", standing: false });
   await cli("set", REF, "working");
   expect(http().name).toBe("🔄 fix login");
   await cli("set", REF, "done");
@@ -281,7 +281,7 @@ test("a release whose rename fails still takes 📌 off at the next rename, and 
   }
   expect({ name: http().name, standing: map()[ID]?.standing }).toEqual({ name: "📌 fix login", standing: false });
   expect((await cli("set", REF, "unstanding")).out).toBe(`THREAD_UNSTANDING ${REF} applied`);
-  expect(http().name).toBe("⏸️ fix login");
+  expect(http().name).toBe("🔔 fix login");
 });
 
 test("a forced done whose rename fails leaves the release, so the next done gives ✅ with no 📌", async () => {
@@ -301,7 +301,7 @@ test("a forced done whose rename fails leaves the release, so the next done give
 test("a 📌 in the title of a thread that was never standing stays through status changes", async () => {
   await cli("open", "📌 notices", "--first", "Start");
   await cli("set", REF, "waiting");
-  expect(http().name).toBe("⏸️ 📌 notices");
+  expect(http().name).toBe("🔔 📌 notices");
 });
 
 test("a lane still working in the thread keeps it working when another lane closes, open card or not", async () => {
@@ -327,7 +327,7 @@ test("a waiting rename still held back by Discord's rate limit is kept for the l
   expect(closed.out).toContain(`THREAD_STATUS_WARN lane-a ${REF}: waiting requested: pending`);
 });
 
-test("a done-claimed lane left in the thread is still ours: the mark stays until it settles, no ⏸️ in between", async () => {
+test("a done-claimed lane left in the thread is still ours: the mark stays until it settles, no 🔔 in between", async () => {
   await cli("open", "fix login", "--first", "Start");
   openCard("Q1");
   openLane("lane-b", { status: "done-claimed" });
@@ -342,13 +342,13 @@ test("a paused lane is not working: when the last working lane closes beside it,
   closable("lane-a");
   const closed = await dori("close", "lane-a", "--summary", SUMMARY);
   expect({ code: closed.code, err: closed.err, names: named(), archived: http().archived }).toEqual({
-    code: 0, err: `THREAD_STATUS_APPLIED ${ID} waiting`, names: ["⏸️ fix login"], archived: false,
+    code: 0, err: `THREAD_STATUS_APPLIED ${ID} waiting`, names: ["🔔 fix login"], archived: false,
   });
   expect(closed.out).toContain("thread left open: open lane lane-b uses it too");
   // the paused lane is worked in again: the thread goes back to 🔄
   const resumed = await dori("resume", "lane-b");
   expect({ code: resumed.code, out: resumed.out, err: resumed.err, names: named() }).toEqual({
-    code: 0, out: "LANE_RESUMED lane-b working", err: `THREAD_STATUS_APPLIED ${ID} working`, names: ["⏸️ fix login", "🔄 fix login"],
+    code: 0, out: "LANE_RESUMED lane-b working", err: `THREAD_STATUS_APPLIED ${ID} working`, names: ["🔔 fix login", "🔄 fix login"],
   });
 });
 
@@ -431,5 +431,14 @@ test("the reply hook a closing lane runs does not count that lane as working (DO
   openLane("lane-a");
   process.env.DORI_CLOSING_LANE = "lane-a";
   const own = await cli("reply", REF, "lane-a: done").finally(() => delete process.env.DORI_CLOSING_LANE);
-  expect({ err: own.err, names: named() }).toEqual({ err: `THREAD_STATUS_APPLIED ${ID} waiting open=Q1`, names: ["⏸️ fix login"] });
+  expect({ err: own.err, names: named() }).toEqual({ err: `THREAD_STATUS_APPLIED ${ID} waiting`, names: ["🔔 fix login"] });
+});
+
+test("our reply with no lane working leaves the thread to the owner (🔔); with a lane working there it stays 🔄", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  await cli("reply", REF, "here is the answer");
+  expect(named().at(-1)).toBe("🔔 fix login");
+  openLane("lane-a");
+  await cli("reply", REF, "lane-a: tests are green");
+  expect(named().at(-1)).toBe("🔄 fix login");
 });
