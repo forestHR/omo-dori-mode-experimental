@@ -9,9 +9,8 @@ import { dropThread, threads } from "./thread-map.ts";
 
 // One entry per thread: the status the latest event asked for, the earliest time the rename may run, and how many
 // rate-limited tries it took so far. `rev` grows with every request, so a rename that finishes after a newer request
-// arrived leaves the newer one in place. `released`: the thread just stopped being standing, so the rename also takes its
-// 📌 off; kept on the entry until a rename ran, so a 429 or a newer status does not lose it.
-export type PendingStatus = { readonly status: ThreadStatus; readonly due: number; readonly tries: number; readonly rev: number; readonly released?: boolean };
+// arrived leaves the newer one in place.
+export type PendingStatus = { readonly status: ThreadStatus; readonly due: number; readonly tries: number; readonly rev: number };
 type Pending = Record<string, PendingStatus>;
 
 export type FlushResult = "applied" | "unchanged" | "pending" | "dropped" | "none";
@@ -72,9 +71,9 @@ export class ThreadStatusQueue {
   // Records the status an event asks for. With timers (the listener) the rename runs a moment later, so a burst of
   // events makes one rename; without (a one-shot command) it runs now and resolves with the outcome. A rename still
   // waiting out a 429 is never tried early: the newer status just replaces the one it will apply.
-  async request(thread: string, hint: ThreadStatus, released = false): Promise<FlushResult | "scheduled"> {
+  async request(thread: string, hint: ThreadStatus): Promise<FlushResult | "scheduled"> {
     const now = this.d.now();
-    const e = this.edit(thread, (old) => ({ status: hint, due: Math.max(old?.due ?? 0, this.timers ? now + DEBOUNCE_MS : now), tries: old?.tries ?? 0, rev: (old?.rev ?? 0) + 1, ...(released || old?.released ? { released: true } : {}) })) as PendingStatus;
+    const e = this.edit(thread, (old) => ({ status: hint, due: Math.max(old?.due ?? 0, this.timers ? now + DEBOUNCE_MS : now), tries: old?.tries ?? 0, rev: (old?.rev ?? 0) + 1 })) as PendingStatus;
     if (!this.timers) return this.flush(thread);
     this.schedule(thread, e.due);
     return "scheduled";
@@ -131,12 +130,14 @@ export class ThreadStatusQueue {
     const cards = this.d.openCards(thread);
     const lanes = e.status === "done" ? [] : ((await this.d.workingLanes?.(thread)) ?? []);
     const asked = desiredStatus(e.status, cards, lanes);
-    // a standing thread keeps its mark through every event; the file is read here so a one-shot command's standing counts
-    const status: ThreadMark = threads(dirname(this.d.file))[thread]?.standing === true ? "standing" : asked;
+    // a standing thread keeps its mark through every event, a released one (false) loses its 📌 at every rename; read
+    // here, so a one-shot command's change counts and a failed rename leaves it for the next
+    const standing = threads(dirname(this.d.file))[thread]?.standing;
+    const status: ThreadMark = standing === true ? "standing" : asked;
     // what decided it, when not the event: the open cards, the lanes that kept it working past them
     const why = asked !== e.status || (cards.length && lanes.length) ? [cards.length ? ` open=${cards.join(",")}` : "", lanes.length ? ` working=${lanes.join(",")}` : ""].join("") : "";
     try {
-      const changed = await setThreadStatus(this.d.dc.once(), thread, status, this.d.words, undefined, e.released === true);
+      const changed = await setThreadStatus(this.d.dc.once(), thread, status, this.d.words, undefined, standing === false);
       if (status === "done") dropThread(dirname(this.d.file), thread);
       this.forget(thread, e.rev);
       this.d.log(`THREAD_STATUS_APPLIED ${thread} ${status}${changed ? "" : " unchanged"}${why}`);

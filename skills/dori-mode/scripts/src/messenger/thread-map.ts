@@ -5,7 +5,7 @@ import { join } from "node:path";
 // when); dori directive-audit reads a lead thread without them as opened with no directives
 // standing: the thread a kind of work always lives in (dori thread set <ref> standing); closing its last lane leaves it
 // open, not done, its name wears the standing mark (📌) through every status event, and it ends with
-// dori thread set <ref> unstanding or a forced done mark (which drops the entry)
+// dori thread set <ref> unstanding (standing false) or a forced done mark (which drops the entry)
 export type ThreadEntry = { readonly session: string | null; readonly title: string; readonly directives?: readonly string[]; readonly openedAt?: string; readonly standing?: boolean };
 export type ThreadMap = Record<string, ThreadEntry>;
 
@@ -34,13 +34,13 @@ export const standThread = (dir: string, id: string): void => {
   save(dir, all);
 };
 
-// Resolves whether the thread was standing; the rest of its entry stays.
+// standing false: it was standing and was released, so every later rename takes its 📌 off (a rename that failed does
+// not lose that); a done mark drops the entry. Resolves whether the thread was standing.
 export const unstandThread = (dir: string, id: string): boolean => {
   const all = threads(dir);
   const entry = all[id];
   if (!entry?.standing) return false;
-  const { standing: _, ...rest } = entry;
-  all[id] = rest;
+  all[id] = { ...entry, standing: false };
   save(dir, all);
   return true;
 };

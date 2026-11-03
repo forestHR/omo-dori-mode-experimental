@@ -236,12 +236,12 @@ test("setting standing again gives 📌 once, and a thread marked earlier gets i
 
 test("unstanding takes 📌 off and the normal marks work again; a thread not standing is left alone", async () => {
   await cli("open", "fix login", "--first", "Start");
+  expect((await cli("set", REF, "unstanding")).out).toBe(`THREAD_NOT_STANDING ${REF}`);
+  expect(http().name).toBe("🔄 fix login");
   await cli("set", REF, "standing");
   expect((await cli("set", REF, "unstanding")).out).toBe(`THREAD_UNSTANDING ${REF} applied`);
-  expect({ name: http().name, standing: map()[ID]?.standing }).toEqual({ name: "⏸️ fix login", standing: undefined });
+  expect({ name: http().name, standing: map()[ID]?.standing }).toEqual({ name: "⏸️ fix login", standing: false });
   await cli("set", REF, "working");
-  expect(http().name).toBe("🔄 fix login");
-  expect((await cli("set", REF, "unstanding")).out).toBe(`THREAD_NOT_STANDING ${REF}`);
   expect(http().name).toBe("🔄 fix login");
   await cli("set", REF, "done");
   expect(http().name).toBe("✅ fix login");
@@ -267,6 +267,34 @@ test("a forced thread done whose post fails leaves the thread standing, and the 
   const failed = await cli("done", REF, "📌", "--force");
   expect({ failed: failed.code !== 0, name: http().name, standing: map()[ID]?.standing }).toEqual({ failed: true, name: "📌 fix login", standing: true });
   await cli("done", REF, "finished", "--force");
+  expect({ name: http().name, archived: http().archived, entry: map()[ID] }).toEqual({ name: "✅ fix login", archived: true, entry: undefined });
+});
+
+test("a release whose rename fails still takes 📌 off at the next rename, and unstanding again asks again", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  await cli("set", REF, "standing");
+  process.env.DORI_TEST_PATCH_FAIL = "1";
+  try {
+    await cli("set", REF, "unstanding");
+  } finally {
+    delete process.env.DORI_TEST_PATCH_FAIL;
+  }
+  expect({ name: http().name, standing: map()[ID]?.standing }).toEqual({ name: "📌 fix login", standing: false });
+  expect((await cli("set", REF, "unstanding")).out).toBe(`THREAD_UNSTANDING ${REF} applied`);
+  expect(http().name).toBe("⏸️ fix login");
+});
+
+test("a forced done whose rename fails leaves the release, so the next done gives ✅ with no 📌", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  await cli("set", REF, "standing");
+  process.env.DORI_TEST_PATCH_FAIL = "1";
+  try {
+    await cli("set", REF, "done", "--force");
+  } finally {
+    delete process.env.DORI_TEST_PATCH_FAIL;
+  }
+  expect({ name: http().name, standing: map()[ID]?.standing }).toEqual({ name: "📌 fix login", standing: false });
+  await cli("set", REF, "done");
   expect({ name: http().name, archived: http().archived, entry: map()[ID] }).toEqual({ name: "✅ fix login", archived: true, entry: undefined });
 });
 

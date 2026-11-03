@@ -1875,12 +1875,13 @@ try {
         }
         if (text === "unstanding") {
           const id = discordThreadId(ref ?? "");
-          if (!unstandThread(cardDir(), id)) {
+          // false: released before and its rename may have failed, so it is asked again
+          if (!unstandThread(cardDir(), id) && threads(cardDir())[id]?.standing !== false) {
             console.log(`THREAD_NOT_STANDING discord:${id}`);
             break;
           }
           // back to the normal rules: waiting unless a lane works there or a card is open
-          console.log(`THREAD_UNSTANDING discord:${id} ${await threadStatuses(discordClient()).request(id, "waiting", true)}`);
+          console.log(`THREAD_UNSTANDING discord:${id} ${await threadStatuses(discordClient()).request(id, "waiting")}`);
           break;
         }
         const status = text === "done" ? "done" : flags.values["open-card"] ? "waiting" : text === "waiting" ? "waiting" : "working";
@@ -1891,7 +1892,8 @@ try {
           break;
         }
         if (holders) console.log(`THREAD_DONE_FORCED discord:${id}: ${holders}; marking it done anyway`);
-        await threadStatuses(discordClient()).request(id, status, status === "done" && unstandThread(cardDir(), id));
+        if (status === "done") unstandThread(cardDir(), id);
+        await threadStatuses(discordClient()).request(id, status);
         break;
       }
       if ((verb !== "reply" && verb !== "wait" && verb !== "done") || !ref) die("usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE");
@@ -1914,8 +1916,11 @@ try {
         if (holders) console.log(`THREAD_DONE_FORCED ${thread}: ${holders}; marking it done anyway`);
       }
       const statuses = threadStatuses(dc);
-      // runs after the post: a post that fails leaves a standing thread standing
-      const mark = (t: string, s: ThreadStatus) => statuses.request(t, s, verb === "done" && unstandThread(cardDir(), t));
+      // released after the post: a post that fails leaves a standing thread standing
+      const mark = (t: string, s: ThreadStatus) => {
+        if (verb === "done") unstandThread(cardDir(), t);
+        return statuses.request(t, s);
+      };
       // a repeat is not posted, but the status still goes through: a done after a reply with the same words still closes
       const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark));
       if (r.duplicate) await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);
