@@ -163,7 +163,7 @@ const flush = (path: string): void => {
 };
 
 export class Checkpoints {
-  constructor(readonly stateDir: string) {}
+  constructor(readonly stateDir: string, readonly platform: string = process.platform) {}
 
   path(key: string): string {
     if (!LANE_KEY.test(key)) throw new CheckpointError(`invalid lane key: ${key}`);
@@ -200,6 +200,11 @@ export class Checkpoints {
   }
 
   write(key: string, input: CheckpointInput, now: number): { checkpoint: Checkpoint; unchanged: boolean } {
+    // The journal's durability (fsync of the file and its directory) uses handles Windows cannot flush, so on native
+    // Windows a checkpoint is refused before anything is written, not half-written.
+    if (this.platform === "win32") {
+      throw new CheckpointError("checkpoints are not supported on native Windows yet; nothing was written (record the step in the lane's report instead)");
+    }
     validate(input);
     const path = this.path(key);
     const at = new Date(now).toISOString();

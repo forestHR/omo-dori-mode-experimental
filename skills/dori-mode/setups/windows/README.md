@@ -51,6 +51,8 @@ dori serve --install-task
 
 This registers the limited-privilege task `Dori serve` with a logon trigger for the current user only (no elevation needed), `ExecutionTimeLimit=PT0S` (no execution timeout), and battery power allowed both to start it and to keep it running. Its generated entry point preserves the selected configuration, environment-file and state paths. Registering it again updates that task to the currently selected instance.
 
+Lane checkpoints (`dori checkpoint`) are refused on native Windows for now: the journal's durability flushes need handles Windows cannot flush, so the step is refused before anything is written. The cost-record lock that closing a lane takes works natively.
+
 ## Manual Windows validation
 
 There are no automatic push or PR checks. From this repository, run the workflow by hand:
