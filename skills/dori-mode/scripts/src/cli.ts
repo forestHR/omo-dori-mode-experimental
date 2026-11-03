@@ -18,7 +18,7 @@ import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type 
 import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
-import { ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers } from "./handover.ts";
+import { accountHome, ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers, windowsDetachRefusal } from "./handover.ts";
 import { laneHandover, type LaneHandoverDeps, markReady, paneSignals, SUMMARY_TEMPLATE } from "./lane-handover.ts";
 import { auditHandover, auditSummary, type Committed, findCommitted, markerFile, reportGap, sendAuditSummary, summaryWeek } from "./rollover-audit.ts";
 import { appendRollover, dueReasons, holdTyped, LEAD_PREFIX, limitsFor, quietReason, readRollovers, type RolloverRequest, rolloverStats, sessionStart } from "./rollover.ts";
@@ -678,7 +678,7 @@ const freezeDeps = { run, procs: () => procTable(run), signal: sendSignal };
 const laneDepsFor = (print: (line: string) => void = (line) => console.log(line)): LaneHandoverDeps => ({
   ...deps,
   cardDir: cardDir(),
-  home: process.env.HOME ?? "",
+  home: accountHome(),
   sessionOf: sessionOfPane,
   procs: () => procTable(run),
   envOf: (pid) => {
@@ -703,7 +703,7 @@ const leadDepsFor = (print: (line: string) => void): HandoverDeps => ({
   envPath: envFilePath(),
   cardDir: cardDir(),
   inbox: config.handover.inbox || process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"),
-  home: process.env.HOME ?? "",
+  home: accountHome(),
   sessionOf: sessionOfPane,
   routedPane: async () => (await loadConfig()).leadPane,
   envLeadPane: process.env.DORI_LEAD_PANE?.trim() ?? "",
@@ -1357,6 +1357,8 @@ try {
           signals: (pane: string, model: string) => paneSignals(laneDeps, pane, model),
           // automatic rollover (handover.autoRolloverLanes / autoRolloverLead): a detached run, approved as auto:<key>
           auto: async (who: "lead" | "lane", k: string) => {
+            const refused = windowsDetachRefusal();
+            if (refused) return `could not start: ${refused}`;
             const unit = `dori-rollover-${k}-${Date.now()}`;
             const log = join(config.stateDir, "handover", "run.log");
             mkdirSync(join(config.stateDir, "handover"), { recursive: true });
@@ -1366,6 +1368,8 @@ try {
           // a lead's lane handover refused while the lane was busy, started again once the lane marked ready: a detached run
           // with the same approval and options that waits for the lane's idle moment like an automatic one
           resume: async (k: string, approvedBy: string, request: RolloverRequest) => {
+            const refused = windowsDetachRefusal();
+            if (refused) return { started: false, line: `could not start: ${refused}` };
             const unit = `dori-rollover-${k}-${Date.now()}`;
             const log = join(config.stateDir, "handover", "run.log");
             mkdirSync(join(config.stateDir, "handover"), { recursive: true });
@@ -1374,6 +1378,11 @@ try {
           },
           // the audit after a committed handover: a detached run, so its supplement round does not hold up the sweep
           audit: async (c: Committed) => {
+            const refused = windowsDetachRefusal();
+            if (refused) {
+              rmSync(markerFile(c.note), { force: true });
+              return `could not start: ${refused}`;
+            }
             const unit = `dori-handover-audit-${c.key}-${Date.now()}`;
             const log = join(config.stateDir, "handover", "run.log");
             const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "audit", c.note]);
@@ -1385,7 +1394,7 @@ try {
           directiveAudit: dailyAuditHook(config, async (since: string) => (await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), memory: leadMemoryRepo() })).lines),
           directiveLinks: async () => (await pushLinks(deps)).lines,
         };
-        for (const a of await freshnessTick(deps, process.env.HOME ?? "", hooks)) console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);
+        for (const a of await freshnessTick(deps, accountHome(), hooks)) console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);
         // a done thread that a post after its close opened again goes back to the archive once quiet (discord.autoArchiveMin)
         if (discordToken) {
           const statusFile = join(cardDir(), "thread-status.json");
@@ -1541,7 +1550,7 @@ try {
         now: clockAt === undefined ? () => Date.now() : () => clockAt,
         backup: bk,
         stateDir: config.stateDir,
-        home: process.env.HOME ?? "",
+        home: accountHome(),
         visibility: (repo) => backupVisibility(repo, { run, fetch }),
         remoteUrl: backupRemoteUrl,
         secrets: async () => {
@@ -2145,6 +2154,8 @@ try {
       // closing the old lead ends every process in its tmux session, so a handover started there continues as a user unit
       // and since the old lead is frozen at the commit (--keep-old too), it must not run under the agent it stops
       if (here && here === config.leadPane && !flags.values["dry-run"] && !process.env.DORI_HANDOVER_DETACHED) {
+        const refused = windowsDetachRefusal();
+        if (refused) die(refused);
         const unit = `dori-handover-${Date.now()}`;
         const log = join(config.stateDir, "handover", "run.log");
         mkdirSync(join(config.stateDir, "handover"), { recursive: true });

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { userInfo } from "node:os";
+import { accountHome, windowsDetachRefusal } from "../src/handover.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -145,4 +147,21 @@ test.skipIf(process.platform !== "win32")("native Windows freeze blocks submit a
 
 test.skipIf(process.platform !== "win32")("Windows cannot suspend the reserved system idle PID", () => {
   expect(winSignal(0, "SIGSTOP")).toBe(false);
+});
+
+test("a handover that must run detached is refused on native Windows with what to do instead, and allowed elsewhere", () => {
+  const line = windowsDetachRefusal("win32");
+  expect(line).toStartWith("HANDOVER_DETACH_UNSUPPORTED");
+  expect(line).toContain("from another herdr pane");
+  expect(windowsDetachRefusal("linux")).toBeUndefined();
+});
+
+test("the account home for task records does not depend on $HOME (native Windows sets USERPROFILE, not HOME)", () => {
+  const saved = process.env.HOME;
+  try {
+    delete process.env.HOME;
+    expect(accountHome()).toBe(userInfo().homedir);
+  } finally {
+    if (saved !== undefined) process.env.HOME = saved;
+  }
 });

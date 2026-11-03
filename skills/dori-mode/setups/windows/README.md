@@ -4,7 +4,7 @@ This setup adds installation, skill discovery, `dori serve` and Task Scheduler t
 
 Herdr panes must use **pwsh 7.3 or newer**, not Windows PowerShell 5.1. Point herdr's shell setting at the installed `pwsh.exe`. Dori checks the actual pane shell and version and refuses unsupported shells with `HERDR_SHELL_UNSUPPORTED`; standard native argument passing preserves empty arguments and embedded quotes.
 
-Lead and lane handovers freeze the old agent on Windows too: `NtSuspendProcess` / `NtResumeProcess` through `bun:ffi`, the agent once and then its children, thawed children first. Process discovery reports an agent whose threads are all suspended as stopped (`Get-Process` thread states; `Win32_Process` shows no suspension), so a send during a handover types neither text nor Enter, also from another invocation before the replacement record exists.
+Lead and lane handovers freeze the old agent on Windows too: `NtSuspendProcess` / `NtResumeProcess` through `bun:ffi`, the agent once and then its children, thawed children first. Process discovery reports an agent whose threads are all suspended as stopped (`Get-Process` thread states; `Win32_Process` shows no suspension), so a send during a handover types neither text nor Enter, also from another invocation before the replacement record exists. A handover that must run detached from the agent it freezes is refused on Windows for now (`HANDOVER_DETACH_UNSUPPORTED`): the lead's handover from its own pane, automatic rollovers, the resume after a lane marks ready, and the audit after a commit. Run `dori handover` or `dori handover --lane <key>` from another herdr pane instead.
 
 ## Install
 

@@ -2,6 +2,7 @@
 // Order: write the note -> open the new session -> point leadPane, lanes and cards at it -> check that its monitors run and
 // that a [REPORT] and an inbox event reach it -> only then close the old session. A failed check moves everything back.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { captureTmux, closeAoeSession, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, sessionFor } from "./aoe.ts";
@@ -243,6 +244,16 @@ const startsWork = (text: string): string | undefined => {
 
 // A command that only watches gives undefined. A local script it runs (bash x.sh, ./x.sh, an absolute path) is read too:
 // a script that honours SENPI_MONITOR_RESTORED (omo sets it when it restores a monitor) watches only when that is set.
+// The account's home for task and session records: homedir(), not $HOME, which native Windows does not set (USERPROFILE).
+export const accountHome = (): string => homedir();
+
+// A handover that must run apart from the agent it freezes (the lead's own pane, an automatic rollover, a resume after
+// ready, the audit after a commit) starts through systemd-run. Native Windows has none yet: refused, with what to do.
+export const windowsDetachRefusal = (platform: string = process.platform): string | undefined =>
+  platform === "win32"
+    ? "HANDOVER_DETACH_UNSUPPORTED on native Windows a handover cannot run detached yet: run dori handover (or dori handover --lane <key>) from another herdr pane, not the lead's own, and roll lanes over by hand"
+    : undefined;
+
 export const launchOf = (command: string, home: string, read: (path: string) => string | undefined = readText): Launch | undefined => {
   const scripts = [...command.matchAll(/(?:^|[\s;&|(])((?:~\/|\$HOME\/|\/)[^\s;&|'"()]*\.sh)\b/g)].map((m) => read((m[1] ?? "").replace(/^(?:~|\$HOME)\//, `${home}/`)) ?? "");
   const honours = scripts.some((s) => s.includes(RESTORED));
