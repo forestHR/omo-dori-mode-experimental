@@ -3,7 +3,8 @@
 // set the automation parameters from what happened. A proposal never switches anything: the lead decides (--approved-by
 // lead:<reason and signal>) and the owner is told afterwards; handover.autoRollover (off by default) is the only path that
 // runs one without a person's decision.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 
 import type { Question } from "./messenger/discord-cards.ts";
@@ -276,6 +277,53 @@ export const limitsFor = (who: Who, h: DoriConfig["handover"]): Limits =>
 // the reason the owner reads after an automatic rollover: what the session crossed when it moved
 export const autoReason = (who: Who, signals: Signals, h: DoriConfig["handover"]): string => `automatic (handover.autoRollover${who === "lane" ? "Lanes" : "Lead"}): ${dueReasons(signals, limitsFor(who, h)).join(", ") || "a threshold was crossed"}`;
 
+// An auto:<key> approval holds only for a run freshness started (the owner's Q470, 2026-11-03: two hand-runs passed the
+// string after an owner link was refused). freshness writes a one-use grant <stateDir>/handover/auto-grants/<token>.json
+// for the side and key it starts and hands the run the token (DORI_HANDOVER_AUTO_GRANT); the handover takes it back once,
+// within AUTO_GRANT_MS, for that same side and key. A grant is not something a hand-run can name: the token is random,
+// lives only until its run takes it, and the string alone holds nothing.
+export const AUTO_GRANT_ENV = "DORI_HANDOVER_AUTO_GRANT";
+export const AUTO_GRANT_MS = 5 * 60_000;
+const grantDir = (stateDir: string): string => join(stateDir, "handover", "auto-grants");
+export const mintAutoGrant = (stateDir: string, who: Who, key: string, now: number): string => {
+  const dir = grantDir(stateDir);
+  mkdirSync(dir, { recursive: true });
+  // grants no run took (a start that failed) are dropped once stale
+  for (const f of readdirSync(dir)) {
+    let at: unknown;
+    try {
+      at = (JSON.parse(readFileSync(join(dir, f), "utf8")) as { at?: unknown }).at;
+    } catch {
+      at = undefined;
+    }
+    if (typeof at !== "number" || now - at > AUTO_GRANT_MS) rmSync(join(dir, f), { force: true });
+  }
+  const token = randomBytes(16).toString("hex");
+  writeFileSync(join(dir, `${token}.json`), `${JSON.stringify({ who, key, at: now })}\n`, { flag: "wx", mode: 0o600 });
+  return token;
+};
+// true when token names a grant for this side and key minted within AUTO_GRANT_MS; the grant is gone afterwards either way
+export const takeAutoGrant = (stateDir: string, who: Who, key: string, token: string | undefined, now: number): boolean => {
+  if (!token || !/^[0-9a-f]{32}$/.test(token)) return false;
+  // claimed by a rename first: of runs that present one token at once, only one rename succeeds
+  const file = join(grantDir(stateDir), `${token}.json`);
+  const claimed = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.taken`;
+  try {
+    renameSync(file, claimed);
+  } catch {
+    return false;
+  }
+  let grant: { who?: unknown; key?: unknown; at?: unknown } | undefined;
+  try {
+    grant = JSON.parse(readFileSync(claimed, "utf8")) as typeof grant;
+  } catch {
+    return false;
+  } finally {
+    rmSync(claimed, { force: true });
+  }
+  return grant?.who === who && grant.key === key && typeof grant.at === "number" && now >= grant.at && now - grant.at <= AUTO_GRANT_MS;
+};
+
 export const decidedBy = (ref: string): DecidedBy => (ref.startsWith(LEAD_PREFIX) ? "lead" : ref.startsWith(AUTO_PREFIX) ? "auto" : "owner");
 
 // A new session (lane or lead) does nothing but re-arm monitors and ack the probe until it gets this line: before it the
@@ -340,10 +388,12 @@ const ownerRefProblem = (m: RegExpExecArray, owner: OwnerMessages): string | und
 // <the id or link of the owner's message that asked for it>" (the message must be the owner's in the inbox; the owner decided the lead
 // rolls over and is told afterwards: canReport says the handover can post that message), a question card (Qn) the owner
 // answered with its first option, a link to the owner's Discord message, or "auto:..." when the automation key for that
-// side is on. A card counts only when it was posted as a rollover proposal for this key and for the session it runs in now
+// side is on and the run is one freshness started (auto.granted: it took that run's one-use grant, takeAutoGrant); typed
+// by hand the automatic string is refused (APPROVAL_BORROWED). A card counts only when it was posted as a rollover proposal for this key and for the session it runs in now
 // (the rollover log says so), so a yes on another lane's card, on any other question, or on a card about an earlier session
 // moves nothing. Undefined when the reference holds.
-export const approvalProblem = (ref: string | undefined, card: (id: string) => Question | undefined, auto: { readonly on: boolean; readonly key: string }, key: string, pane: string, proposals: readonly RolloverEntry[], canReport = false, owner: OwnerMessages = NO_OWNER_MESSAGES): string | undefined => {
+export const APPROVAL_BORROWED = "HANDOVER_APPROVAL";
+export const approvalProblem = (ref: string | undefined, card: (id: string) => Question | undefined, auto: { readonly on: boolean; readonly key: string; readonly granted?: boolean }, key: string, pane: string, proposals: readonly RolloverEntry[], canReport = false, owner: OwnerMessages = NO_OWNER_MESSAGES): string | undefined => {
   const r = ref?.trim() ?? "";
   if (!r) return `no approval: pass --approved-by "${LEAD_PREFIX}<your reason and the signal behind it>" or "${LEAD_PREFIX}<your reason>, owner <id or link of the owner's message that asked for it>" (or the owner's answered rollover card Qn, or the link to their Discord message)`;
   if (r.startsWith(LEAD_PREFIX)) {
@@ -358,6 +408,7 @@ export const approvalProblem = (ref: string | undefined, card: (id: string) => Q
   }
   if (r.startsWith(AUTO_PREFIX)) {
     if (r !== `${AUTO_PREFIX}${auto.key}`) return `${r} is not the automatic approval of this side; only ${AUTO_PREFIX}${auto.key} is`;
+    if (!auto.granted) return `${APPROVAL_BORROWED} ${r} is the approval of a run freshness starts by itself and holds for no run started by hand: pass --approved-by "${LEAD_PREFIX}<reason and the signal behind it>" or "${LEAD_PREFIX}<reason>, owner <link of the owner's message that asked for it>" (or the owner's answered rollover card Qn, or that link alone)`;
     if (!auto.on) return `${r} is an automatic approval, but the automation key is off (the owner turns it on)`;
     // an automatic rollover tells the owner afterwards too
     return canReport ? undefined : "an automatic rollover needs a way to tell the owner afterwards: set DORI_DISCORD_TOKEN and DORI_DISCORD_CHANNEL (or give the lane a discord:<id> thread)";

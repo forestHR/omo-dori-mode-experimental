@@ -26,7 +26,7 @@ import { hasSessionSelector } from "./session-id.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
-import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, userLines } from "./rollover.ts";
+import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section, seedRestatement, wholeBullet } from "./restatement.ts";
 import { watchLog } from "./watch-log.ts";
@@ -58,6 +58,8 @@ export type LaneHandoverDeps = FlowDeps & {
 export type LaneHandoverOptions = {
   // the approval: lead:<reason and signal>, the owner's answered card Qn, a message link or their words (rollover.ts approvalProblem); --dry-run needs none
   readonly approvedBy?: string;
+  // the one-use grant freshness wrote for the run it started (DORI_HANDOVER_AUTO_GRANT): an auto: approval holds only with it
+  readonly autoGrant?: string;
   readonly note?: string;
   readonly model?: string;
   readonly thinking?: string;
@@ -444,7 +446,7 @@ const ackedBy = (stateDir: string, id: string): string | undefined => {
 
 const titleFor = (old: string, stamp: string): string => `${old.replace(/-\d{8}$/, "")}-${stamp.slice(4, 8)}${stamp.slice(9, 13)}`;
 
-const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions): Promise<LaneHandoverResult> => {
+const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions, granted: boolean): Promise<LaneHandoverResult> => {
   const { config } = deps;
   const at = iso(deps.clock);
   const stamp = at.replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
@@ -454,14 +456,19 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     if (!opts.dryRun) watchLog(config.watchLog, deps.clock, { source: "handover", line });
   };
   let fromPane = "";
+  // an auto: approval without the grant of a run freshness started is borrowed: refused first, and never logged, since a
+  // row approved auto: is read by freshness as its own run's result (lastAuto) and ends a lead's waiting request
+  const borrowed = decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && !granted;
   const refuse = (why: string, held?: { readonly blocked: Blocked; readonly pids?: readonly number[]; readonly tasks?: readonly string[] }): LaneHandoverResult => {
     emit(`HANDOVER_REFUSED ${key}: ${why}`);
+    if (borrowed) return { code: 2 };
     // a run refused while the lane was busy keeps the options it was given (the note as an absolute path): a ready mark
     // starts it again with them (freshness readyResume)
     const request: RolloverRequest = { ...(opts.note ? { note: resolve(opts.note) } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}), ...(opts.keepOld ? { keepOld: true } : {}), ...(opts.verifyMin ? { verifyMin: opts.verifyMin } : {}) };
     if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), request } : {}) });
     return { code: 2 };
   };
+  if (borrowed) return refuse(`a lane moves to a new session only with an approval: ${approvalProblem(opts.approvedBy, () => undefined, { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, "", [])} (--dry-run needs none)`);
   if (!omoSession(config)) return refuse("dori handover --lane needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
   // a herdr handover opens a new conversation; an agentCommand that picks its session itself (--continue, --session ...) would reopen the old one
   if (config.backend === "herdr" && hasSessionSelector(config.agentCommand.slice(1))) return refuse(`dori handover --lane on herdr needs an agentCommand without a session selector (it opens a new session): ${config.agentCommand.join(" ")}`);
@@ -481,7 +488,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     return { code: 3 };
   }
   // a dry run needs no approval, but a given one is checked the same way, so it can be tried before the real run
-  const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes" }, key, lane.pane ?? "", readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox ?? "", deps.ownerIds ?? []));
+  const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, lane.pane ?? "", readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox ?? "", deps.ownerIds ?? []));
   if (unapproved) return refuse(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
@@ -655,7 +662,10 @@ const IDLE_POLL_MS = 3_000;
 // (blocked work).
 export const laneHandover = async (input: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions = {}): Promise<LaneHandoverResult> => {
   const deps = { ...input, signal: freezeSignal(input.signal) };
-  if (!opts.waitIdleMin || opts.dryRun) return attempt(deps, key, here, opts);
+  // the grant is taken once, before any wait: every attempt of this run is the run freshness started
+  const granted = decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && takeAutoGrant(deps.config.stateDir, "lane", key, opts.autoGrant, deps.clock.now());
+  // a borrowed auto: is refused by attempt before anything else, also when another run holds the lock
+  if (!opts.waitIdleMin || opts.dryRun || (decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && !granted)) return attempt(deps, key, here, opts, granted);
   const emit = (line: string): void => {
     deps.print(line);
     watchLog(deps.config.watchLog, deps.clock, { source: "handover", line });
@@ -672,7 +682,7 @@ export const laneHandover = async (input: LaneHandoverDeps, key: string, here: s
     const since = deps.clock.now();
     const until = since + opts.waitIdleMin * 60_000;
     for (let waiting = false; ; waiting = true) {
-      const r = await attempt(deps, key, here, { ...opts, idle: { final: deps.clock.now() >= until, since, waitedMin: opts.waitIdleMin } });
+      const r = await attempt(deps, key, here, { ...opts, idle: { final: deps.clock.now() >= until, since, waitedMin: opts.waitIdleMin } }, granted);
       if (!r.retry) return r;
       if (!waiting) emit(`HANDOVER_WAIT_IDLE ${key}: a turn is running or a question is open; the move starts the moment the lane is idle (up to ${opts.waitIdleMin} min)`);
       for (;;) {
