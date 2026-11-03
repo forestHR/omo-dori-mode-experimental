@@ -34,7 +34,6 @@ import { retryLaneTells } from "./lane-tells.ts";
 import { applyUpdate } from "./update.ts";
 import { announceChange } from "./update-announce.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
-import { asTextRefusal } from "./submit.ts";
 import { claimDone, closeLane, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
 import { ownerSpeechProblem, plainSummaryProblem } from "./close-summary.ts";
 import { literalNewlineProblem } from "./messenger/literal-newline.ts";
@@ -983,14 +982,7 @@ try {
       const file = opt("text-file");
       const text = file ? (await Bun.file(file).text()).trim() : need("text");
       if (!text) die("type needs non-empty text");
-      const asText = flags.values["as-text"] === true;
-      const notCommand = asText ? asTextRefusal(text) : undefined;
-      if (notCommand) {
-        console.log(`NOT_SUBMITTED ${pane} ${notCommand}`);
-        process.exitCode = 1;
-        break;
-      }
-      const r = await typeIntoPane(deps, pane, text, { asText });
+      const r = await typeIntoPane(deps, pane, text, { asText: flags.values["as-text"] === true });
       for (const note of r.notes) console.error(note);
       if (r.pane !== pane) console.error(`FORWARDED ${pane} -> ${r.pane}: ${pane} was frozen by a handover, so the text went to the session that replaced it`);
       console.log(r.status === "SUBMITTED" ? `SUBMITTED ${r.pane}` : `NOT_SUBMITTED ${r.pane} ${r.reason}`);

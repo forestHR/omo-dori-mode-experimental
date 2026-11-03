@@ -14,6 +14,7 @@ import { missedAnswersTick } from "./missed-answers.ts";
 import { hasThread, type Lane, type Registry, statusOf, type ThreadPost, withStatus } from "./registry.ts";
 import { type Clock, iso, type Runner } from "./run.ts";
 import { omoPane, omoSession, sendVerified, submitToPane, type TypeOptions } from "./panes.ts";
+import { asTextRefusal } from "./submit.ts";
 import { pendingGoalTick } from "./pending-goal.ts";
 import type { Submitted } from "./submit.ts";
 import { replacementOf } from "./frozen.ts";
@@ -182,6 +183,12 @@ export const typeIntoPane = async (deps: FlowDeps, pane: string, text: string, o
       log(`NOT_SUBMITTED ${pane} ${reason}`);
       return { status: "NOT_SUBMITTED", reason, pane, notes };
     }
+  }
+  // --as-text cannot turn a command omo runs itself into a message: refused before anything happens, in the watch log too
+  const notText = opts.asText ? asTextRefusal(text) : undefined;
+  if (notText) {
+    log(`NOT_SUBMITTED ${pane} ${notText}`);
+    return { status: "NOT_SUBMITTED", reason: notText, pane, notes };
   }
   const why = "the lead typed a new instruction into the lane (dori type)";
   if (lane && statusOf(lane) === "done-claimed") {

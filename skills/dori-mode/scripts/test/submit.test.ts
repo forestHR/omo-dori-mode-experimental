@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { join } from "node:path";
 import { defaultConfig } from "../src/config.ts";
 import { writeFrozen } from "../src/frozen.ts";
-import { SEND_CHUNK_BYTES, sendVerified, submitToPane, transcriptHas } from "../src/panes.ts";
+import { armedStore, SEND_CHUNK_BYTES, sendVerified, submitToPane, transcriptHas } from "../src/panes.ts";
 import { asTextRefusal, editorText, type PaneKeys, SUBMIT_TIMING, submitText } from "../src/submit.ts";
 import { announceChange } from "../src/update-announce.ts";
 import { fakeClock, fakeRunner, newWorld, withState } from "./fakes.ts";
@@ -107,7 +107,10 @@ test("a skill, a template or an unknown /text is no command omo runs: an emptied
 // omo refuses a /word it has no command for: the text goes back into the box under "Unknown command /x." and "Enter again
 // sends it as a message", so dori type's second Enter sent it to the agent (lane type-slash-submitted, 2026-11-03). The fake
 // keeps omo's state: the refusal stays armed until Esc or any submit, and Esc while a turn runs would stop that turn.
-const omoPane = (unknown: string, width = 200) => {
+// omo draws the box borders across the pane (no side panel here) and wraps a warning at that width, inside words too
+const omoPane = (unknown: string, width = 200, cols = 120) => {
+  const border = "─".repeat(cols);
+  const wrap = (line: string): string[] => { const out: string[] = []; for (let i = 0; i < Math.max(1, line.length); i += cols) out.push(line.slice(i, i + cols)); return out; };
   const s = { box: "", armed: undefined as string | undefined, busy: false, warning: [] as string[], sent: [] as string[], enters: 0, escapes: 0, clears: 0, typed: 0, stored: undefined as string | undefined };
   const rows = (): string[] => { const out: string[] = []; for (let i = 0; i < Math.max(1, s.box.length); i += width) out.push(s.box.slice(i, i + width)); return out; };
   const keys: PaneKeys = {
@@ -126,7 +129,7 @@ const omoPane = (unknown: string, width = 200) => {
       s.sent.push(text);
       s.box = "";
     },
-    read: async () => [" Update Available", ...s.warning, s.busy ? `── • Working (2s • esc to interrupt) ${BORDER}` : BORDER, ...rows().map((r, i) => (i === 0 ? `❯ ${r}` : `  ${r}`)), BORDER, " ~/qa • effort low"].join("\n"),
+    read: async () => [" Update Available", ...s.warning.flatMap(wrap), s.busy ? `── • Working (2s • esc to interrupt) ${border}`.slice(0, cols) : border, ...rows().map((r, i) => (i === 0 ? `❯ ${r}` : `  ${r}`)), border, " ~/qa • effort low"].join("\n"),
     clear: async () => { s.clears++; s.box = ""; },
     escape: async () => { s.escapes++; s.armed = undefined; },
     armed: { get: () => s.stored, set: (text) => { s.stored = text; } },
@@ -198,6 +201,37 @@ test("--as-text answers omo's refusal with the Enter that sends the text as a me
   expect(r.status).toBe("SUBMITTED");
   expect(pane.s.enters).toBe(2);
   expect(pane.s.sent).toEqual(["/notacommand"]);
+});
+
+test("a refusal omo wraps on a narrow pane, inside the command name too, is still recognized: no second Enter", async () => {
+  const pane = omoPane("/notacommand", 18, 20);
+  const r = await submitText(pane.keys, fakeClock(0), "/notacommand");
+  expect(r.reason).toStartWith("SLASH_UNKNOWN:");
+  expect(pane.s.enters).toBe(1);
+  expect(pane.s.escapes).toBe(1);
+  expect(pane.s.sent).toEqual([]);
+});
+
+test("--as-text whose first Enter is lost still answers the refusal that comes after the second, with an Enter of its own", async () => {
+  const pane = omoPane("/notacommand");
+  let enters = 0;
+  const r = await submitText({ ...pane.keys, sendRefusedAsText: true, enter: async () => { if (++enters > 1) await pane.keys.enter(); } }, fakeClock(0), "/notacommand");
+  expect(r.status).toBe("SUBMITTED");
+  expect(enters).toBe(3);
+  expect(pane.s.sent).toEqual(["/notacommand"]);
+});
+
+test("--as-text whose confirming Enter is lost takes the refusal back (Esc) or records it, never leaves it armed unknown", async () => {
+  for (const busy of [false, true]) {
+    const pane = omoPane("/notacommand");
+    pane.s.busy = busy;
+    let enters = 0;
+    const r = await submitText({ ...pane.keys, sendRefusedAsText: true, enter: async () => { if (++enters === 1) await pane.keys.enter(); } }, fakeClock(0), "/notacommand");
+    expect(r.reason).toStartWith("SLASH_UNKNOWN:");
+    expect(pane.s.sent).toEqual([]);
+    if (busy) expect(pane.s.stored).toBe("/notacommand");
+    else expect([pane.s.escapes, pane.s.armed]).toEqual([1, undefined]);
+  }
 });
 
 test("--as-text refuses a command omo runs itself, which no refusal would ever stop", () => {
@@ -417,4 +451,21 @@ test("an update announcement that stays in the lead's input box logs ANNOUNCE_FA
   const log = await Bun.file(config.watchLog).text();
   expect(log).toContain("update ANNOUNCE_FAIL aoe_lead_0a1b2c3d");
   expect(log).not.toContain("ANNOUNCED");
+});
+
+// review of #316: one shared file lost records when two dori runs wrote it at once (285 of 600 kept); one file per pane,
+// renamed into place whole
+test("the armed record of each pane survives other dori processes writing theirs at the same time", async () => {
+  const worker = join(state.dir, "armed-worker.ts");
+  await Bun.write(worker, `import { armedStore } from ${JSON.stringify(join(import.meta.dir, "../src/panes.ts"))};
+const [dir, pane] = process.argv.slice(2);
+const store = armedStore(dir, pane);
+for (let i = 0; i < 200; i++) { store.set(\`/notacommand \${pane} \${i}\`); if (store.get() !== \`/notacommand \${pane} \${i}\`) throw new Error("read back another value"); }`);
+  const panes = ["w1:p1", "w1:p2", "w1:p3", "w1:p4"];
+  const codes = await Promise.all(panes.map((pane) => Bun.spawn(["bun", worker, state.dir, pane], { stderr: "inherit" }).exited));
+  expect(codes).toEqual([0, 0, 0, 0]);
+  for (const pane of panes) expect(armedStore(state.dir, pane).get()).toBe(`/notacommand ${pane} 199`);
+  armedStore(state.dir, "w1:p1").set(undefined);
+  expect(armedStore(state.dir, "w1:p1").get()).toBeUndefined();
+  expect(armedStore(state.dir, "w1:p2").get()).toBe("/notacommand w1:p2 199");
 });

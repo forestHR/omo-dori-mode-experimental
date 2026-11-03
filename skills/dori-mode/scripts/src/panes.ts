@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { captureTmux, listAoePanes, liveSessions, paneLife, QUESTION_MARK, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
@@ -123,17 +123,20 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
 export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || isOmoExecutable(config.agentCommand[0] ?? "");
 export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
 
-// The refused text dori left armed in omo, per pane (submit.ts PaneKeys.armed): <stateDir>/submit-armed.json
-const armedStore = (stateDir: string, pane: string): NonNullable<PaneKeys["armed"]> => {
-  const file = join(stateDir, "submit-armed.json");
-  // no file yet: nothing armed
-  const all = (): Record<string, string> => (existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, string>) : {});
+// The refused text dori left armed in omo (submit.ts PaneKeys.armed): one file per pane, <stateDir>/submit-armed/<pane>,
+// written whole to a temporary file and renamed into place, so dori runs typing into other panes at the same time never
+// overwrite it and a reader never sees half of it
+export const armedStore = (stateDir: string, pane: string): NonNullable<PaneKeys["armed"]> => {
+  const dir = join(stateDir, "submit-armed");
+  const file = join(dir, encodeURIComponent(pane));
   return {
-    get: () => all()[pane],
+    get: () => (existsSync(file) ? readFileSync(file, "utf8") : undefined),
     set: (text) => {
-      const { [pane]: _, ...rest } = all();
-      mkdirSync(stateDir, { recursive: true });
-      writeFileSync(file, JSON.stringify(text === undefined ? rest : { ...rest, [pane]: text }));
+      if (text === undefined) return rmSync(file, { force: true });
+      mkdirSync(dir, { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync(tmp, text);
+      renameSync(tmp, file);
     },
   };
 };
