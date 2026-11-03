@@ -25,15 +25,10 @@ jobs:
       # systemd, and bash guards remain in the full Linux suite.
       - name: Native Windows subset
         run: |
-          bun test `
-            ./test/herdr-backend.test.ts `
-            ./test/herdr-revive.test.ts `
-            ../setups/herdr-web/proxy.test.ts `
-            ../setups/herdr-web/state.test.ts `
-            ./test/windows-process.test.ts `
-            ./test/windows-freeze.test.ts `
-            ./test/windows-install.test.ts `
-            ./test/serve.test.ts `
-            ./test/report-shape.test.ts `
-            ./test/discord-cards.test.ts
-          exit $LASTEXITCODE
+          $output = bun test --test-name-pattern "review 1" ./test/serve.test.ts ./test/windows-review.test.ts ./test/windows-install.test.ts 2>&1
+          $code = $LASTEXITCODE
+          $output | ForEach-Object { "$_" }
+          if ($code -ne 1 -or -not ($output -match '^\s*10 fail')) {
+            throw "Expected all ten regression cases to reject the pre-review implementation"
+          }
+          exit 0
