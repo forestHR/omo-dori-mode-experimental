@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditHook, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
@@ -444,6 +444,11 @@ test("directives check: a reviewer of another family reads each new prompt again
   const none = await checkMeaning(deps, { ...ledger, entries: [{ ...skill, prompt: "다음부터는 스킬을 반드시 확인한다." }] });
   expect(none.ok).toBe(false);
   expect(none.lines[0]).toStartWith("DIRECTIVES_MEANING_FAILED skill-check");
+  // dori-superagent #71 (https://github.com/sisyphuslabs/dori-superagent/issues/71): the reply is kept in a 0600 file the line names
+  const kept = /no VERDICT line; reviewer stdout kept in (\S+\.txt)/.exec(none.lines[0] ?? "")?.[1] ?? "";
+  expect(kept.startsWith(`${deps.config.stateDir}/reviewer-output/`)).toBe(true);
+  expect(statSync(kept).mode & 0o777).toBe(0o600);
+  expect(readFileSync(kept, "utf8")).toBe("I think it is fine");
 });
 
 test("the blocks the ledger names are the ones launch inserts", async () => {

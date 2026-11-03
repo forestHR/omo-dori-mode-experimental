@@ -13,6 +13,7 @@ import { leadSessionFiles } from "./lead-sessions.ts";
 import { sendVerified } from "./panes.ts";
 import type { ThreadMap } from "./messenger/thread-map.ts";
 import type { Lane } from "./registry.ts";
+import { keepReviewerOutput } from "./reviewer-output.ts";
 import { iso, type Runner } from "./run.ts";
 import { watchLog } from "./watch-log.ts";
 
@@ -251,7 +252,7 @@ export const checkMeaning = async (deps: Pick<FlowDeps, "run" | "config" | "cloc
       const r = await deps.run(fill(oc.command, { model, prompt: meaningPrompt(e), system: MEANING_SYSTEM }), { timeoutMs: oc.minutes * 60_000 });
       const v = r.code === 0 ? parseMeaning(r.out) : undefined;
       if (!v) {
-        tried.push(`${model}: ${r.code !== 0 ? `exit ${r.code}` : `no VERDICT line in "${r.out.trim().slice(0, 80)}"`}`);
+        tried.push(`${model}: ${r.code !== 0 ? `exit ${r.code}` : "no VERDICT line"}; ${keepReviewerOutput(deps.config.stateDir, `directives-meaning-${e.id}`, r.out)}`);
         continue;
       }
       if (v.same) {

@@ -80,7 +80,7 @@ test("token-shaped content is not committed, the rest of the change is, and the 
   expect((await commitDir(deps(), dir)).lines.some((l) => l.startsWith("STATE_GIT_REFUSED"))).toBe(false);
 });
 
-test("dori review's PR diffs stay out, one committed before is untracked and kept, the review and its receipts stay in", async () => {
+test("dori review's PR diffs and a reviewer's kept stdout stay out, one committed before is untracked and kept, the review and its receipts stay in", async () => {
   // Given: receipts and a review in git, and a diff committed before the excludes covered it
   const reviews = "state/receipts/reviews";
   put("state/receipts/o__r_7@abc.review.json", '{"verdict":"CLEAR"}\n');
@@ -92,6 +92,8 @@ test("dori review's PR diffs stay out, one committed before is untracked and kep
   // When: a new review's diff carries a PR's token-shaped test fixture
   put(`${reviews}/o__r_7@def.diff`, `+const t = "${GHP}";\n`);
   put(`${reviews}/o__r_7@abc..def.diff`, `+const t = "${GHP}";\n`);
+  // and a reviewer that printed no verdict left its stdout tail (dori-superagent #71): private, never backed up
+  put("state/reviewer-output/review-o__r_7@def-1.txt", "I would read the files first\n");
   const r = await commitDir(deps(), dir);
   // Then
   expect(r.lines.filter((l) => l.startsWith("STATE_GIT_REFUSED"))).toEqual([]);

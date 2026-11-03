@@ -6,6 +6,7 @@ import { fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { parseSignal, splitDone } from "./done-signals.ts";
 import type { Lane } from "./registry.ts";
+import { keepReviewerOutput } from "./reviewer-output.ts";
 import { iso, type Ran } from "./run.ts";
 import { watchLog } from "./watch-log.ts";
 
@@ -219,7 +220,7 @@ export const reviewPr = async (deps: FlowDeps, pr: PrRef, opts: ReviewOptions): 
     const r = await deps.run(fill(deps.config.explore.challengeCommand, { model: c.call, prompt, system: REVIEW_SYSTEM }), { cwd: root, timeoutMs: deps.config.explore.challengeMinutes * 60_000 });
     const verdict = r.code === 0 ? verdictOf(r.out) : undefined;
     if (!verdict) {
-      failures.push(`${c.call}: ${r.code !== 0 ? why(r) : "no VERDICT line"}`);
+      failures.push(`${c.call}: ${r.code !== 0 ? why(r) : "no VERDICT line"}; ${keepReviewerOutput(deps.config.stateDir, `review-${stem(pr)}@${short(sha)}`, r.out)}`);
       continue;
     }
     await still("after the review");

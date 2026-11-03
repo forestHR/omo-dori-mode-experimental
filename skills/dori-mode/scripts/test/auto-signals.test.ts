@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { failedMetrics, inferRepeats, type LaneEvent, passedMetrics, readReports, suspects } from "../src/auto-signals.ts";
@@ -719,4 +719,29 @@ test("in a shared thread the owner's real redirect still counts: his reply to th
   const d = (id: string, extra: object = {}) => ({ at: at(28), text: "x", words: "x", id, ...extra });
   const tied = tieDecisions([d("m1"), d("m2", { pane: "aoe_spark" }), d("m3", { replyTo: "p2" }), d("m4", { replyTo: "p1", pane: "aoe_jev" }), d("m5"), { ...d("m6"), at: at(25.5) }, d("m7", { words: "spark-oss-4eae 결과 줘" }), d("m9")], me, [jev]);
   expect(tied.map((t) => t.to)).toEqual(["lane", "lane", "other", "unknown", "unknown", "lane", "lane", "other"]);
+});
+
+// dori-superagent #71 (https://github.com/sisyphuslabs/dori-superagent/issues/71)
+test("intent-check: a reviewer with no VERDICT line or a nonzero exit leaves its masked stdout in a 0600 file the failure names", async () => {
+  writeFileSync(join(state.dir, "brief.md"), "# 브리프\n형: \"학습은 멈추지 말고\"");
+  const file = writeSession([sessionLine(1, "assistant", "[REPORT] rl-e7 | milestone | 진행: 정상")]);
+  const base = fakeRunner(world);
+  const run: Runner = async (argv, opts) => {
+    if (argv[0] !== "omo") return base(argv, opts);
+    const model = argv[argv.indexOf("--model") + 1] ?? "";
+    return model.includes("6.1-sol") ? { code: 1, out: "half a review", err: "error: rate limited" } : { code: 0, out: "I would read the files first. api_key=ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", err: "" };
+  };
+  const explore = { ...defaultConfig("/home/test").explore, modelsCommand: [] };
+  const deps = { ...depsFor(world, fakeClock(T0 + 10 * 60_000), state.dir, { sessionsDir: join(state.dir, "sessions"), explore }), run };
+  await deps.registry.write(lane(state.dir));
+  const r = await runIntentCheck(deps, lane(state.dir), { files: [file] });
+  expect(r.skipped).toStartWith("INTENT_CHECK_FAILED rl-e7");
+  const paths = [...(r.skipped ?? "").matchAll(/reviewer stdout kept in (\S+\.txt)/g)].map((m) => m[1] ?? "");
+  expect(paths.length).toBeGreaterThanOrEqual(2);
+  expect(r.skipped).toContain("exit 1 error: rate limited; reviewer stdout kept in ");
+  expect(r.skipped).not.toContain("ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+  const texts = paths.map((p) => readFileSync(p, "utf8"));
+  for (const p of paths) expect(statSync(p).mode & 0o777).toBe(0o600);
+  expect(texts).toContain("half a review");
+  expect(texts).toContain("I would read the files first. api_key=[masked]");
 });

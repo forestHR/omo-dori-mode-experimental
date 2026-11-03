@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,7 +14,7 @@ const B = "b".repeat(40);
 const PR = parsePr("acme/app#7");
 const DIR = "/wt/app";
 
-type Gh = { head: string; checkout: string; state: string; dirtyAfterTests?: boolean; tested?: boolean; statusFails?: boolean; queued?: boolean; viewFailsAfterMerge?: boolean; deleteFails?: boolean; mergeRejects?: boolean; autoMerge?: boolean; diff?: string; prompt?: string; pushDuringReview?: string; checks: Record<string, string>[]; testsCode: number; verdict: string; mergedAt: string; calls: string[][] };
+type Gh = { head: string; checkout: string; state: string; dirtyAfterTests?: boolean; tested?: boolean; statusFails?: boolean; queued?: boolean; viewFailsAfterMerge?: boolean; deleteFails?: boolean; mergeRejects?: boolean; autoMerge?: boolean; diff?: string; prompt?: string; pushDuringReview?: string; noVerdict?: { code: number; out: string; times: number }; checks: Record<string, string>[]; testsCode: number; verdict: string; mergedAt: string; calls: string[][] };
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -50,6 +50,7 @@ const runner = (w: Gh): Runner => async (argv) => {
   if (argv[0] === "fake-reviewer") {
     if (w.pushDuringReview) w.head = w.pushDuringReview;
     w.prompt = argv.at(-1);
+    if (w.noVerdict && w.noVerdict.times-- > 0) return { code: w.noVerdict.code, out: w.noVerdict.out, err: w.noVerdict.code ? "error: provider overloaded" : "" };
     return ok(`LOW x:1 nit\nVERDICT: ${w.verdict}\n`);
   }
   return { code: 127, out: "", err: `unexpected ${a}` };
@@ -288,3 +289,43 @@ test("an attempt that never merged does not let a plain gh merge pass later, eve
   expect(await gateMissing(d, "merged acme/app#7")).toEqual([expect.stringMatching(/^MERGE_GATE_MISSING acme\/app#7/)]);
 });
 
+
+// dori-superagent #71 (https://github.com/sisyphuslabs/dori-superagent/issues/71): a reviewer that ends without a verdict
+// leaves its stdout tail in a private file the skip line names, and no review receipt
+const kept = (line: string): string => {
+  const m = /reviewer stdout kept in (\S+\.txt)/.exec(line);
+  if (!m?.[1]) throw new Error(`no kept stdout path in: ${line}`);
+  return m[1];
+};
+
+test("exit 0 without a VERDICT line: a bounded, masked stdout tail is kept in a 0600 file the refusal names, and no review receipt", async () => {
+  const lines = Array.from({ length: 205 }, (_, i) => `line-${i + 1}`);
+  lines[203] = "token: ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+  const w = { ...world(), noVerdict: { code: 0, out: lines.join("\n"), times: 99 } };
+  const d = deps(w);
+  const failure = await reviewPr(d, PR, { dir: DIR }).then(() => undefined, (e: unknown) => e);
+  expect(failure).toBeInstanceOf(Error);
+  const message = (failure as Error).message;
+  expect(message).toStartWith("REVIEW_FAILED acme/app#7: no reviewer printed a VERDICT line:");
+  expect(message).toContain(": no VERDICT line; reviewer stdout kept in ");
+  const file = kept(message);
+  expect(file.startsWith(join(d.config.stateDir, "reviewer-output") + "/")).toBe(true);
+  expect(statSync(file).mode & 0o777).toBe(0o600);
+  const text = readFileSync(file, "utf8");
+  expect(text.split("\n")).toEqual(lines.slice(5).map((l) => (l.startsWith("token:") ? "token: [masked]" : l)));
+  expect(text).not.toContain("ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+  expect(await readReceipt(d.config.stateDir, PR, A, "review")).toBeUndefined();
+});
+
+test("a nonzero exit keeps its stdout tail too and the exit reason, and the next reviewer's CLEAR is the review", async () => {
+  const w = { ...world(), noVerdict: { code: 9, out: "partial reviewer output", times: 1 } };
+  const d = deps(w);
+  const lines = await reviewPr(d, PR, { dir: DIR });
+  const skip = lines.find((l) => l.startsWith("REVIEW_SKIP "));
+  expect(skip).toContain("error: provider overloaded; reviewer stdout kept in ");
+  const file = kept(skip ?? "");
+  expect(statSync(file).mode & 0o777).toBe(0o600);
+  expect(readFileSync(file, "utf8")).toBe("partial reviewer output");
+  expect(lines.at(-1)).toMatch(new RegExp(`^REVIEW acme/app#7 head=${A} verdict=CLEAR`));
+  expect((await readReceipt(d.config.stateDir, PR, A, "review"))?.verdict).toBe("CLEAR");
+});
