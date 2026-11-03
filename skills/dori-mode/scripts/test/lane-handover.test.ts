@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { autoReadyLine, freshnessTick, resumeArgs } from "../src/freshness.ts";
+import { autoReadyLine, freshnessTick, pidAlive, resumeArgs } from "../src/freshness.ts";
 import { closeDueFrozen, readFrozen } from "../src/frozen.ts";
 import { ackHandover, manifestPath } from "../src/handover.ts";
 import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, type LaneHandoverOptions, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
@@ -1968,6 +1968,19 @@ test("a lead's handover refused while the lane was busy starts again once, with 
   expect(await tick(68)).toEqual([]);
   expect(resumes).toHaveLength(3);
   expect(sent(w).filter((t) => t.includes("that request was logged before its options were kept"))).toHaveLength(1);
+});
+
+test("a chain that ended as a zombie (its parent, an eval kernel, has not collected it) counts as ended for the waiting handover", async () => {
+  // Given: a parent that waits for its child's exit without collecting it (WNOWAIT), then prints the child's pid
+  const p = Bun.spawn(["python3", "-I", "-c", "import os,sys,time\npid=os.fork()\nif pid==0: os._exit(0)\nos.waitid(os.P_PID, pid, os.WEXITED|os.WNOWAIT)\nprint(pid, flush=True)\ntime.sleep(30)"], { stdout: "pipe" });
+  const first = await p.stdout.getReader().read();
+  const zombie = Number(new TextDecoder().decode(first.value).trim());
+  // When / Then
+  expect(zombie).toBeGreaterThan(0);
+  expect(pidAlive(zombie)).toBe(false);
+  expect(pidAlive(p.pid)).toBe(true);
+  p.kill();
+  await p.exited;
 });
 
 test("the lead's waiting handover starts again by itself: a busy refusal at the next sweep (the run waits for the idle moment), a work refusal once its chains ended; one start per refusal; a long wait is told to the lead once and goes on", async () => {
