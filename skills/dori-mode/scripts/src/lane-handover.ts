@@ -10,7 +10,7 @@
 // monitor, so the old session is frozen instead of closed, its monitors left running, and closes once that work ended.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./background.ts";
 import { captureTmux, closeAoeSession, envMismatch, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, paneLife, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
@@ -72,6 +72,8 @@ export type LaneHandoverOptions = {
   // an automatic start (freshness passes --wait-idle): wait up to this many minutes for the lane's turn to end and move it
   // at that idle moment
   readonly waitIdleMin?: number;
+  // set by a run that waited for another run's lock: the lane's pane it found then (internal)
+  readonly boundPane?: string;
   // set by that waiting loop: it holds the lock; final means the wait is over, so a lane still busy is refused
   readonly idle?: { readonly final: boolean; readonly since: number; readonly waitedMin: number };
 };
@@ -499,6 +501,9 @@ const titleFor = (old: string, stamp: string): string => `${old.replace(/-\d{8}$
 // each other and each withdraws only its own.
 const takeoverDir = (stateDir: string): string => join(stateDir, "handover", "lanes");
 const takeoverPrefix = (key: string): string => `${key}.takeover-`;
+// the request a waiting run stepped aside for, by its file name (a random id, never a pid): only that run goes on
+const successorFile = (stateDir: string, key: string): string => join(takeoverDir(stateDir), `${key}.successor.json`);
+const SUCCESSOR_MS = 5 * 60_000;
 type Takeover = { readonly pid: number; readonly at: string; readonly approvedBy?: string; readonly force: boolean };
 const TAKE_POLL_MS = 1_000;
 const TAKE_TRIES = 15;
@@ -522,6 +527,13 @@ const handOver = async (deps: LaneHandoverDeps, key: string, holder: { readonly 
   for (let i = 0; i < TAKE_TRIES && deps.alive(holder.pid); i++) await deps.clock.sleep(TAKE_POLL_MS);
   const taken = !existsSync(file);
   rmSync(file, { force: true });
+  const chosen = readJson<{ request?: string; at?: string }>(successorFile(deps.config.stateDir, key));
+  const fresh = chosen?.request && deps.clock.now() - Date.parse(chosen.at ?? "") < SUCCESSOR_MS;
+  if (fresh && chosen?.request !== basename(file) && !deps.alive(holder.pid)) {
+    emit(`HANDOVER_REFUSED ${key}: the waiting run stepped aside for another request (${chosen?.request}), which moves the lane`);
+    return { code: 2 };
+  }
+  if (fresh && chosen?.request === basename(file)) rmSync(successorFile(deps.config.stateDir, key), { force: true });
   if (deps.alive(holder.pid)) {
     emit(`HANDOVER_REFUSED ${key}: another handover is running (pid ${holder.pid}, started ${holder.at}) and is moving the lane now: it took no new request`);
     return { code: 2 };
@@ -551,7 +563,10 @@ const claimTakeover = (deps: LaneHandoverDeps, key: string): Takeover | undefine
     }
     const t = readJson<Takeover>(mine);
     rmSync(mine, { force: true });
-    if (t && deps.alive(t.pid)) return t;
+    if (t && deps.alive(t.pid)) {
+      writeFileSync(successorFile(deps.config.stateDir, key), JSON.stringify({ request: n, at: iso(deps.clock) }));
+      return t;
+    }
   }
   return undefined;
 };
@@ -597,6 +612,12 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     await recover(deps, pending, emit);
     return { code: 3 };
   }
+  // a run that waited for a holder asked for the session it found then: once an interrupted move is repaired (above), a
+  // lane in another pane was moved by the holder or a run beside this one, and is not moved again
+  if (opts.boundPane && lane.pane !== opts.boundPane) {
+    emit(`HANDOVER_ALREADY_MOVED ${key}: the lane moved from ${opts.boundPane} to ${lane.pane} while this run waited; it is not moved again`);
+    return { code: 0, to: lane.pane };
+  }
   // a dry run needs no approval, but a given one is checked the same way, so it can be tried before the real run
   const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, lane.pane ?? "", readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox ?? "", deps.ownerIds ?? []));
   if (unapproved) return refuse(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
@@ -611,12 +632,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     // the holder is gone. The request is for the session this run found in the lane's pane: one that moved meanwhile (another
     // run that waited beside this one moved it) is not moved again (plan challenge, review 320). Else start over, so an
     // interrupted move the holder left (its pending journal) is repaired first and the registry is read again.
-    const now = (await deps.registry.read(key))?.pane;
-    if (now && now !== lane.pane) {
-      emit(`HANDOVER_ALREADY_MOVED ${key}: the lane moved from ${lane.pane} to ${now} while this run waited; it is not moved again`);
-      return { code: 0, to: now };
-    }
-    return attempt(deps, key, here, opts, granted);
+    return attempt(deps, key, here, { ...opts, boundPane: lane.pane }, granted);
   }
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
   if (!old) return refuse(`no live session for pane ${lane.pane}`);

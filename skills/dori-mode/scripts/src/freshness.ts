@@ -348,7 +348,8 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
     if (told || !lead) writeFileSync(claimed, `${JSON.stringify({ ...readJson<object>(claimed), toldAt: new Date(now).toISOString() })}\n`);
   }
   const r = await hooks.resume(key, by, asked.request ?? {});
-  if (!r.started) writeFileSync(claimed, `${JSON.stringify({ request: "", since, approvedBy: by, result: "started" })}\n`);
+  // the claim is given back for the next sweep; a stale note already delivered stays delivered (review 320)
+  if (!r.started) writeFileSync(claimed, `${JSON.stringify({ request: "", since, approvedBy: by, result: "started", ...(readJson<{ toldAt?: string }>(claimed)?.toldAt ? { toldAt: readJson<{ toldAt?: string }>(claimed)?.toldAt } : {}) })}\n`);
   return log(r.started
     ? `HANDOVER_READY_RESUMED ${key} started: ${readied ? `the ready mark of ${mark?.at} in ${pane} follows the request of ${asked.at}` : `${cause}; the request of ${asked.at}`} (refused ${asked.blocked}); started again with the same approval ${JSON.stringify(by)}: ${r.line}`
     : `HANDOVER_READY_RESUME_FAILED ${key} failed: the request of ${asked.at} could not be started again (${r.line}); the next sweep tries again`);

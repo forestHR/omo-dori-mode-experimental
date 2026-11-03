@@ -2625,3 +2625,34 @@ test("review 320 round 3: a request that keeps coming back busy past readyMin is
   expect(resumes).toHaveLength(4);
   expect(sent(w).filter((x) => x.startsWith("[DORI] demo: the handover you asked for") && x.includes("stayed busy"))).toHaveLength(1);
 });
+
+test("review 320 round 5: a holder that repointed the lane and died before its commit is repaired, never read as moved; a run the waiting run did not step aside for stays out", async () => {
+  // Given
+  const base = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  let mode: "crash" | "other" = "crash";
+  const deps: LaneHandoverDeps = { ...base, reportOwner: async () => "msg-1", clock: { ...base.clock, sleep: async () => {
+    if (mode === "crash" && live.has(77)) {
+      writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid: 77, at: "2026-10-11T16:34:00Z", from: OLD, to: NEW, note: "n" }));
+      await base.registry.patch("demo", { pane: NEW });
+    }
+    if (mode === "other" && live.has(77)) writeFileSync(join(lanes, "demo.successor.json"), JSON.stringify({ request: "demo.takeover-1-other.json", at: "2026-10-11T16:35:00Z" }));
+    live.delete(77);
+    simulate();
+  } } };
+  mkdirSync(lanes, { recursive: true });
+  const lock = () => { writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" })); live.add(77); };
+  // When
+  lock();
+  const crashed = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  const crashLines = [...printed];
+  mode = "other";
+  lock();
+  const other = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  // Then
+  expect(crashed.code).toBe(3);
+  expect(crashLines.some((l) => l.startsWith("HANDOVER_INTERRUPTED demo: "))).toBe(true);
+  expect(crashLines.some((l) => l.startsWith("HANDOVER_ALREADY_MOVED"))).toBe(false);
+  expect(other.code).toBe(2);
+  expect(printed.at(-1)).toBe("HANDOVER_REFUSED demo: the waiting run stepped aside for another request (demo.takeover-1-other.json), which moves the lane");
+});
