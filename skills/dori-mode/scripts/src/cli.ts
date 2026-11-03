@@ -1681,9 +1681,13 @@ try {
         else {
           let posted: { channel: string; ts: string } | undefined;
           // files are shared once per call and never by the repeat check: a failure exits non-zero and a person calls again.
-          // The eyes stay: completeUploadExternal names no message ts to tell which messages the share answered.
-          if (uploads.length) console.log(`SENT ${(await slack.upload(to, uploads, thread, text || undefined)).join(",")}`);
-          else await once(async () => (posted = await slack.post(to, text, thread)).ts);
+          // completeUploadExternal names no message ts, so the share answers what was there when it started: messages
+          // after that start keep their eyes (OkDori answered the owner with a file share and the eyes stayed, 2026-11-03).
+          if (uploads.length) {
+            const started = (Date.now() / 1000).toFixed(6);
+            console.log(`SENT ${(await slack.upload(to, uploads, thread, text || undefined)).join(",")}`);
+            posted = { channel: to, ts: started };
+          } else await once(async () => (posted = await slack.post(to, text, thread)).ts);
           // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off
           if (posted && process.env.DORI_SLACK_TOKEN?.startsWith("xoxb-")) {
             const files = { inbox: process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"), uneyed: join(config.stateDir, "slack-uneyed.log") };

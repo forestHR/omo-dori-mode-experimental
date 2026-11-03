@@ -337,7 +337,8 @@ test("send slack --file uploads every file to its own URL, then shares them as o
   try {
     writeFileSync(join(state.dir, "deck.pdf"), "pdf bytes");
     writeFileSync(join(state.dir, "demo.mp4"), "video");
-    // the owner's message the watcher put eyes on: the share names no message ts, so its eyes stay for a text answer
+    // the owner's message the watcher put eyes on: a share answers it like a text answer (OkDori answered the owner with
+    // a file share and the eyes stayed, 2026-11-03)
     mkdirSync(join(state.dir, "discord"));
     writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${JSON.stringify({ scope: "slack", id: "1700000000.000001", channel_id: "C1", reply_thread: "1700000000.000001", addressed: "mention" })}\n`);
     const r = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "deck.pdf"), "--file", join(state.dir, "demo.mp4"), "--text", "AX-MVP 발표자료", "--thread", "1700000000.000001"]);
@@ -348,17 +349,22 @@ test("send slack --file uploads every file to its own URL, then shares them as o
         { path: "/api/files.getUploadURLExternal", body: { filename: "demo.mp4", length: "5" } },
         { path: "/up/2", body: "video" },
         { path: "/api/files.completeUploadExternal", body: { files: [{ id: "F1", title: "deck.pdf" }, { id: "F2", title: "demo.mp4" }], channel_id: "C1", thread_ts: "1700000000.000001", initial_comment: "AX-MVP 발표자료" } },
-      ],
-    });
-    // a file alone needs no text; the eyes stay through both shares, and a text answer after them takes them off
-    const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
-    const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--thread", "1700000000.000001", "--text", "자료 올렸어"]);
-    expect({ bare: bare.out, share: calls[7]?.body, text: text.out, after: calls.slice(8) }).toEqual({
-      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", after: [
-        { path: "/api/chat.postMessage", body: { channel: "C1", text: "자료 올렸어", thread_ts: "1700000000.000001" } },
         { path: "/api/reactions.remove", body: { channel: "C1", timestamp: "1700000000.000001", name: "eyes" } },
       ],
     });
+    // a file alone needs no text; the message answered once is not asked about again by a later share or text answer
+    const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
+    const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--thread", "1700000000.000001", "--text", "자료 올렸어"]);
+    expect({ bare: bare.out, share: calls[8]?.body, text: text.out, after: calls.slice(9) }).toEqual({
+      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", after: [
+        { path: "/api/chat.postMessage", body: { channel: "C1", text: "자료 올렸어", thread_ts: "1700000000.000001" } },
+      ],
+    });
+    // a share in the channel itself answers the channel message before it; one that arrives after the share started is not
+    const row = (id: string) => JSON.stringify({ scope: "slack", id, channel_id: "C1", thread_ts: null, reply_thread: id, addressed: "name" });
+    writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${row("1700000000.000050")}\n${row("9999999999.000001")}\n`, { flag: "a" });
+    await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
+    expect(calls.filter((c) => c.path === "/api/reactions.remove").map((c) => (c.body as { timestamp: string }).timestamp)).toEqual(["1700000000.000001", "1700000000.000050"]);
   } finally {
     server.stop(true);
     state.done();
