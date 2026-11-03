@@ -7,7 +7,8 @@ import type { Runner } from "./run.ts";
 import { isAgentCommand } from "./executable.ts";
 
 // stat: the ps state letters ("S", "R+", "Z" for a zombie); absent when the table was built without it
-export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string; readonly startedAt?: string; readonly executable?: string };
+// sid: the terminal session the process is in (Linux ps sid); absent or 0 when it cannot be told (macOS, Windows)
+export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string; readonly sid?: number; readonly startedAt?: string; readonly executable?: string };
 export type SessionHit = { readonly id: string; readonly via: "argv" | "child-env" | "start-time" | "none"; readonly pid?: number };
 
 // omo on Linux and macOS (senpi's bundle under bun, or the omo command), and on Windows (the same bundle path with
@@ -45,11 +46,17 @@ export const winProcs = (json: string): Proc[] => {
   }
 };
 
-export const procTable = async (run: Runner, platform: string = process.platform): Promise<Proc[]> =>
-  platform === "win32" ? winProcs((await run(WIN_PROCS)).out) : (await run(["ps", "-A", "-o", "pid=,ppid=,stat=,command="])).out.split("\n").flatMap((line) => {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
-    return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), stat: m[3] ?? "", cmd: m[4] ?? "" }] : [];
+// On Linux the table carries each process's session id too (macOS ps has no sid column): herdr ends every process of a
+// pane's terminal session when it closes the pane, so a job that left the pane's process tree dies with it all the same.
+export const procTable = async (run: Runner, platform: string = process.platform): Promise<Proc[]> => {
+  if (platform === "win32") return winProcs((await run(WIN_PROCS)).out);
+  const linux = platform === "linux";
+  return (await run(["ps", "-A", "-o", linux ? "pid=,ppid=,sid=,stat=,command=" : "pid=,ppid=,stat=,command="])).out.split("\n").flatMap((line) => {
+    // the sid column is optional in what is read: the state letters are never a number
+    const m = /^\s*(\d+)\s+(\d+)\s+(?:(\d+)\s+)?(\S+)\s+(.*)$/.exec(line);
+    return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), ...(m[3] ? { sid: Number(m[3]) } : {}), stat: m[4] ?? "", cmd: m[5] ?? "" }] : [];
   });
+};
 
 // A zombie ("[bash] <defunct>"): it already ended and only waits for its parent to collect it, so no work dies with it.
 export const ended = (p: Proc): boolean => (p.stat ?? "").startsWith("Z") || /<defunct>\s*$/.test(p.cmd);
