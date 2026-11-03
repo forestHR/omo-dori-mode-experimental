@@ -763,6 +763,23 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         await self.service.close_decided_threads()
         self.assertEqual(self.thread_patches, [])
 
+    async def test_grants_to_two_people_in_one_thread_both_wait_and_a_repeat_replaces(self):
+        # Two cards from one message in the approval channel share its thread: a grant to another person is other work.
+        self.approval()
+        for who in ("partner@example.net", "second@example.net", "second@example.net"):
+            status, _ = await self.request(path="/www.googleapis.com/drive/v3/files/f/permissions",
+                                           data={"type": "user", "role": "reader", "emailAddress": who})
+            self.assertEqual(status, 202)
+        self.assertEqual(sorted(json.loads(base64.b64decode(e["body"]))["emailAddress"] for e in self.service.pending()),
+                         ["partner@example.net", "second@example.net"])
+
+    async def test_calendar_acl_grants_to_two_people_in_one_thread_both_wait(self):
+        self.approval()
+        for who in ("partner@example.net", "second@example.net"):
+            await self.request(path="/www.googleapis.com/calendar/v3/calendars/primary/acl",
+                               data={"role": "reader", "scope": {"type": "user", "value": who}})
+        self.assertEqual(len(self.service.pending()), 2)
+
     async def test_tampered_card_never_executes_or_edits(self):
         self.approval()
         await self.request(data={"attendees": [{"email": "outside@example.net"}]})
