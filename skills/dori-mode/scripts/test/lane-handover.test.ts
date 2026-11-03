@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { autoReadyLine, freshnessTick } from "../src/freshness.ts";
+import { autoReadyLine, freshnessTick, resumeArgs } from "../src/freshness.ts";
 import { closeDueFrozen, readFrozen } from "../src/frozen.ts";
 import { ackHandover, manifestPath } from "../src/handover.ts";
 import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
@@ -1599,14 +1599,27 @@ test("a lead's handover refused while the lane was busy starts again once, with 
   expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUME_SKIPPED demo skipped: the ready mark of ${at(32)} in ${OLD} is older than 30 min`);
 });
 
-test("the lead's refusal of a busy lane says that the lane's ready mark starts it again", async () => {
+test("the lead's refusal of a busy lane says that the lane's ready mark starts it again, and that start is given the options the refused run was given", async () => {
   // Given
   const base: LaneHandoverDeps = { ...(await setup()), reportOwner: async () => "msg-1" };
+  const cwd = process.cwd();
+  process.chdir(state.dir);
+  writeFileSync(join(state.dir, "lead-note.md"), "keep the old one open\n");
   // When: the lane's chain 15 would die
-  const r = await laneHandover(base, "demo", "aoe_lead_x", { approvedBy: "lead:STUCK rung 4 on loss after research" });
+  const r = await laneHandover(base, "demo", "aoe_lead_x", { approvedBy: "lead:STUCK rung 4 on loss after research", note: "lead-note.md", model: "anthropic/claude-x", thinking: "high", keepOld: true, verifyMin: 9 }).finally(() => process.chdir(cwd));
   // Then
   expect(r.code).toBe(2);
   expect(printed.find((l) => l.startsWith("HANDOVER_REFUSED demo"))).toContain("once it marks ready within 30 min, freshness starts this handover again by itself with the same approval");
+  const request = { note: join(state.dir, "lead-note.md"), model: "anthropic/claude-x", thinking: "high", keepOld: true, verifyMin: 9 };
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "refused", blocked: "work", request });
+  // the lane marks ready: the start again carries every option
+  const given: unknown[] = [];
+  const at = new Date(base.clock.now() + 60_000).toISOString();
+  ready(base, [15], at);
+  const clock = fakeClock(base.clock.now() + 120_000);
+  await freshnessTick({ ...base, clock }, "/home/test", { signals: async () => ({}), alive: () => false, resume: async (_key, approvedBy, req) => { given.push(approvedBy, req); return { started: true, line: "unit=u" }; } });
+  expect(given).toEqual(["lead:STUCK rung 4 on loss after research", request]);
+  expect(resumeArgs(request)).toEqual(["--note", join(state.dir, "lead-note.md"), "--model", "anthropic/claude-x", "--thinking", "high", "--keep-old", "--minutes", "9"]);
 });
 
 test("an automatic lane rollover tells the owner afterwards with what it crossed; a refused one is only in the log", async () => {

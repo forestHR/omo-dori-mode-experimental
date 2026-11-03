@@ -8,7 +8,7 @@ import { fixTag, recordFix } from "./same-fix.ts";
 import { leadAlert } from "./autoturn.ts";
 import { taskOpen, taskRecord } from "./background.ts";
 import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, statusLine, waitingRequest } from "./lane-handover.ts";
-import { COMMITTED, crossed, dueReasons, limitsFor, readRollovers, type RolloverEntry, type Signals, type Who } from "./rollover.ts";
+import { COMMITTED, crossed, dueReasons, limitsFor, readRollovers, type RolloverEntry, type RolloverRequest, type Signals, type Who } from "./rollover.ts";
 import { auditDue, type Committed, weeklyDue, writeMarker } from "./rollover-audit.ts";
 import { dailyAuditSince, linksDue } from "./directive-audit.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -87,8 +87,9 @@ export type RolloverHooks = {
   // starts a rollover without asking (handover.autoRolloverLanes / autoRolloverLead on); the line says what it started
   readonly auto?: (who: Who, key: string) => Promise<string>;
   // starts again, detached, a lane handover the lead (or the owner) approved that was refused while the lane was busy,
-  // with the same approval, once the lane marked ready (readyResume); started false when it could not be started
-  readonly resume?: (key: string, approvedBy: string) => Promise<{ readonly started: boolean; readonly line: string }>;
+  // with the same approval and the options that run was given, once the lane marked ready (readyResume); started false
+  // when it could not be started
+  readonly resume?: (key: string, approvedBy: string, request: RolloverRequest) => Promise<{ readonly started: boolean; readonly line: string }>;
   // whether a process still runs (a handover's lock holder, the chain pids a refusal named); process.kill(pid, 0) by default
   readonly alive?: (pid: number) => boolean;
   // whether a background task (st_...) a refusal named has ended: its senpi record under home has a final status (a task
@@ -274,6 +275,8 @@ const rolloverDue = async (deps: FlowDeps, hooks: RolloverHooks, who: Who, key: 
 // approval, detached and waiting for the lane's idle moment; a mark with no refused request before it starts nothing.
 // One start per mark: the mark's time is claimed in <key>.ready-resume.json before the start (a start that could not be
 // launched gives the claim back). A mark older than handover.readyMin starts nothing either: the lead hears of it once.
+// the dori handover --lane options that give a run started again what the refused run was given
+export const resumeArgs = (r: RolloverRequest): string[] => [...(r.note ? ["--note", r.note] : []), ...(r.model ? ["--model", r.model] : []), ...(r.thinking ? ["--thinking", r.thinking] : []), ...(r.keepOld ? ["--keep-old"] : []), ...(r.verifyMin ? ["--minutes", String(r.verifyMin)] : [])];
 const resumeFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.ready-resume.json`);
 const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pane: string): Promise<SweepAct[]> => {
   if (!hooks.resume) return [];
@@ -302,7 +305,7 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
     const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, text) : false;
     return log(`HANDOVER_READY_RESUME_SKIPPED ${key} skipped: the ready mark of ${mark.at} in ${pane} is older than ${min} min, so the request of ${asked.at} (refused ${asked.blocked}) is not started again; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
   }
-  const r = await hooks.resume(key, by);
+  const r = await hooks.resume(key, by, asked.request ?? {});
   if (!r.started) rmSync(claimed, { force: true });
   return log(r.started
     ? `HANDOVER_READY_RESUMED ${key} started: the ready mark of ${mark.at} in ${pane} follows the request of ${asked.at} (refused ${asked.blocked}); started again with the same approval ${JSON.stringify(by)}: ${r.line}`
