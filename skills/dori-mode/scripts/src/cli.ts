@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
 import { isHerdrPane } from "./herdr.ts";
 import { reviveHerdr } from "./herdr-sessions.ts";
-import { windowsHandoverRefusal } from "./windows-handover.ts";
 import { fileLog, installTaskRefusal, serve, serveLoops, spawnLoop, TASK_NAME, taskArgv } from "./serve.ts";
+import { winSignal } from "./win-suspend.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { CheckpointError, Checkpoints } from "./checkpoints.ts";
 import { type BudgetLimits, laneLimits } from "./supervision.ts";
@@ -666,7 +666,7 @@ const reportOwner = discordToken && process.env.DORI_DISCORD_CHANNEL?.trim()
   : {};
 const sessionOfPane = async (pane: string, cwd: string): Promise<string> => (await resolveSession(pane, cwd, await procTable(run), { run, sessionsDir: config.sessionsDir, backend: config.backend })).id;
 const sendSignal: HandoverDeps["signal"] = (pid, sig) => {
-  if (process.platform === "win32" && (sig === "SIGSTOP" || sig === "SIGCONT")) return false;
+  if (process.platform === "win32" && (sig === "SIGSTOP" || sig === "SIGCONT")) return winSignal(pid, sig);
   try {
     process.kill(pid, sig);
     return true;
@@ -2068,10 +2068,6 @@ try {
       break;
     }
     case "handover": {
-      if (process.platform === "win32" && key !== "frozen") {
-        const target = opt("lane") ?? (key === "thaw" || key === "close-frozen" ? flags.positionals[1] : undefined);
-        die(windowsHandoverRefusal(target ?? "lead", opt("lane") ? "lane" : target ? "pane" : "lead"), 2);
-      }
       const here = await currentTmuxSession(run);
       if (key === "ack") {
         console.log(ackHandover(opt("state") ? resolve(opt("state") ?? "") : config.stateDir, flags.positionals[1]?.trim() || die("usage: dori handover ack <id> [--state DIR]"), here, new Date().toISOString()));

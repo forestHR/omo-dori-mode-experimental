@@ -8,7 +8,6 @@ import { join } from "node:path";
 import { closeAoeSession, isClosedLine, liveSessions, sessionFor, tmuxPanePid } from "./aoe.ts";
 import type { Runner } from "./run.ts";
 import { descendants, ended, type Proc, topAgent } from "./session-id.ts";
-import { windowsHandoverRefusal } from "./windows-handover.ts";
 
 export type Sig = "SIGSTOP" | "SIGCONT";
 
@@ -96,7 +95,6 @@ export const agentTree = (table: readonly Proc[], shellPid: number, self: number
 
 // Stops the pane's agent and everything under it. pids: those stopped; why: the reason nothing could be stopped.
 export const freezePane = async (deps: FreezeDeps, pane: string, self: number, spare: readonly number[] = []): Promise<{ readonly agentPid?: number; readonly pids: number[]; readonly why?: string }> => {
-  if (process.platform === "win32") return { pids: [], why: windowsHandoverRefusal(pane, "pane") };
   const shell = await tmuxPanePid(deps.run, pane);
   if (!shell) return { pids: [], why: `no tmux pane ${pane}` };
   const { agent, pids } = agentTree(await deps.procs(), shell, self, spare);
@@ -111,7 +109,6 @@ export const freezePane = async (deps: FreezeDeps, pane: string, self: number, s
 const resume = (deps: Pick<FreezeDeps, "signal">, rec: FrozenRecord): number => [...new Set(rec.pids)].reverse().filter((p) => deps.signal(p, "SIGCONT")).length;
 
 export const thawFrozen = (deps: Pick<FreezeDeps, "signal">, stateDir: string, pane: string): string => {
-  if (process.platform === "win32") return windowsHandoverRefusal(pane, "pane");
   // Thaw does not restore ended monitors: the new lead already owns their replacements.
   const rec = readFrozen(stateDir).find((r) => r.pane === pane);
   if (!rec) return `FROZEN_NONE ${pane}: no frozen session recorded for this pane (dori handover frozen lists them)`;
@@ -123,7 +120,6 @@ export const thawFrozen = (deps: Pick<FreezeDeps, "signal">, stateDir: string, p
 // Closes a frozen session: resumed first (a stopped process does not act on the hangup), then stopped and trashed with
 // aoe. Its conversation log is not touched.
 export const closeFrozen = async (deps: FreezeDeps, stateDir: string, rec: FrozenRecord): Promise<string> => {
-  if (process.platform === "win32") return windowsHandoverRefusal(rec.pane, "pane");
   if (!sessionFor(await liveSessions(deps.run), rec.pane)) {
     rmSync(frozenFile(stateDir, rec.pane), { force: true });
     return `HANDOVER_OLD_GONE ${rec.pane}: the frozen session is no longer open; record removed`;
@@ -138,7 +134,6 @@ export const closeFrozen = async (deps: FreezeDeps, stateDir: string, rec: Froze
 // The frozen sessions whose closeAt has passed are closed (freshness runs this every tick); one kept for its monitors' work
 // once that work ended (a zombie its stopped parent has not collected counts as ended).
 export const closeDueFrozen = async (deps: FreezeDeps, stateDir: string, now: number): Promise<string[]> => {
-  if (process.platform === "win32") return [];
   const out: string[] = [];
   const recs = readFrozen(stateDir);
   const table = recs.some((r) => r.keepFor?.length) ? await deps.procs() : [];
