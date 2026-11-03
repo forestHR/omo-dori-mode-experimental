@@ -3,9 +3,9 @@ import { dirname } from "node:path";
 
 import type { DiscordWords } from "../config.ts";
 import type { Discord } from "./discord.ts";
-import { desiredStatus, setThreadStatus, type ThreadStatus } from "./discord-thread.ts";
+import { desiredStatus, setThreadStatus, type ThreadMark, type ThreadStatus } from "./discord-thread.ts";
 import { MessengerError } from "./http.ts";
-import { dropThread } from "./thread-map.ts";
+import { dropThread, threads } from "./thread-map.ts";
 
 // One entry per thread: the status the latest event asked for, the earliest time the rename may run, and how many
 // rate-limited tries it took so far. `rev` grows with every request, so a rename that finishes after a newer request
@@ -129,11 +129,15 @@ export class ThreadStatusQueue {
     }
     const cards = this.d.openCards(thread);
     const lanes = e.status === "done" ? [] : ((await this.d.workingLanes?.(thread)) ?? []);
-    const status = desiredStatus(e.status, cards, lanes);
+    const asked = desiredStatus(e.status, cards, lanes);
+    // a standing thread keeps its mark through every event, a released one (false) loses its 📌 at every rename; read
+    // here, so a one-shot command's change counts and a failed rename leaves it for the next
+    const standing = threads(dirname(this.d.file))[thread]?.standing;
+    const status: ThreadMark = standing === true ? "standing" : asked;
     // what decided it, when not the event: the open cards, the lanes that kept it working past them
-    const why = status !== e.status || (cards.length && lanes.length) ? [cards.length ? ` open=${cards.join(",")}` : "", lanes.length ? ` working=${lanes.join(",")}` : ""].join("") : "";
+    const why = asked !== e.status || (cards.length && lanes.length) ? [cards.length ? ` open=${cards.join(",")}` : "", lanes.length ? ` working=${lanes.join(",")}` : ""].join("") : "";
     try {
-      const changed = await setThreadStatus(this.d.dc.once(), thread, status, this.d.words);
+      const changed = await setThreadStatus(this.d.dc.once(), thread, status, this.d.words, undefined, standing === false);
       if (status === "done") dropThread(dirname(this.d.file), thread);
       this.forget(thread, e.rev);
       this.d.log(`THREAD_STATUS_APPLIED ${thread} ${status}${changed ? "" : " unchanged"}${why}`);
