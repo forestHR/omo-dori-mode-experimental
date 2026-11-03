@@ -1540,11 +1540,29 @@ test("a headless browser a chain started is part of that chain, and a real chain
   // a shell whose command names the browser and then more steps is a chain: the executable decides (review 318)
   table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 70, ppid: 11, cmd: "bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh" }];
   const wrapped = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // so is a shell that names omo-ai's daemon path, and a browser doing a batch job itself, with no driver (review 318 round 2)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 71, ppid: 11, cmd: "bash -c cat /g/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js; ./long-job.sh" }];
+  const named = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 72, ppid: 11, cmd: "firefox --headless --screenshot /tmp/shot.png https://x" }];
+  const batch = await laneHandover(deps, "demo", "aoe_lead_x", OK);
   // Then
-  expect([r.code, wrapped.code]).toEqual([2, 2]);
+  expect([r.code, wrapped.code, named.code, batch.code]).toEqual([2, 2, 2, 2]);
   const refused = printed.filter((l) => l.startsWith("HANDOVER_REFUSED"));
   expect(refused[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 15 bash -c sleep 7200; echo chain-done. ");
   expect(refused[1]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 70 bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh. ");
+  expect(refused[2]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 71 bash -c cat /g/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js; ./long-job.sh. ");
+  expect(refused[3]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 72 firefox --headless --screenshot /tmp/shot.png https://x. ");
+});
+
+test("a browser a driver left, named by its quoted Windows path, is a leftover too", async () => {
+  // Given
+  const deps = await setup();
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 73, ppid: 11, cmd: '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --headless=new --remote-debugging-pipe --user-data-dir=C:\\t\\p' }];
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
+  // Then
+  expect(r.code).toBe(0);
+  expect(readFileSync(r.note ?? "", "utf8")).toContain("## Leftovers of the old session (1)");
 });
 
 test("a job that left the pane's process tree but stays in its terminal session dies with it: it is a local chain the ready mark covers, not a detached job", async () => {

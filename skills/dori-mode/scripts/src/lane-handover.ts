@@ -26,6 +26,7 @@ import { hasSessionSelector } from "./session-id.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
+import { commandExecutable } from "./executable.ts";
 import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section, seedRestatement, wholeBullet } from "./restatement.ts";
@@ -199,17 +200,34 @@ const THINKING = /^(.*):(off|minimal|low|medium|high|xhigh|max)$/;
 // processes every omo session runs besides the work: MCP servers, the subagent RPC host, the provider's own CLI, and the
 // omo-ai plugin's own daemons (its memory run supervisor under plugin/extensions, its LSP daemon under plugin/runtime),
 // which refused ZzangDori's herdr-switch move twice on 2026-11-03 as "local chains"
-const INFRA = /\bmcp\b|--internal-rpc-host-supervisor|--mode rpc|claude-agent-sdk|omo-ai[\\/]plugin[\\/](?:extensions|runtime)[\\/]/;
+const INFRA = /\bmcp\b|--internal-rpc-host-supervisor|--mode rpc|claude-agent-sdk/;
+// a command line's first words, quotes kept together (a quoted Windows path is one word)
+const words = (cmd: string, n: number): string[] => {
+  const out: string[] = [];
+  for (let rest = cmd; out.length < n; ) {
+    const w = commandExecutable(rest);
+    if (!w) break;
+    out.push(w);
+    rest = rest.slice(rest.indexOf(w) + w.length + 1);
+  }
+  return out;
+};
+const exeName = (cmd: string): string => (words(cmd, 1)[0] ?? "").split(/[\\/]/).pop() ?? "";
+// the omo-ai daemon itself: bun or node running a script of the plugin, never a command line that only names that path
+const omoDaemon = (cmd: string): boolean => {
+  const [exe = "", script = ""] = words(cmd, 2);
+  return /^(?:bun|node)(?:\.exe)?$/i.test(exe.split(/[\\/]/).pop() ?? "") && /omo-ai[\\/]plugin[\\/](?:extensions|runtime)[\\/]/.test(script);
+};
+const infra = (cmd: string): boolean => INFRA.test(cmd) || omoDaemon(cmd);
 // A headless browser the agent or its kernel started itself (a browser-driving cell's, left after the cell ended): no work
 // of its own dies with it (a cell still driving it is a running eval cell, a script driving it is that script's chain), so
 // it is a leftover the note lists, not a chain. It refused ZzangDori's tournament-public and herdr-switch moves on 2026-11-03.
-// Its executable decides, never a word elsewhere on the line: a shell that runs a browser and then more steps is a chain.
-const SHELL_BROWSER = /^(?:chrome-headless-shell|headless_shell)(?:\.exe)?$/i;
-const BROWSER = /^(?:chrome|chromium|chromium-browser|google-chrome|msedge|firefox|MiniBrowser)(?:\.exe)?$/i;
-const leftover = (cmd: string): boolean => {
-  const exe = (cmd.trim().split(/\s+/)[0] ?? "").split(/[\\/]/).pop() ?? "";
-  return SHELL_BROWSER.test(exe) || (BROWSER.test(exe) && /\s--headless(?:=\S*)?(?=\s|$)/.test(cmd));
-};
+// Its executable decides, never a word elsewhere on the line (a shell that runs a browser and then more steps is a chain),
+// and only a browser a driver controls (playwright's or puppeteer's pipe or port) is idle once its driver ended: a browser
+// doing a job of its own (--screenshot, --print-to-pdf, --dump-dom) is work.
+const BROWSER = /^(?:chrome-headless-shell|headless_shell|chrome|chromium|chromium-browser|google-chrome|msedge|firefox|MiniBrowser)(?:\.exe)?$/i;
+const DRIVEN = /(?:^|\s)--?(?:remote-debugging-pipe|remote-debugging-port(?:=\S*)?|juggler-pipe|marionette|inspector-pipe)(?=\s|$)/;
+const leftover = (cmd: string): boolean => BROWSER.test(exeName(cmd)) && DRIVEN.test(cmd);
 // another session's processes: an agent, the herdr server (started from a lane, it carries that lane's environment) and
 // everything under them
 const HERDR_SERVER = /(?:^|[\\/\s])herdr(?:\.exe)?\s+server\b/;
@@ -286,7 +304,7 @@ export const localChains = (table: readonly Proc[], shellPid: number, monitorPid
   // the children of the agent, of its kernel and of the shells that launched it (jobs started from the pane die with it too),
   // and the topmost of the jobs that left the tree but not the pane's session
   const roots = table.filter((p) => ((session.has(p.ppid) || kernels.has(p.ppid)) && !session.has(p.pid) && !kernels.has(p.pid)) || (stray.has(p.pid) && !stray.has(p.ppid)))
-    .filter((p) => !ended(p) && !INFRA.test(p.cmd) && !monitorPids.includes(p.pid) && !exclude.has(p.pid))
+    .filter((p) => !ended(p) && !infra(p.cmd) && !monitorPids.includes(p.pid) && !exclude.has(p.pid))
     .map((p) => ({ pid: p.pid, cmd: p.cmd, pids: [p.pid, ...descendants(table, p.pid).filter((d) => !ended(d)).map((d) => d.pid)] }));
   return { agent, chains: roots.filter((c) => !leftover(c.cmd)), leftovers: roots.filter((c) => leftover(c.cmd)), tree: new Set([...ids, ...stray]) };
 };
