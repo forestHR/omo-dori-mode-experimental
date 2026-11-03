@@ -1443,14 +1443,14 @@ test("a lead's handover refused while the lane is busy asks the lane for its saf
   expect(opened()).toBe(false);
 });
 
-test("a lead's --force while a run waits for the lane's idle moment is taken over by that run: one move, forced, with the lead's approval", async () => {
+test("a run waiting for the lane's idle moment steps aside for the lead's --force: it logs no rollover row and ends, freeing the lock", async () => {
   // Given: ZzangDori herdr-switch 2026-11-03 09:10:45Z, a --force refused "another handover is running (pid 666199)"
   const base = await setup();
   const c = fakeClock(Date.parse("2026-10-11T16:35:00Z"));
   let polls = 0;
   const deps: LaneHandoverDeps = {
     ...base,
-    clock: { now: () => c.at, sleep: async (ms: number) => { c.at += ms; polls++; if (polls === 2) writeFileSync(takeoverFile(), JSON.stringify({ pid: 4242, at: new Date(c.at).toISOString(), approvedBy: LEAD_STUCK, force: true, request: {} })); simulate(); } },
+    clock: { now: () => c.at, sleep: async (ms: number) => { c.at += ms; polls++; if (polls === 2) writeFileSync(takeoverFile(), JSON.stringify({ pid: 4242, at: new Date(c.at).toISOString(), approvedBy: LEAD_STUCK, force: true })); simulate(); } },
     config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } },
     reportOwner: async () => "msg-1",
   };
@@ -1460,82 +1460,72 @@ test("a lead's --force while a run waits for the lane's idle moment is taken ove
   // When: the lane stays busy the whole time
   const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   // Then
-  expect(r.code).toBe(0);
-  expect(printed.find((l) => l.startsWith("HANDOVER_TAKEN_OVER demo: "))).toContain("pid 4242");
-  expect(printed.some((l) => l.startsWith("HANDOVER_FORCED demo: a turn is running"))).toBe(true);
-  expect(printed).toContain(`HANDOVER_COMMITTED demo ${NEW}`);
-  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", approvedBy: LEAD_STUCK, decidedBy: "lead" });
-  expect(existsSync(takeoverFile())).toBe(false);
-  expect(sent(w).some((t) => t.startsWith("[LEAD] The lead moves demo"))).toBe(false);
+  expect(r.code).toBe(2);
+  expect(printed.find((l) => l.startsWith("HANDOVER_STEPPED_ASIDE demo: "))).toContain("pid 4242");
+  expect(readRollovers(state.dir).filter((e) => e.kind === "rollover")).toEqual([]);
+  expect(existsSync(join(state.dir, "handover", "lanes", "demo.lock"))).toBe(false);
+  expect(takeovers()).toEqual([]);
+  expect(opened()).toBe(false);
 });
 
-test("a run that finds the lane's lock held hands its approval to the holder and reports the holder's result from its record; a holder that does not take it (mid-move) leaves the run refused as before", async () => {
+test("a run that finds the lane's lock held moves the lane itself once the waiting holder stepped aside or ended; a holder mid-move leaves it refused with no rollover row, so the waiting request stays the last", async () => {
   // Given
   const base = await setup();
-  let claim = false;
-  let ending: "row" | "result" | "crash" = "row";
-  let taken = "";
+  let holder: "moving" | "aside" | "ended" = "moving";
   const lanes = join(state.dir, "handover", "lanes");
   const deps: LaneHandoverDeps = {
     ...base,
     reportOwner: async () => "msg-1",
     clock: { ...base.clock, sleep: async () => {
       const mine = takeovers()[0];
-      if (claim && mine) {
-        taken = readFileSync(join(lanes, mine), "utf8");
+      if (holder === "aside" && mine) {
         rmSync(join(lanes, mine));
-        if (ending === "row") appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-10-11T16:40:00.000Z", key: "demo", from: OLD, to: NEW, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "done", reasons: [] });
-        // the holder ended after its checks passed, before its rollover row: the note's result file has the end
-        else if (ending === "result") writeFileSync(join(lanes, "demo-20261011-164000.result.json"), JSON.stringify({ at: "2026-10-11T16:40:00.000Z", key: "demo", to: NEW, result: "done" }));
-        // it ended in the middle of the move: the registry already points at the new pane, the pending journal is left
-        else {
-          await base.registry.patch("demo", { pane: NEW });
-          writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid: 77, at: "2026-10-11T16:39:00Z", from: OLD, to: NEW, note: "n" }));
-        }
         live.delete(77);
       }
+      if (holder === "ended") live.delete(77);
       simulate();
     } },
   };
   mkdirSync(lanes, { recursive: true });
-  const lock = () => writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
-  lock();
+  writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
   live.add(77);
-  // When: the holder is mid-move and takes nothing
+  appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-10-11T16:20:00.000Z", key: "demo", from: OLD, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "refused", reasons: ["busy"], blocked: "busy", request: {} });
+  // When: the holder is moving the lane and takes nothing
   const refused = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  const rowsAfterRefusal = readRollovers(state.dir).filter((e) => e.kind === "rollover").length;
   const leftover = takeovers().length;
-  // the holder waits for the idle moment and takes it
-  claim = true;
-  const viaRow = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
-  const rowLine = printed.at(-1);
-  lock();
-  live.add(77);
-  rmSync(join(state.dir, "rollover-log.jsonl"), { force: true });
-  ending = "result";
-  const viaResult = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
-  const resultLine = printed.at(-1);
-  rmSync(join(state.dir, "rollover-log.jsonl"), { force: true });
-  rmSync(join(lanes, "demo-20261011-164000.result.json"));
-  lock();
-  live.add(77);
-  ending = "crash";
-  const crashed = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  // the waiting holder steps aside
+  holder = "aside";
+  const moved = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
   // Then
   expect(refused.code).toBe(2);
   expect(printed.some((l) => l.startsWith("HANDOVER_REFUSED demo: another handover is running (pid 77"))).toBe(true);
+  // the refusal logged nothing: the lane's waiting request is still its last rollover row (review 320)
+  expect(rowsAfterRefusal).toBe(1);
   expect(leftover).toBe(0);
-  expect(JSON.parse(taken)).toMatchObject({ approvedBy: LEAD_STUCK, force: true });
-  expect(viaRow.code).toBe(0);
-  expect(rowLine).toStartWith("HANDOVER_TAKEN_OVER_RESULT demo: done");
-  expect(viaResult.code).toBe(0);
-  expect(resultLine).toStartWith(`HANDOVER_TAKEN_OVER_RESULT demo: done -> ${NEW} (from the handover's result file`);
-  // a repointed registry is no proof (review 320): the journal says the move was cut off
-  expect(crashed.code).toBe(3);
-  expect(printed.at(-1)).toStartWith("HANDOVER_TAKEN_OVER_RESULT demo: interrupted");
-  expect(opened()).toBe(false);
+  expect(printed.find((l) => l.startsWith("HANDOVER_TAKEN_OVER demo: "))).toContain("pid 77 that waited for the lane's idle moment");
+  expect(moved.code).toBe(0);
+  expect(printed).toContain(`HANDOVER_COMMITTED demo ${NEW}`);
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", approvedBy: LEAD_STUCK });
 });
 
-test("two runs that both find the lock held each leave a request of their own: the waiting run takes the older one, the other is left for its writer to withdraw", async () => {
+test("a holder whose wait ended without taking the request clears the way too: the run goes on and moves the lane", async () => {
+  // Given: review 320, the holder's final busy check ended its wait while the request lay unclaimed
+  const base = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  const deps: LaneHandoverDeps = { ...base, reportOwner: async () => "msg-1", clock: { ...base.clock, sleep: async () => { live.delete(77); simulate(); } } };
+  mkdirSync(lanes, { recursive: true });
+  writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
+  live.add(77);
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  // Then
+  expect(printed.find((l) => l.startsWith("HANDOVER_TAKEN_OVER demo: "))).toContain("the run of pid 77 ended");
+  expect(r.code).toBe(0);
+  expect(takeovers()).toEqual([]);
+});
+
+test("two runs that both find the lock held each leave a request of their own: the waiting run steps aside for the older one and leaves the other for its writer", async () => {
   // Given: two requests written while a run waits (review 320: one file overwritten by the other lost an approval)
   const base = await setup();
   const c = fakeClock(Date.parse("2026-10-11T16:35:00Z"));
@@ -1555,9 +1545,8 @@ test("two runs that both find the lock held each leave a request of their own: t
   // When
   const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   // Then
-  expect(r.code).toBe(0);
-  expect(printed.find((l) => l.startsWith("HANDOVER_TAKEN_OVER demo: "))).toContain("pid 4242");
-  expect(readRollovers(state.dir).at(-1)).toMatchObject({ approvedBy: LEAD_STUCK });
+  expect(r.code).toBe(2);
+  expect(printed.find((l) => l.startsWith("HANDOVER_STEPPED_ASIDE demo: "))).toContain("pid 4242");
   expect(takeovers()).toEqual(["demo.takeover-4243-b.json"]);
 });
 

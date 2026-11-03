@@ -9,6 +9,7 @@
 // Work a monitor of the old session started (a LAUNCHES_WORK monitor: a chain it put in the background) runs under that
 // monitor, so the old session is frozen instead of closed, its monitors left running, and closes once that work ended.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
 import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./background.ts";
@@ -498,7 +499,7 @@ const titleFor = (old: string, stamp: string): string => `${old.replace(/-\d{8}$
 // each other and each withdraws only its own.
 const takeoverDir = (stateDir: string): string => join(stateDir, "handover", "lanes");
 const takeoverPrefix = (key: string): string => `${key}.takeover-`;
-type Takeover = { readonly pid: number; readonly at: string; readonly approvedBy?: string; readonly force: boolean; readonly request: RolloverRequest };
+type Takeover = { readonly pid: number; readonly at: string; readonly approvedBy?: string; readonly force: boolean };
 const TAKE_POLL_MS = 1_000;
 const TAKE_TRIES = 15;
 
@@ -507,66 +508,30 @@ const lockHolder = (file: string, alive: (pid: number) => boolean): { readonly p
   return held?.pid && held.pid !== process.pid && alive(held.pid) ? { pid: held.pid, at: held.at ?? "?" } : undefined;
 };
 
-const requestOf = (opts: LaneHandoverOptions): RolloverRequest => ({ ...(opts.note ? { note: resolve(opts.note) } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}), ...(opts.keepOld ? { keepOld: true } : {}), ...(opts.verifyMin ? { verifyMin: opts.verifyMin } : {}) });
-
-// What the holder's move left on disk, the durable record of its end: the pending journal (removed only when the move ended
-// either way) and the handover note's result file (written once the checks passed). A pane the registry points at proves
-// nothing: the move repoints it before its checks.
-const moveOutcome = (stateDir: string, key: string, since: string, alive: (pid: number) => boolean): { readonly result: string; readonly to?: string } | undefined => {
-  const pending = readPending(stateDir, key);
-  if (pending && !alive(pending.pid)) return { result: "interrupted" };
-  let names: string[] = [];
-  try {
-    names = readdirSync(takeoverDir(stateDir)).filter((n) => new RegExp(`^${escape(key)}-\\d{8}-\\d{6}\\.result\\.json$`).test(n)).sort();
-  } catch {
-    return undefined;
+// The taking side. A run waiting for the lane's idle moment steps aside for it: it takes the request, logs nothing and ends,
+// and this run goes on with its own approval, --force and options, taking the lock itself, so it moves the lane (or is
+// refused) and reports that itself; a holder that ended without taking it (its wait was over) clears the way the same
+// way. A holder that takes nothing within 15 s is moving the lane: the request is withdrawn and this run is refused,
+// with no rollover row, so the lane's waiting request stays its last one. undefined: go on.
+const handOver = async (deps: LaneHandoverDeps, key: string, holder: { readonly pid: number; readonly at: string }, opts: LaneHandoverOptions, at: string, emit: (line: string) => void): Promise<LaneHandoverResult | undefined> => {
+  // its own id, not deps.nonce(): the probe ids of the move this run may make next come from that
+  const file = join(takeoverDir(deps.config.stateDir), `${takeoverPrefix(key)}${process.pid}-${randomUUID().slice(0, 8)}.json`);
+  const mine: Takeover = { pid: process.pid, at, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}), force: Boolean(opts.force) };
+  writeFileSync(`${file}.part`, JSON.stringify(mine));
+  renameSync(`${file}.part`, file);
+  for (let i = 0; i < TAKE_TRIES && deps.alive(holder.pid); i++) await deps.clock.sleep(TAKE_POLL_MS);
+  const taken = !existsSync(file);
+  rmSync(file, { force: true });
+  if (deps.alive(holder.pid)) {
+    emit(`HANDOVER_REFUSED ${key}: another handover is running (pid ${holder.pid}, started ${holder.at}) and is moving the lane now: it took no new request`);
+    return { code: 2 };
   }
-  for (const n of names.reverse()) {
-    const r = readJson<{ at?: string; result?: string; to?: string }>(join(takeoverDir(stateDir), n));
-    if (r?.at && r.result && r.at >= since) return { result: r.result, ...(r.to ? { to: r.to } : {}) };
-  }
+  emit(`HANDOVER_TAKEN_OVER ${key}: ${taken ? `the run of pid ${holder.pid} that waited for the lane's idle moment (since ${holder.at}) stepped aside` : `the run of pid ${holder.pid} ended`}; this run moves the lane${opts.force ? " with --force" : ""}`);
   return undefined;
 };
 
-// the taking side: leave the request, wait for the holder to take it, then follow the holder to its end and report its result
-const handOver = async (deps: LaneHandoverDeps, key: string, holder: { readonly pid: number; readonly at: string }, opts: LaneHandoverOptions, at: string, emit: (line: string) => void, refuse: (why: string) => LaneHandoverResult): Promise<LaneHandoverResult> => {
-  const file = join(takeoverDir(deps.config.stateDir), `${takeoverPrefix(key)}${process.pid}-${deps.nonce()}.json`);
-  const mine: Takeover = { pid: process.pid, at, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}), force: Boolean(opts.force), request: requestOf(opts) };
-  writeFileSync(`${file}.part`, JSON.stringify(mine));
-  renameSync(`${file}.part`, file);
-  for (let i = 0; i < TAKE_TRIES && existsSync(file); i++) await deps.clock.sleep(TAKE_POLL_MS);
-  const back = `${file}.withdrawn`;
-  try {
-    renameSync(file, back);
-    rmSync(back, { force: true });
-    return refuse(`another handover is running (pid ${holder.pid}, started ${holder.at}) and is moving the lane now: it took no new request`);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-  }
-  emit(`HANDOVER_TAKEN_OVER ${key}: the run of pid ${holder.pid} (waiting since ${holder.at}) took this request${opts.force ? " with --force" : ""} and moves the lane; its result follows`);
-  const tries = Math.ceil((((opts.verifyMin ?? deps.config.handover.verifyMin) + 10) * 60_000) / 2_000);
-  for (let i = 0; i < tries && deps.alive(holder.pid); i++) await deps.clock.sleep(2_000);
-  const row = readRollovers(deps.config.stateDir).findLast((e): e is Extract<RolloverEntry, { kind: "rollover" }> => e.kind === "rollover" && e.who === "lane" && e.key === key && e.at >= at);
-  if (!row) {
-    // a holder that ended before its rollover record (killed, or its owner report failed hard): what its move left on disk
-    const left = deps.alive(holder.pid) ? undefined : moveOutcome(deps.config.stateDir, key, at, deps.alive);
-    if (left?.result === "interrupted") {
-      emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: interrupted: pid ${holder.pid} ended in the middle of the move; the next dori handover --lane ${key} repairs it first (HANDOVER_RECOVERED)`);
-      return { code: 3 };
-    }
-    if (left) {
-      emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: ${left.result}${left.to ? ` -> ${left.to}` : ""} (from the handover's result file; pid ${holder.pid} ended before its rollover record)`);
-      return { code: left.result.startsWith("done") ? 0 : 3, ...(left.to ? { to: left.to } : {}) };
-    }
-    emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: unknown: pid ${holder.pid} ${deps.alive(holder.pid) ? "still runs" : "ended without a record"}; the watch log has its lines`);
-    return { code: 3 };
-  }
-  emit(`HANDOVER_TAKEN_OVER_RESULT ${key}: ${row.result}${row.to ? ` -> ${row.to}` : ""}${row.reasons[0] ? `: ${row.reasons[0].slice(0, 300)}` : ""}`);
-  return { code: row.result.startsWith("done") ? 0 : row.result === "refused" ? 2 : 3, ...(row.to ? { to: row.to } : {}) };
-};
-
-// the waiting side: take the oldest request left for this lane, by rename so only one run takes it; one whose writer is
-// gone is dropped and the next looked at; the others stay for their writers to withdraw
+// the waiting side: a request another run left for this lane, taken by rename so only one run takes it; one whose writer
+// is gone is dropped and the next looked at; the others stay for their writers
 const claimTakeover = (deps: LaneHandoverDeps, key: string): Takeover | undefined => {
   const dir = takeoverDir(deps.config.stateDir);
   let names: string[] = [];
@@ -640,7 +605,10 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   // a run that finds another holding the lane hands it this request instead of a second move or a refusal: a run waiting
   // for the lane's idle moment takes it (and a --force with it) at its next look
   const holder = opts.dryRun || opts.idle ? undefined : lockHolder(lockFile, deps.alive);
-  if (holder) return handOver(deps, key, holder, opts, at, emit, refuse);
+  if (holder) {
+    const stop = await handOver(deps, key, holder, opts, at, emit);
+    if (stop) return stop;
+  }
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
   if (!old) return refuse(`no live session for pane ${lane.pane}`);
   const real = deps.realpath(old.path);
@@ -774,7 +742,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
       frozen = deps.signal(agent.pid, "SIGSTOP");
       emit(frozen ? `HANDOVER_FROZEN ${key} agent ${agent.pid} in ${lane.pane} at its idle moment (${Math.round((deps.clock.now() - opts.idle.since) / 1000)} s after the automatic start)` : `HANDOVER_FREEZE_FAIL ${key} agent ${agent.pid}: it stays told and quiet only`);
       const after = await captureTmux(deps.run, lane.pane);
-      if (!opts.force && (turnRunning(after) || QUESTION_MARK.test(after))) {
+      if (turnRunning(after) || QUESTION_MARK.test(after)) {
         if (frozen) emit(deps.signal(agent.pid, "SIGCONT") ? `HANDOVER_THAWED ${key} agent ${agent.pid}: a turn started as it was frozen` : `HANDOVER_THAW_FAIL ${key} agent ${agent.pid}`);
         if (!opts.idle.final) return { code: 2, retry: true };
         return refuse(`the lane stayed busy for ${opts.idle.waitedMin} min: a turn started as it was frozen`, { blocked: "busy" });
@@ -840,19 +808,18 @@ export const laneHandover = async (input: LaneHandoverDeps, key: string, here: s
   try {
     const since = deps.clock.now();
     const until = since + opts.waitIdleMin * 60_000;
-    let current = opts;
     for (let waiting = false; ; waiting = true) {
-      const r = await attempt(deps, key, here, { ...current, idle: { final: deps.clock.now() >= until, since, waitedMin: opts.waitIdleMin } }, granted);
+      const r = await attempt(deps, key, here, { ...opts, idle: { final: deps.clock.now() >= until, since, waitedMin: opts.waitIdleMin } }, granted);
       if (!r.retry) return r;
       if (!waiting) emit(`HANDOVER_WAIT_IDLE ${key}: a turn is running or a question is open; the move starts the moment the lane is idle (up to ${opts.waitIdleMin} min)`);
       for (;;) {
         await deps.clock.sleep(IDLE_POLL_MS);
-        // a request another run left for this lane (the lead's --force, a new approval) is this run's from now on
+        // another run asks for the lane (the lead's --force, a new approval): this run steps aside, logs no rollover row and
+        // ends (the lock goes with it), and that run moves the lane itself
         const taken = claimTakeover(deps, key);
         if (taken) {
-          current = { ...current, ...(taken.approvedBy ? { approvedBy: taken.approvedBy } : {}), force: taken.force, ...(taken.request.note ? { note: taken.request.note } : {}), ...(taken.request.model ? { model: taken.request.model } : {}), ...(taken.request.thinking ? { thinking: taken.request.thinking } : {}), ...(taken.request.keepOld ? { keepOld: true } : {}), ...(taken.request.verifyMin ? { verifyMin: taken.request.verifyMin } : {}) };
-          emit(`HANDOVER_TAKEN_OVER ${key}: the request of pid ${taken.pid} (${taken.approvedBy ?? "no approval"}${taken.force ? ", --force" : ""}) takes over this run, waiting since ${new Date(since).toISOString()}`);
-          break;
+          emit(`HANDOVER_STEPPED_ASIDE ${key}: the run of pid ${taken.pid} (${taken.approvedBy ?? "no approval"}${taken.force ? ", --force" : ""}) takes the lane over from this run, waiting since ${new Date(since).toISOString()}`);
+          return { code: 2 };
         }
         if (deps.clock.now() >= until) break;
         const pane = (await deps.registry.read(key))?.pane;
