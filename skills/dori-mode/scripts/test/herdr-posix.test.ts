@@ -62,5 +62,3 @@ test("herdr-guard refuses server stop inside a pane even behind a global option 
   // text that only holds the words is no server stop
   expect((await call(["pane", "send-text", "w1:p1", "server", "stop"], { HERDR_PANE_ID: "w1:p1" })).out).toBe("REAL pane send-text w1:p1 server stop\n");
 });
-
-

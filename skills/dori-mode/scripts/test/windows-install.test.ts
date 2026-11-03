@@ -11,7 +11,7 @@ afterEach(() => {
 const command = async (argv: string[]) => {
   const child = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
   const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
-  expect({ code, err }).toMatchObject({ code: 0 });
+  expect({ code, out, err }).toMatchObject({ code: 0 });
   return out;
 };
 

@@ -59,7 +59,8 @@ if (-not (Test-Path $cfg)) {
   $c | Add-Member -Force NoteProperty agentCommand @("omo", "--model", "{model}", "{prompt}")
   $c | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 $cfg
 }
-dori 2>&1 | Select-Object -First 1
+$help = dori --help
+$help | Select-Object -First 1
 
 Write-Host ""
 Write-Host "DORI_INSTALLED $src"

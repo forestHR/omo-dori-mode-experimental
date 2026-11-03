@@ -136,5 +136,3 @@ test("a revived agent that runs but has not drawn omo's input box yet is not rea
   expect(reads).toBeGreaterThanOrEqual(4);
   expect(world.calls.find((c) => c[2] === "run")?.[4] ?? "").toStartWith("clear && ");
 });
-
-
