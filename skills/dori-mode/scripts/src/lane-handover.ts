@@ -664,7 +664,8 @@ export const laneHandover = async (input: LaneHandoverDeps, key: string, here: s
   const deps = { ...input, signal: freezeSignal(input.signal) };
   // the grant is taken once, before any wait: every attempt of this run is the run freshness started
   const granted = decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && takeAutoGrant(deps.config.stateDir, "lane", key, opts.autoGrant, deps.clock.now());
-  if (!opts.waitIdleMin || opts.dryRun) return attempt(deps, key, here, opts, granted);
+  // a borrowed auto: is refused by attempt before anything else, also when another run holds the lock
+  if (!opts.waitIdleMin || opts.dryRun || (decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && !granted)) return attempt(deps, key, here, opts, granted);
   const emit = (line: string): void => {
     deps.print(line);
     watchLog(deps.config.watchLog, deps.clock, { source: "handover", line });

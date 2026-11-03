@@ -847,6 +847,14 @@ test("a borrowed auto: approval is refused with HANDOVER_APPROVAL before any oth
   expect(lines[0]).toContain("demo: a lane moves to a new session only with an approval: HANDOVER_APPROVAL");
   expect(lines[1]).toContain("nope: a lane moves to a new session only with an approval: HANDOVER_APPROVAL");
   expect(lines[2]).toContain("is not the automatic approval of this side");
+  // a hand-run with --wait-idle while another run holds the lane's lock: the approval refusal, not the lock's
+  live.add(4242);
+  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
+  writeFileSync(join(state.dir, "handover", "lanes", "demo.lock"), JSON.stringify({ pid: 4242, at: "2026-10-11T16:30:00Z" }));
+  const locked = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  expect(locked.code).toBe(2);
+  expect(printed.filter((l) => l.startsWith("HANDOVER_REFUSED")).at(-1)).toContain("demo: a lane moves to a new session only with an approval: HANDOVER_APPROVAL");
+  expect(existsSync(join(state.dir, "handover", "lanes", "demo.lock"))).toBe(true);
   expect(readRollovers(state.dir)).toEqual([]);
 });
 
