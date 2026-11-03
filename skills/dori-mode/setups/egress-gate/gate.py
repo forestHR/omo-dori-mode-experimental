@@ -555,8 +555,13 @@ DRIVE_ROLES = {"reader": "보기", "commenter": "댓글", "writer": "편집", "f
               "organizer": "관리", "owner": "소유권"}
 CARD_KIND = {"calendar": "일정 초대", "drive": "Drive 공유", "docs": "문서 공유", "gmail": "메일",
              "tasks": "할 일", "obsidian": "노트"}
-# A decided card thread's title prefix, in the node's request-thread words (origin_notice.ThreadOutcome).
+# A card thread's one leading mark (owner Q474, 2026-11-03): 🔔 a card waits on the owner; decided, ✅ done, ⛔ cancelled,
+# 💤 folded without an answer, ❗ failed. THREAD_STATUSES are the older word prefixes, still read so old names convert.
+THREAD_MARKS = ("✅", "⛔", "💤", "❗")
 THREAD_STATUSES = ("✅ 완료", "⛔ 취소", "⌛ 만료", "❗ 실패")
+WAITING_MARK = "🔔"
+# Every leading mark either side ever wrote (the Dori fork's 🔄 🔔 ⏸️ ✅ 📌 and the old words), so a name keeps exactly one.
+LEADING_MARK = re.compile(r"^(?:(?:✅ 완료|⛔ 취소|⌛ 만료|❗ 실패) · |(?:완료|취소|만료|실패) · |(?:🔄|🔔|⏸|✅|⛔|💤|❗|⌛|📌)\ufe0f?\s*)")
 # An approved write the service answered with a non-2xx status; the code itself stays in the GATE_WRITE log line.
 UPSTREAM_FAILED = "❗ 실행 실패"
 
@@ -698,9 +703,38 @@ def byte_size(size: int) -> str:
 
 
 def thread_status(outcome: str) -> str | None:
-    """The thread prefix for a card outcome line; None for outcomes that leave the thread alone."""
-    return {"✅ 실행됨": "✅ 완료", "✅ 승인됨": "✅ 완료", UPSTREAM_FAILED: "❗ 실패", "⛔ 취소됨": "⛔ 취소", "만료됨": "⌛ 만료",
-            "실행 실패": "❗ 실패"}.get(outcome)
+    """The thread mark for a card outcome line; None for outcomes that leave the thread alone."""
+    return {"✅ 실행됨": "✅", "✅ 승인됨": "✅", UPSTREAM_FAILED: "❗", "⛔ 취소됨": "⛔", "만료됨": "💤",
+            "실행 실패": "❗"}.get(outcome)
+
+
+def grantee(body: bytes) -> str:
+    """Who a sharing body grants to: a Drive permission's address, domain or type, a Calendar ACL rule's scope;
+    "" when it cannot be read."""
+    try:
+        data = json.loads(body or b"{}")
+    except ValueError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+    who = data.get("emailAddress") or data.get("domain") or scope.get("value") or data.get("type") or scope.get("type") or ""
+    return str(who).lower()
+
+
+def bare_thread_name(name: str) -> str:
+    """The name without any leading mark: "✅ ❗ 실패 · 🔐 x" and "🔔 🔐 x" both give "🔐 x"."""
+    while True:
+        rest = LEADING_MARK.sub("", name, count=1)
+        if rest == name:
+            return name
+        name = rest
+
+
+def decided_name(name: str) -> bool:
+    """Whether a thread name says its cards are decided: one of the end marks, or an older word prefix."""
+    return any(name.startswith(prefix + " · ") for prefix in THREAD_STATUSES) or any(
+        name.startswith(mark + " ") for mark in THREAD_MARKS)
 
 
 class Gate:
@@ -1774,7 +1808,7 @@ class Gate:
             role = DRIVE_ROLES.get(str({**fallback, **data}.get("role", "")), "")
             title = (f"{name} 공유({role})" if role else f"{name} 공유") if shared[2] == "permissions" else f"{name} 댓글"
         thread = await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
-        await self.supersede(thread, api, op, path, method, title)
+        await self.supersede(thread, api, op, path, method, title, body)
         # Owner 2026-10-19 00:00 KST: the card shows who, what and the reactions; the reason,
         # the owner-message link and the expiry stay in the pending record.
         content = (f"승인 필요 · {CARD_KIND.get(api, api)}\n"
@@ -1819,7 +1853,7 @@ class Gate:
         """
         parts = proof.rsplit("/", 2) if proof.startswith("https://discord.com/channels/") else []
         origin, message = (parts[-2], parts[-1]) if len(parts) == 3 and parts[-1].isdigit() else ("", "")
-        name = f"🔐 {title}"[:100]
+        name = f"{WAITING_MARK} 🔐 {title}"[:100]
         try:
             if origin and origin != channel:
                 status, _, body = await self.bot_call("GET", f"/channels/{origin}")
@@ -1842,13 +1876,19 @@ class Gate:
         print("GATE_CARD_THREAD_FALLBACK", file=sys.stderr, flush=True)
         return channel
 
-    async def supersede(self, thread, api, op, path, method, title) -> None:
-        """A newer card for the same work in the same thread replaces the older undecided one."""
+    async def supersede(self, thread, api, op, path, method, title, body=b"") -> None:
+        """A newer card for the same work in the same thread replaces the older undecided one.
+
+        A sharing grant (Drive permission, Calendar ACL) is the same work only for the same grantee: two cards in one
+        thread may share one file or calendar with two people, and the second must not replace the first."""
+        incoming = grantee(body)  # read once: the loop below reuses `body` for the Discord replies
         async with self.approval_lock:
             for entry in self.pending():
                 if (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
                         or entry.get("path") != path or entry.get("status") != "pending"
-                        or method == "POST" and entry.get("title") != title):
+                        or method == "POST" and entry.get("title") != title
+                        or method == "POST" and path.endswith(("/permissions", "/acl"))
+                        and grantee(base64.b64decode(entry.get("body") or "")) != incoming):
                     continue
                 base = f"/channels/{entry['channel']}/messages/{entry['message']}"
                 if await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅"):
@@ -1955,13 +1995,11 @@ class Gate:
             name = str(info.get("name") or "")
             if info.get("type") not in (11, 12) or str(info.get("parent_id")) != channel:
                 return
-            for old in THREAD_STATUSES:
-                if name.startswith(old + " · "):
-                    name = name[len(old) + 3:]
+            name = bare_thread_name(name)
             if not name.startswith("🔐 "):
                 return
             status, _, _ = await self.bot_call("PATCH", f"/channels/{thread}",
-                                               {"name": f"{prefix} · {name}"[:100], "archived": True})
+                                               {"name": f"{prefix} {name}"[:100], "archived": True})
             if not 200 <= status < 300:
                 raise OSError(status)
         except (Refused, OSError, ValueError, KeyError, http.client.HTTPException):
@@ -1983,8 +2021,7 @@ class Gate:
         info = json_object(body) if 200 <= status < 300 else {}
         name = str(info.get("name") or "")
         archived = (info.get("thread_metadata") or {}).get("archived")
-        if not (info.get("type") in (11, 12) and archived
-                and any(name.startswith(prefix + " · ") for prefix in THREAD_STATUSES)):
+        if not (info.get("type") in (11, 12) and archived and decided_name(name)):
             return None
         if await self.live_card_after_decision(match[1]):
             return None
@@ -2031,8 +2068,10 @@ class Gate:
         waiting = {e.get("thread") for e in self.pending()}
         for info in json_object(body).get("threads", []):
             thread = str(info.get("id", ""))
-            if (str(info.get("parent_id")) != channel or thread in waiting
-                    or not str(info.get("name") or "").startswith("🔐 ")):
+            name = str(info.get("name") or "")
+            # a decided thread someone reopened keeps its title; only a still-undecided "🔔 🔐 …" (or old "🔐 …") is swept
+            if (str(info.get("parent_id")) != channel or thread in waiting or decided_name(name)
+                    or not bare_thread_name(name).startswith("🔐 ")):
                 continue
             status, _, body = await self.bot_call("GET", f"/channels/{thread}/messages?limit=50")
             messages = json.loads(body) if 200 <= status < 300 else []

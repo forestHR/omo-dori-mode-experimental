@@ -203,17 +203,20 @@ add/remove their reactions through the Discord port. On any message, a client ma
 Each card lives in a thread, and its result is written on the card there. A request
 written inside a thread under the approval channel keeps its card in that thread; one
 written in the approval channel gets a thread on that message; anything else opens a new
-thread in the approval channel (any thread failure falls back to the channel). A newer card
+thread in the approval channel (any thread failure falls back to the channel); a new thread is named
+`🔔 🔐 <kind> · <what>` (🔔: a card in it waits on the owner). A newer card
 for the same work in the same thread (same API, operation and path; for creates, the same
 title) replaces the older undecided card: it is marked `🔁 새 판으로 대체됨` and never runs.
-Once the last card in a thread the gate opened (its name starts `🔐 `) is decided, the thread is
-renamed `✅ 완료 · ` (executed, 2xx), `⛔ 취소 · `, `⌛ 만료 · ` or `❗ 실패 · ` plus its name and archived; the
+Once the last card in a thread the gate opened (its name starts `🔐 ` after any leading mark) is decided,
+the thread gets one leading mark, `✅` (executed, 2xx), `⛔` (cancelled), `💤` (a day with no answer) or `❗`
+(failed), in place of any mark it had (also the older `✅ 완료 · `-style words, so a name never shows two),
+and is archived; the
 owner's own threads and threads with an open card keep their title. At start the gate also titles
 open card threads whose cards were all decided earlier (owner 2026-10-19 "승인 결과를 스레드 제목에
 반영하게 해줘").
 Discord reopens an archived thread on any new message. When a message posted through the
-Discord port goes into a thread that was archived under one of those four titles (the gate's
-own card threads and the node's request threads use the same words), the gate archives it again
+Discord port goes into a thread that was archived under one of those end marks (or an older
+`✅ 완료 · `-style title; the gate's own card threads and the node's request threads use the same marks), the gate archives it again
 right after the post. A decided thread someone else reopened, or one without a status title,
 stays as it is. So does a decided thread that holds a live card: a message newer than the
 thread's last title change that carries both ✅ and ⛔ reactions (a newer card for the same work
