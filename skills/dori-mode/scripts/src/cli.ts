@@ -384,10 +384,13 @@ const USAGE = `dori <command> [options]
                                        again: SEND_DUPLICATE <first id>, exit 0, also for two sends at once (thread
                                        reply|wait|done too); --again sends it anyway; an option send does not take is
                                        refused (UNKNOWN_OPTION, exit 2)
-  type <pane> --text TEXT | --text-file FILE
+  type <pane> --text TEXT | --text-file FILE [--as-text]
                                        type text into an agent pane and confirm it was submitted: Enter, an empty input
                                        box (one more Enter if not), a running turn. Prints SUBMITTED, or NOT_SUBMITTED
-                                       <reason> (also in the watch log) and exits 1. Use it for every [LEAD] relay
+                                       <reason> (also in the watch log) and exits 1. Use it for every [LEAD] relay.
+                                       A /word omo refuses as an unknown command gets no second Enter (that would
+                                       send it as a message): NOT_SUBMITTED <pane> SLASH_UNKNOWN; --as-text types a
+                                       space before the / so omo sends it as a message
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
   inbound slack [--loop MIN]           print INBOUND lines: unread thread replies (threads view), replies in threads
@@ -583,7 +586,7 @@ const flags = parseArgs({
     rule: { type: "string" }, outcome: { type: "string" }, lesson: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" }, "rollover-outcome": { type: "string" }, "rollover-unresolved": { type: "boolean" }, stuck: { type: "boolean" },
-    step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
+    step: { type: "string" }, "remote-effect": { type: "string", multiple: true }, "as-text": { type: "boolean" },
     "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
     "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
   },
@@ -976,8 +979,10 @@ try {
     case "type": {
       const pane = key ?? die("type needs a pane (a tmux session name or a herdr pane id)");
       const file = opt("text-file");
-      const text = file ? (await Bun.file(file).text()).trim() : need("text");
-      if (!text) die("type needs non-empty text");
+      const given = file ? (await Bun.file(file).text()).trim() : need("text");
+      if (!given) die("type needs non-empty text");
+      // omo sends a /text typed after a leading space as an ordinary message instead of checking it as a command
+      const text = flags.values["as-text"] === true && given.startsWith("/") ? ` ${given}` : given;
       const r = await typeIntoPane(deps, pane, text);
       for (const note of r.notes) console.error(note);
       if (r.pane !== pane) console.error(`FORWARDED ${pane} -> ${r.pane}: ${pane} was frozen by a handover, so the text went to the session that replaced it`);

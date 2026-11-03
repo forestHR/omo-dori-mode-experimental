@@ -19,6 +19,8 @@ export type PaneKeys = {
   // deletes the input box's text before the cursor, one line per call (omo's ctrl+u; at a line start it joins the line
   // above), so a text that was not submitted is not left behind for the next one to be typed after
   readonly clear?: () => Promise<void>;
+  // omo's Esc: takes back an armed "Enter again sends it as a message" (and stops a running turn, so only on an idle one)
+  readonly escape?: () => Promise<void>;
   // the pane runs omo, so a command omo runs itself counts as taken once omo empties the box (isOmoCommand); another
   // agent may take the same /text as an ordinary prompt
   readonly runsOmoCommands?: boolean;
@@ -93,6 +95,22 @@ export const isOmoCommand = (text: string): boolean => {
   return OMO_COMMANDS.has(name) && (name === text || WITH_ARGS.has(name));
 };
 
+// omo refuses a /word it has no command for (a typo, a skill that is not there): it puts the text back into the box and
+// shows "Unknown command /x." with "Enter again sends it as a message" (senpi interactive-mode.js
+// reportUnknownCommandRejection, unknown-command-feedback.js), so a second Enter would send the text to the agent. Only a
+// refusal that names this text's command counts, with that text back in the box; the warning can sit lines above the box.
+// A path (/usr/bin/ls) is no command to omo and goes as a message on the first Enter.
+const COMMAND_TOKEN = /^\/[A-Za-z][A-Za-z0-9:_-]*$/;
+const refusedUnknown = (screen: string, text: string): { readonly name: string; readonly idle: boolean } | undefined => {
+  const name = text.trim().split(/\s/, 1)[0] ?? "";
+  if (!COMMAND_TOKEN.test(name) || editorText(screen) !== squash(text)) return undefined;
+  const above = screen.split("\n").slice(0, inputBox(screen).top);
+  if (!above.some((line) => line.includes(`Unknown command ${name}.`) || line.includes(`${name} is an interactive command`))) return undefined;
+  const hint = above.findLast((line) => line.includes("again sends it as a message"));
+  // omo adds "Esc keeps editing" only when no turn runs (during a turn Esc would stop it)
+  return hint === undefined ? undefined : { name, idle: hint.includes("keeps editing") };
+};
+
 // The box is on screen with its ❯ line: an empty box read off a screen that shows none (the pane went away, a read
 // that failed) proves nothing
 const promptShown = (screen: string): boolean => inputBox(screen).lines.some((line) => line.trimStart().startsWith("❯"));
@@ -147,6 +165,14 @@ export const submitText = async (keys: PaneKeys, clock: Clock, text: string, tim
       screen = await keys.read();
       left = editorText(screen);
       if (!left) break;
+      const refused = keys.runsOmoCommands ? refusedUnknown(screen, text) : undefined;
+      if (refused) {
+        if (refused.idle && keys.escape && !turnRunning(screen)) {
+          await keys.escape();
+          await clock.sleep(timing.pollMs);
+        }
+        return failed(`SLASH_UNKNOWN: omo has no command ${refused.name} and asked for one more Enter to send the text to the agent as a message; dori type did not press it, so nothing was sent; ${await clearOwn(keys, clock, timing, text, emptyBefore)}. To send it as a message, type it again with --as-text (a space before the /, which omo sends as text)`);
+      }
     }
     if (!left) break;
   }

@@ -104,6 +104,63 @@ test("a skill, a template or an unknown /text is no command omo runs: an emptied
   }
 });
 
+// omo refuses a /word it has no command for: the text goes back into the box under "Unknown command /x." and "Enter again
+// sends it as a message", so dori type's second Enter would send it to the agent (lane type-slash-submitted, 2026-11-03)
+const refusingPane = (refused: string, warning: readonly string[]) => {
+  const log = { enters: 0, clears: 0, escapes: 0 };
+  let inBox = "";
+  let above: readonly string[] = [" Update Available"];
+  const keys: PaneKeys = {
+    type: async (text) => { inBox += text; return undefined; },
+    enter: async () => {
+      log.enters++;
+      if (inBox === refused && log.enters === 1) above = [...above, ...warning];
+      else inBox = "";
+    },
+    read: async () => [...above, BORDER, `❯ ${inBox}`, BORDER, " ~/qa • effort low"].join("\n"),
+    clear: async () => { log.clears++; inBox = ""; },
+    escape: async () => { log.escapes++; },
+    delivered: async () => false,
+    runsOmoCommands: true,
+  };
+  return { keys, log, inBox: () => inBox };
+};
+
+test("a /text omo refuses as an unknown command gets no second Enter, is cleared and is NOT_SUBMITTED SLASH_UNKNOWN", async () => {
+  for (const [text, warning] of [
+    ["/notacommand", [" Warning: Unknown command /notacommand.", "", "", " Enter again sends it as a message; Esc keeps editing.", "", "", ""]],
+    ["/thinkingx low", [" Warning: Unknown command /thinkingx. Did you mean /thinking?", " Enter again sends it as a message; Esc keeps editing."]],
+  ] as const) {
+    const pane = refusingPane(text, warning);
+    const r = await submitText(pane.keys, fakeClock(0), text);
+    expect(r.status).toBe("NOT_SUBMITTED");
+    expect(r.reason).toStartWith("SLASH_UNKNOWN");
+    expect(r.reason).toContain("cleared from the box");
+    expect(r.reason).toContain("--as-text");
+    expect(pane.log.enters).toBe(1);
+    // Esc takes back omo's armed "Enter again sends it", so a repeat of the same text is refused again, not sent
+    expect(pane.log.escapes).toBe(1);
+    expect(pane.inBox()).toBe("");
+  }
+});
+
+test("a refusal shown while a turn runs gets no Esc (it would stop that turn), and still no second Enter", async () => {
+  const pane = refusingPane("/notacommand", [" Warning: Unknown command /notacommand.", " Enter again sends it as a message."]);
+  const r = await submitText(pane.keys, fakeClock(0), "/notacommand");
+  expect(r.reason).toStartWith("SLASH_UNKNOWN");
+  expect(pane.log.enters).toBe(1);
+  expect(pane.log.escapes).toBe(0);
+});
+
+test("another command's refusal still on screen does not stop the second Enter for a text the first Enter left in the box", async () => {
+  const pane = refusingPane("/thinking medium", []);
+  const stale = [" Warning: Unknown command /other.", " Enter again sends it as a message; Esc keeps editing."];
+  const keys: PaneKeys = { ...pane.keys, read: async () => (await pane.keys.read()).replace(" Update Available", stale.join("\n")), delivered: async () => true };
+  const r = await submitText(keys, fakeClock(0), "/thinking medium");
+  expect(pane.log.enters).toBe(2);
+  expect(r.status).toBe("SUBMITTED");
+});
+
 test("a screen that shows no input box (the pane went away, a read failed) does not count as an emptied box for a command", async () => {
   for (const screens of [[""], [slashDone([]), ""]]) {
     const { keys } = keysFor(screens);

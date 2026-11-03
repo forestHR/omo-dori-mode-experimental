@@ -139,7 +139,8 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
       read: () => readScreen(run, config.backend, pane),
     };
   const send = (part: string) => run(herdr ? ["herdr", "pane", "send-text", pane, part] : ["tmux", "send-keys", "-t", target(pane), "-l", "--", part]);
-  const key = (name: "enter" | "clear") => run(herdr ? ["herdr", "pane", "send-keys", pane, name === "enter" ? "enter" : "ctrl+u"] : ["tmux", "send-keys", "-t", target(pane), name === "enter" ? "Enter" : "C-u"]);
+  const KEYS = { enter: ["enter", "Enter"], clear: ["ctrl+u", "C-u"], escape: ["esc", "Escape"] } as const;
+  const key = (name: keyof typeof KEYS) => run(herdr ? ["herdr", "pane", "send-keys", pane, KEYS[name][0]] : ["tmux", "send-keys", "-t", target(pane), KEYS[name][1]]);
   const where = herdr ? `herdr pane ${pane}` : `tmux session ${pane}`;
   return {
     type: async (text) => {
@@ -157,6 +158,7 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
     enter: async () => { await key("enter"); },
     read: () => captureTmux(run, pane),
     clear: async () => { await key("clear"); },
+    escape: async () => { await key("escape"); },
     delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
     runsOmoCommands: true,
   };
