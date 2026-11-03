@@ -354,6 +354,8 @@ export type AutoSignals = {
 // handovers committed at most auditWindowH hours ago (0 turns it off); the lead's instructions of the old session's last
 // auditLeadH hours are read with the owner's quoted words; auditSummaryAt ("Mon 08:30" in scorecard.timeZone; empty: off)
 // is when the week's summary goes to the lead's inbox.
+// statsPeers: "<user>:<absolute path of that Dori's rollover-log.jsonl>" per other Dori on this host, read as that account
+// (sudo -n -u <user> cat) by dori rollover-stats --stuck so one command shows each Dori's stuck rollovers (empty: this one).
 export type HandoverWatcher = { readonly name: string; readonly check: readonly string[]; readonly arm?: string };
 
 export type Handover = {
@@ -388,6 +390,7 @@ export type Handover = {
   readonly auditWindowH: number;
   readonly auditLeadH: number;
   readonly auditSummaryAt: string;
+  readonly statsPeers: readonly string[];
 };
 
 // dori backlog: the list the dori-lanes freshness loop starts lanes from (src/backlog.ts); off unless a Dori turns it on
@@ -598,7 +601,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   },
   handover: { prompt: "Dori mode", title: "", model: "", services: [], timers: "remind", verifyMin: 15, inbox: "", cwd: "", watchers: [], readyMin: 30,
     laneContextPct: 0, laneCompactions: 0, laneAgeH: 0, laneAfterCompactK: 0, leadContextPct: 0, leadCompactions: 0, leadAgeH: 0, leadAfterCompactK: 0, autoRolloverLanes: false, autoRolloverLead: false, autoRetryMin: 30, autoWaitMin: 20,
-    trainingTags: ["training"], trainingWatch: "chain[_-]?watch|_chain_|\\btrain(ing)?\\b|learning iteration|/runs/|run[_-]?dir|\\bdori heavy\\b|(^|[^a-z])(eval|replay)([^a-z]|$)", supplementRounds: 2, frozenCloseH: 24, auditAfterMin: 10, auditWindowH: 24, auditLeadH: 6, auditSummaryAt: "Mon 08:30",
+    trainingTags: ["training"], trainingWatch: "chain[_-]?watch|_chain_|\\btrain(ing)?\\b|learning iteration|/runs/|run[_-]?dir|\\bdori heavy\\b|(^|[^a-z])(eval|replay)([^a-z]|$)", supplementRounds: 2, frozenCloseH: 24, auditAfterMin: 10, auditWindowH: 24, auditLeadH: 6, auditSummaryAt: "Mon 08:30", statsPeers: [],
     proposalText: "Move {who} to a new session? {signals}. The handover note it would get: {note}{blockers}" },
   stateGit: { dirs: [], everyMin: 10, maxFileKb: 512, timeoutSec: 60, timeZone: "", backup: BACKUP_DEFAULTS },
   mergeGate: { repos: {}, identities: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
