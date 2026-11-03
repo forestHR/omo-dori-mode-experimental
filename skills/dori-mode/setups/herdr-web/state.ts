@@ -21,7 +21,7 @@ export function cachedState(run: Runner, now: () => number = Date.now) {
   let until = 0;
   return () => {
     if (!cached || now() >= until) {
-      until = now() + 2000;
+      until = Infinity;
       cached = (async () => {
         const sessions = await herdrSessions(run);
         const [activity, result] = await Promise.all([
@@ -29,7 +29,7 @@ export function cachedState(run: Runner, now: () => number = Date.now) {
           herdrResult(run, ["tab", "list"]),
         ]);
         const tabs = Array.isArray(result?.tabs) ? result.tabs : [];
-        return sessions.map((s) => {
+        return sessions.map((s): PaneState => {
           const state = activity.get(s.pane);
           return {
             pane: s.pane, label: s.title, state: state ? states[state] : "none",
@@ -37,7 +37,7 @@ export function cachedState(run: Runner, now: () => number = Date.now) {
               "tab_id" in t && t.tab_id === s.tab && "focused" in t && t.focused === true),
           };
         });
-      })();
+      })().finally(() => { until = now() + 2000; });
     }
     return cached;
   };
