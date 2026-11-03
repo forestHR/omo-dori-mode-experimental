@@ -8,6 +8,7 @@ import { parseArgs } from "node:util";
 import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
 import { isHerdrPane } from "./herdr.ts";
 import { reviveHerdr } from "./herdr-sessions.ts";
+import { winSignal } from "./win-suspend.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
@@ -622,6 +623,8 @@ const reportOwner = discordToken && process.env.DORI_DISCORD_CHANNEL?.trim()
   : {};
 const sessionOfPane = async (pane: string, cwd: string): Promise<string> => (await resolveSession(pane, cwd, await procTable(run), { run, sessionsDir: config.sessionsDir, backend: config.backend })).id;
 const sendSignal: HandoverDeps["signal"] = (pid, sig) => {
+  // Windows has no stop signal: the handover's freeze suspends the process there (win-suspend.ts)
+  if (process.platform === "win32" && (sig === "SIGSTOP" || sig === "SIGCONT")) return winSignal(pid, sig);
   try {
     process.kill(pid, sig);
     return true;
