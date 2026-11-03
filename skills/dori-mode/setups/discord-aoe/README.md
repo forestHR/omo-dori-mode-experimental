@@ -358,7 +358,8 @@ tokens are in `dori.env`, so the monitor can be armed before the owner has insta
 - **Eyes off.** Once the answer is out, `dori send slack` takes the watcher's eyes off every earlier addressed message
   it answers: the inbox rows (`scope: "slack"`) in that channel whose `reply_thread` is the answer's `--thread`, or whose
   own ts is that `--thread`; an answer with no `--thread` (a plain DM, or a channel message answered in the channel
-  itself) answers every earlier row there that is not inside a thread (`thread_ts` null). It calls `reactions.remove` with the bot token, which only ever
+  itself) answers every earlier row there that is not inside a thread (`thread_ts` null). A `--file` share answers the
+  same way the rows from before its upload started (Slack's answer names no message ts). It calls `reactions.remove` with the bot token, which only ever
   removes the bot's own reaction, never a person's or another app's; with a member's `xoxp-` token it touches nothing.
   Both sides share one append-only record, `<stateDir>/slack-uneyed.log` (`answered` or `done`, `<channel>:<ts>` and
   an attempt id, one line each): every removal is an attempt, opened before it is asked and closed once Slack answered,

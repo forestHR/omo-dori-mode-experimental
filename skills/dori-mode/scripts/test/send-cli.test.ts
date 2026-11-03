@@ -298,7 +298,7 @@ for (const [name, args, parent, out] of [
 
 // 2026-11-03: the owner wants OkDori to put the AX-MVP deck (pptx, PDF) and demo video into Slack itself; send had no
 // --file, so Slack.upload had no caller and the Dori could only post a Drive link
-const fakeSlack = (complete = 200) => {
+const fakeSlack = (complete = 200, during: { upload?: () => void } = {}) => {
   const calls: { path: string; body: unknown }[] = [];
   let slots = 0;
   let port = 0;
@@ -318,6 +318,7 @@ const fakeSlack = (complete = 200) => {
       calls.push({ path, body });
       if (path === "/api/files.getUploadURLExternal" && !form) return Response.json({ ok: false, error: "invalid_arguments" });
       if (path === "/api/files.getUploadURLExternal") return Response.json({ ok: true, upload_url: `http://127.0.0.1:${port}/up/${++slots}`, file_id: `F${slots}` });
+      if (path === "/api/files.completeUploadExternal") during.upload?.();
       if (path === "/api/files.completeUploadExternal") return complete === 200 ? Response.json({ ok: true, files: body.files }) : new Response("unavailable", { status: complete });
       if (path === "/api/chat.postMessage") return Response.json({ ok: true, channel: body.channel, ts: "1700000100.000100" });
       if (path === "/api/reactions.remove") return Response.json({ ok: true });
@@ -332,12 +333,14 @@ const slackCli = (dir: string, port: number | undefined, args: readonly string[]
     "bun", join(import.meta.dir, "../src/cli.ts"), "send", ...args]);
 
 test("send slack --file uploads every file to its own URL, then shares them as one message with the text in the thread", async () => {
-  const { calls, server } = fakeSlack();
+  const during: { upload?: () => void } = {};
+  const { calls, server } = fakeSlack(200, during);
   const state = withState();
   try {
     writeFileSync(join(state.dir, "deck.pdf"), "pdf bytes");
     writeFileSync(join(state.dir, "demo.mp4"), "video");
-    // the owner's message the watcher put eyes on: the share names no message ts, so its eyes stay for a text answer
+    // the owner's message the watcher put eyes on: a share answers it like a text answer (OkDori answered the owner with
+    // a file share and the eyes stayed, 2026-11-03)
     mkdirSync(join(state.dir, "discord"));
     writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${JSON.stringify({ scope: "slack", id: "1700000000.000001", channel_id: "C1", reply_thread: "1700000000.000001", addressed: "mention" })}\n`);
     const r = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "deck.pdf"), "--file", join(state.dir, "demo.mp4"), "--text", "AX-MVP 발표자료", "--thread", "1700000000.000001"]);
@@ -348,17 +351,24 @@ test("send slack --file uploads every file to its own URL, then shares them as o
         { path: "/api/files.getUploadURLExternal", body: { filename: "demo.mp4", length: "5" } },
         { path: "/up/2", body: "video" },
         { path: "/api/files.completeUploadExternal", body: { files: [{ id: "F1", title: "deck.pdf" }, { id: "F2", title: "demo.mp4" }], channel_id: "C1", thread_ts: "1700000000.000001", initial_comment: "AX-MVP 발표자료" } },
-      ],
-    });
-    // a file alone needs no text; the eyes stay through both shares, and a text answer after them takes them off
-    const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
-    const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--thread", "1700000000.000001", "--text", "자료 올렸어"]);
-    expect({ bare: bare.out, share: calls[7]?.body, text: text.out, after: calls.slice(8) }).toEqual({
-      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", after: [
-        { path: "/api/chat.postMessage", body: { channel: "C1", text: "자료 올렸어", thread_ts: "1700000000.000001" } },
         { path: "/api/reactions.remove", body: { channel: "C1", timestamp: "1700000000.000001", name: "eyes" } },
       ],
     });
+    // a file alone needs no text; the message answered once is not asked about again by a later share or text answer
+    const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
+    const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--thread", "1700000000.000001", "--text", "자료 올렸어"]);
+    expect({ bare: bare.out, share: calls[8]?.body, text: text.out, after: calls.slice(9) }).toEqual({
+      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", after: [
+        { path: "/api/chat.postMessage", body: { channel: "C1", text: "자료 올렸어", thread_ts: "1700000000.000001" } },
+      ],
+    });
+    // a share in the channel itself answers the channel message before it; one that arrives during the upload is not,
+    // even with a ts older than the host clock (a host clock ahead of Slack's, review of #285)
+    const row = (id: string) => JSON.stringify({ scope: "slack", id, channel_id: "C1", thread_ts: null, reply_thread: id, addressed: "name" });
+    writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${row("1700000000.000050")}\n`, { flag: "a" });
+    during.upload = () => writeFileSync(join(state.dir, "discord", "inbox.jsonl"), `${row("1700000000.000060")}\n`, { flag: "a" });
+    await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
+    expect(calls.filter((c) => c.path === "/api/reactions.remove").map((c) => (c.body as { timestamp: string }).timestamp)).toEqual(["1700000000.000001", "1700000000.000050"]);
   } finally {
     server.stop(true);
     state.done();
