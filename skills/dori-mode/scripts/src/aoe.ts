@@ -246,7 +246,7 @@ export const agentPath = (tool: string): string => {
 // The command a handover's new herdr session runs: the configured agentCommand with its own options kept (a --session-dir
 // included), the lane prompt left out (it is typed once the agent shows its prompt), a new --session-id after the
 // program, and the handover's --model and --thinking.
-export const herdrAgentArgv = (template: readonly string[], model: string, thinking?: string): string[] => {
+export const herdrAgentArgv = (template: readonly string[], model: string, thinking?: string, session: string = crypto.randomUUID()): string[] => {
   const [program = "omo", ...rest] = template.filter((a) => !a.includes("{prompt}"));
   // the handover's --model and --thinking replace the template's; a template with a session selector is refused before
   // this (handover.ts, lane-handover.ts)
@@ -256,7 +256,7 @@ export const herdrAgentArgv = (template: readonly string[], model: string, think
     if (!/^--(model|thinking)(=|$)/.test(a)) kept.push(a);
     else if (!a.includes("=") && i + 1 < rest.length && !(rest[i + 1] ?? "").startsWith("-")) i++;
   }
-  return [program, "--session-id", crypto.randomUUID(), ...kept, "--model", model, ...(thinking ? ["--thinking", thinking] : [])];
+  return [program, "--session-id", session, ...kept, "--model", model, ...(thinking ? ["--thinking", thinking] : [])];
 };
 
 export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly backend?: "aoe" | "herdr"; readonly workspace?: string; readonly agentCommand?: readonly string[] }): Promise<string> => {

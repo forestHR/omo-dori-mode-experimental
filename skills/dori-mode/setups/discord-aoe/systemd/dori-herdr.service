@@ -1,0 +1,18 @@
+[Unit]
+Description=This Dori account's herdr server in its own user unit, apart from the dori units, so restarting a dori service or dori update does not end the lead and lanes (a stopped herdr server ends every agent in its panes)
+
+[Service]
+Type=simple
+# panes take the server's environment: give them PATH, and for another Dori on the host its DORI_CONFIG, DORI_ENV_FILE
+# and DORI_STATE_DIR (paths, never a token) in a drop-in, as the tmux unit does. No EnvironmentFile: a loaded dori.env
+# would hand this Dori's token to every pane.
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# a server already up outside this unit (started by hand) is left alone: exit 75, which RestartPreventExitStatus keeps
+# from retrying; stop that one and start this unit to move it here
+ExecStart=/bin/sh -c 'herdr pane list >/dev/null 2>&1 && { echo "HERDR_SERVER_ELSEWHERE"; exit 75; }; exec herdr server'
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=75
+
+[Install]
+WantedBy=default.target

@@ -1,3 +1,5 @@
+import { paneLife } from "./aoe.ts";
+import { isHerdrPane } from "./herdr.ts";
 import { inputLine } from "./aoe.ts";
 import type { DoriConfig } from "./config.ts";
 import { frozenPanes } from "./frozen.ts";
@@ -10,8 +12,8 @@ import { turnRunning } from "./submit.ts";
 // there is the agent's own ❯ input line or its running-turn mark here). A pane whose agent shows either is alive, whatever
 // words its transcript holds ("the job has stopped" in a lane's own output). Otherwise it is DEAD_PANE only when its last
 // lines carry a deadPanePatterns word and read the same as on the previous tick, a loop interval earlier, so a screen
-// mid-redraw never counts. An aoe pane that shows neither is counted, and named once (UNRECOGNISED_PANE) after
-// UNRECOGNISED_ALERT_AFTER ticks in a row.
+// mid-redraw never counts. An aoe pane, or a herdr pane herdr names an agent in, that shows neither is counted, and named
+// once (UNRECOGNISED_PANE) after UNRECOGNISED_ALERT_AFTER ticks in a row (a herdr pane with no agent is a plain shell).
 export const UNRECOGNISED_ALERT_AFTER = 3;
 
 // per-pane memory across ticks; the dead-panes loop keeps one for its whole life
@@ -29,8 +31,9 @@ export const deadPaneTick = async (run: Runner, config: DoriConfig, seen: Set<st
   for (const pane of await listPanes(run, config.backend)) {
     const id = pane.pane_id;
     if (skip.has(id) || (watch.size > 0 && !watch.has(pane.workspace_id))) continue;
-    const screen = await readScreen(run, config.backend, id, config.backend === "aoe" ? undefined : 6);
-    if (config.backend === "aoe" && agentShows(screen)) {
+    const screen = await readScreen(run, config.backend, id);
+    // a herdr pane keeps the screen of an agent that ended (and a shell can draw ❯): its prompt counts only while an agent runs
+    if (agentShows(screen) && (!isHerdrPane(id) || (await paneLife(run, id)).live)) {
       state.unknown.delete(id);
       state.lastTail.delete(id);
       continue;
@@ -47,8 +50,7 @@ export const deadPaneTick = async (run: Runner, config: DoriConfig, seen: Set<st
       out.push(`DEAD_PANE ${id}`);
       continue;
     }
-    // herdr panes give no alive evidence here, so only aoe panes can be unrecognised
-    if (config.backend !== "aoe") continue;
+    if (config.backend !== "aoe" && !pane.agent) continue;
     const n = (state.unknown.get(id) ?? 0) + 1;
     state.unknown.set(id, n);
     if (n === UNRECOGNISED_ALERT_AFTER) out.push(`UNRECOGNISED_PANE ${id} dead-panes: no agent prompt, running turn or dead marker for ${n} ticks`);

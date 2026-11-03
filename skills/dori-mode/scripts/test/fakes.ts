@@ -57,6 +57,8 @@ export type World = {
   // herdr panes the fake server does not have (pane get fails), and those where no agent runs any more (a bare shell)
   herdrGone?: string[];
   herdrDead?: string[];
+  // herdr pane run starts the agent (it leaves herdrDead and draws its own screen) unless herdrNoStart
+  herdrNoStart?: boolean;
 };
 
 export const RUNNING = " • Working (esc to interrupt)";
@@ -87,6 +89,11 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   }
   if (cmd === "tmux" && a1 === "send-keys" && argv.at(-1) === "Enter") w.started.push((argv[argv.indexOf("-t") + 1] ?? "").replace(/^=|:$/g, ""));
   if (cmd === "herdr" && a1 === "pane" && a2 === "send-keys" && argv.at(-1) === "enter") w.started.push(argv[3] ?? "");
+  if (cmd === "herdr" && a1 === "pane" && a2 === "run" && !w.herdrNoStart) {
+    const pane = argv[3] ?? "";
+    w.herdrDead = w.herdrDead?.filter((p) => p !== pane);
+    w.screens[pane] = "omo · session started\n────────\n❯ \n────────";
+  }
   if (cmd === "herdr" && a1 === "pane" && a2 === "list") return ok(JSON.stringify({ result: { panes: w.panes } }));
   if (cmd === "herdr" && a1 === "pane" && (a2 === "get" || a2 === "process-info")) {
     const pane = (a2 === "get" ? argv[3] : argv[argv.indexOf("--pane") + 1]) ?? "";
