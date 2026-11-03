@@ -40,7 +40,7 @@ import { guardTick, sampleHost } from "./host-guard.ts";
 import { areaLabel, type AreaQuery, areaSignals, formatSignals, hasSignals, oneLine, priorFixLines, tagsOf } from "./lane-signals.ts";
 import { adoptLane, asStartFailure, DirectiveMissingError, doneWeakWarning, goalWarning, laneStartText, launchEnvArgs, launchLane, LaunchError, launchLedger, relatedGate, renderBrief, reopenLaneThread, setDone, setGpu, setThread, threadGate, ThreadMissingError, validateLaunch } from "./launch.ts";
 import { checkedLedger, DirectiveError, directiveLine, HINT_LIMIT, type Ledger, ledgerProblems, ledgerTable, loadLedger, messageLines, promptTable, textDirectives } from "./directives.ts";
-import { applyDirectives, auditOrReport, checkMeaning, linkRows, memoryRepoFor, pushLinks, sinceIso } from "./directive-audit.ts";
+import { applyDirectives, auditOrReport, checkMeaning, dailyAuditHook, linkRows, memoryRepoFor, pushLinks, sinceIso } from "./directive-audit.ts";
 import { addNode, formatIntent, formatTree, gateFix, intentView, laneArea, loadTree, NODE_KINDS, type NodeKind, recordBranch, recordOverride, recordRefusal, requiredMessage, researchCheck, researchFacts, researchHint, sendResearch, setStatus, stuckTop, stuckView, type TreeArea, TreeError, updateTree } from "./explore.ts";
 import { challengeMissing, ChallengeError, checkReviewers, familyOf, reviewers, runChallenge } from "./challenge.ts";
 import { gateMissing, GateRefusal, mergePr, parsePr, reviewPr } from "./merge-gate.ts";
@@ -1300,7 +1300,7 @@ try {
           },
           auditSummary: (week: string) => sendAuditSummary(deps, laneDeps.inbox ?? join(config.stateDir, "discord", "inbox.jsonl"), week),
           // the daily directive audit on every Dori, and the owner's links pushed to the other Dori (directives.linkPeers)
-          directiveAudit: async (since: string) => (await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), memory: leadMemoryRepo() })).lines,
+          directiveAudit: dailyAuditHook(config, async (since: string) => (await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), memory: leadMemoryRepo() })).lines),
           directiveLinks: async () => (await pushLinks(deps)).lines,
         };
         for (const a of await freshnessTick(deps, process.env.HOME ?? "", hooks)) console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);

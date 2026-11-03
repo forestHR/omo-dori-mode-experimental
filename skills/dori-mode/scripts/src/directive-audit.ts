@@ -52,6 +52,10 @@ const supplies = (text: string, id: string, e: Directive | undefined, ledger: Le
   return e.mode === "inject" && (coveredBy(text, e, ledger) || (Boolean(e.prompt) && squash(text).includes(squash(e.prompt ?? ""))));
 };
 
+// The freshness loop's daily audit, unless directives.dailyAudit is false (another Dori audits this one); dori
+// directive-audit by hand does not read it.
+export const dailyAuditHook = <T>(cfg: Pick<DoriConfig, "directives">, hook: T): T | undefined => (cfg.directives.dailyAudit === false ? undefined : hook);
+
 export type Excused = { readonly gap: Gap; readonly line: string };
 
 // A lane's gaps, and the ones that are not its gaps: a directive that entered the ledger after the lane opened (entered:

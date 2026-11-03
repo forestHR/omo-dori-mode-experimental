@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
+import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditHook, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
+import { loadConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
 import { APPLIED_HEADING, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
@@ -300,6 +301,25 @@ test("directive-audit: a directive that entered the ledger after the lane opened
   r = await audit();
   expect(r.ids).not.toContain("gappy docs-same-pr");
   expect(r.ids).toContain("early docs-same-pr");
+});
+
+test("directives.dailyAudit false keeps the freshness loop from auditing this Dori; omitted or true it runs; dori directive-audit by hand still runs", async () => {
+  const off = await loadConfig(await write("off.json", JSON.stringify({ directives: { dailyAudit: false } })), "/home/test");
+  const on = await loadConfig(await write("on.json", JSON.stringify({ directives: { dailyAudit: true } })), "/home/test");
+  const omitted = await loadConfig(await write("omitted.json", "{}"), "/home/test");
+  expect([off.directives.dailyAudit, on.directives.dailyAudit, omitted.directives.dailyAudit]).toEqual([false, true, true]);
+  const clock = fakeClock(T0);
+  const deps = { ...(await ledgerDeps()), clock };
+  const ran: string[] = [];
+  const audit = async (since: string) => (ran.push(since), [`ran ${since}`]);
+  // no audit ran yet: due now
+  for (const cfg of [omitted, on]) expect((await freshnessTick(deps, "/home/test", { signals: async () => ({}), directiveAudit: dailyAuditHook(cfg, audit) })).filter((a) => a.kind === "directive_audit")).toHaveLength(1);
+  rmSync(auditStampPath(deps.config.stateDir), { force: true });
+  ran.length = 0;
+  expect((await freshnessTick(deps, "/home/test", { signals: async () => ({}), directiveAudit: dailyAuditHook(off, audit) })).filter((a) => a.kind === "directive_audit")).toEqual([]);
+  expect(ran).toEqual([]);
+  const manual = await auditOrReport({ ...deps, config: { ...deps.config, directives: { ...deps.config.directives, dailyAudit: false } } }, { since: "2026-10-15T06:00:00.000Z", inbox: await write("inbox.jsonl", ""), owner: "7", dryRun: true });
+  expect(manual.lines.some((l) => /^DIRECTIVE_AUDIT_(OK|DONE) /.test(l))).toBe(true);
 });
 
 test("an owner entry with words goes into briefs as its prompt: a prompt is required, may not ask, and is only for owner words", async () => {
