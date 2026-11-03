@@ -63,7 +63,7 @@ import { computeScorecard, dayWindow, formatScorecard, saveScorecard, ScorecardE
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { clearEyes, Slack, slackRowIds, slackUnreact } from "./messenger/slack.ts";
 import type { UploadFile } from "./messenger/slack.ts";
-import { type DiscordFile, filesKey, readDiscordFiles, readUploads, UploadRefused } from "./messenger/upload-files.ts";
+import { type DiscordFile, discordMessageProblem, filesKey, readDiscordFiles, readUploads, UploadRefused } from "./messenger/upload-files.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -350,7 +350,7 @@ const USAGE = `dori <command> [options]
                                        big file is refused before anything is sent (SEND_FILE_MISSING|REFUSED|TOO_BIG, exit 2);
                                        shared once per call, never retried or repeat-checked: a failure exits non-zero;
                                        the watcher's eyes stay on (a text answer takes them off)
-                                       --file (discord, up to 10, 20 MiB each; also thread reply|wait|done) posts the text
+                                       --file (discord, up to 10, 20 MiB each, 25 MiB a message; also thread reply|wait|done) posts the text
                                        and the files as one message (SENT <id>; same refusals before anything is sent); a
                                        repeat needs the same files too (sha256), --again sends it anyway
                                        --text-file posts the file's text (real line breaks) the same way as --text. A text
@@ -1717,6 +1717,8 @@ try {
       // with --file the text is optional: it goes out as the files' message (Slack initial_comment, Discord content)
       const body = filePaths.length && !opt("text") && !opt("text-file") ? "" : postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE (or --file PATH, slack or discord)"), "send");
       const text = status === "working" || status === "done" ? progressText(status, body, config.discord) : body;
+      const tooBig = discordMessageProblem(discordFiles, text);
+      if (tooBig) die(tooBig, 2);
       const rawPing = flags.values.ping;
       if (rawPing !== undefined && (typeof rawPing !== "string" || rawPing.length === 0 || /[^0-9]/.test(rawPing))) die("--ping takes a digits-only user id");
       const ping = typeof rawPing === "string" ? rawPing : undefined;
@@ -2007,6 +2009,8 @@ try {
         die(e.message, 2);
       }
       const body = files.length && !text?.trim() && !opt("text-file") ? "" : postable(await textOrFile(text?.trim(), "usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE (or --file PATH)"), `thread ${verb}`);
+      const tooBig = discordMessageProblem(files, body);
+      if (tooBig) die(tooBig, 2);
       const dc = discordClient();
       await ownerSpeech(body, `thread ${verb}`, () => ownerPlace(dc, discordThreadId(ref ?? "")));
       // the same key as `dori send discord --to <thread id>`, so the two commands do not post one text twice either

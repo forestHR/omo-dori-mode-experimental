@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { run } from "../src/run.ts";
 import { withState } from "./fakes.ts";
+import { DISCORD_FORM_SLACK, DISCORD_MESSAGE_MAX, type DiscordFile, discordMessageProblem } from "../src/messenger/upload-files.ts";
 
 test("Discord CLI enables typing by default, skips it on request, and leaves edits alone", async () => {
   const state = withState();
@@ -504,6 +505,11 @@ test("discord --file refuses a missing, empty, non-regular or too big file, more
     mkdirSync(join(state.dir, "folder"));
     writeFileSync(join(state.dir, "big.mp4"), "");
     truncateSync(join(state.dir, "big.mp4"), 20 * 1024 ** 2 + 1); // sparse: one byte over Discord's 20 MiB a file
+    // each under 20 MiB, together over the 25 MiB a message request may be (review of #308)
+    for (const half of ["half1.mp4", "half2.mp4"]) {
+      writeFileSync(join(state.dir, half), "");
+      truncateSync(join(state.dir, half), 13 * 1024 ** 2);
+    }
     const send = ["send", "discord", "--to", "channel", "--no-typing", "--text", "x"];
     const cases: [string, string[]][] = [
       ["SEND_FILE_MISSING", [...send, "--file", ok, "--file", join(state.dir, "nope.png")]],
@@ -514,6 +520,8 @@ test("discord --file refuses a missing, empty, non-regular or too big file, more
       ["SEND_FILE_REFUSED", [...send, "--edit", "1", "--file", ok]],
       ["SEND_FILE_MISSING", ["thread", "reply", "discord:300000000000000003", "x", "--file", join(state.dir, "nope.png")]],
       ["SEND_FILE_TOO_BIG", ["thread", "done", "discord:300000000000000003", "x", "--file", join(state.dir, "big.mp4")]],
+      ["SEND_FILE_TOO_BIG", [...send, "--file", join(state.dir, "half1.mp4"), "--file", join(state.dir, "half2.mp4")]],
+      ["SEND_FILE_TOO_BIG", ["thread", "reply", "discord:300000000000000003", "x", "--file", join(state.dir, "half1.mp4"), "--file", join(state.dir, "half2.mp4")]],
     ];
     const got = [];
     for (const [, args] of cases) {
@@ -524,6 +532,16 @@ test("discord --file refuses a missing, empty, non-regular or too big file, more
   } finally {
     state.done();
   }
+});
+
+test("a Discord message with files may be 25 MiB with its text and form slack, and not one byte more", () => {
+  const file = (n: number): DiscordFile => ({ filename: "a.bin", type: "application/octet-stream", bytes: new Uint8Array(n), sha256: "" });
+  const room = DISCORD_MESSAGE_MAX - DISCORD_FORM_SLACK - Buffer.byteLength("그림");
+  expect({
+    fits: discordMessageProblem([file(room - 10), file(10)], "그림"),
+    over: discordMessageProblem([file(room - 10), file(11)], "그림")?.split(" ")[0],
+    textOnly: discordMessageProblem([], "x".repeat(DISCORD_MESSAGE_MAX)),
+  }).toEqual({ fits: undefined, over: "SEND_FILE_TOO_BIG", textOnly: undefined });
 });
 
 test("존댓말 with a file for a 반말 owner is refused before anything is sent (SPEECH_REFUSED), in send and thread reply", async () => {

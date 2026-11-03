@@ -11,6 +11,10 @@ export const SLACK_FILES_MAX = 10;
 // most 10 attachments a message (docs.discord.com/developers/reference#uploading-files)
 export const DISCORD_FILE_MAX = 20 * 1024 ** 2;
 export const DISCORD_FILES_MAX = 10;
+// one message's whole request is at most 25 MiB (docs.discord.com/developers/resources/message; the egress gate's
+// BODY_CAP is the same); the slack covers payload_json, the multipart headers and boundaries, a ping and named links
+export const DISCORD_MESSAGE_MAX = 25 * 1024 ** 2;
+export const DISCORD_FORM_SLACK = 16 * 1024;
 
 export type UploadLimits = { readonly platform: string; readonly fileMax: number; readonly fileMaxText: string; readonly filesMax: number };
 const SLACK: UploadLimits = { platform: "Slack", fileMax: SLACK_FILE_MAX, fileMaxText: "1 GB", filesMax: SLACK_FILES_MAX };
@@ -52,6 +56,12 @@ export const readDiscordFiles = async (paths: readonly string[]): Promise<Discor
     out.push({ filename: f.filename, type: Bun.file(paths[i] ?? "").type, bytes, sha256: createHash("sha256").update(bytes).digest("hex") });
   }
   return out;
+};
+
+export const discordMessageProblem = (files: readonly DiscordFile[], text: string): string | undefined => {
+  if (!files.length) return undefined;
+  const total = files.reduce((n, f) => n + f.bytes.byteLength, Buffer.byteLength(text)) + DISCORD_FORM_SLACK;
+  return total > DISCORD_MESSAGE_MAX ? `SEND_FILE_TOO_BIG ${files.length} files: ${total} bytes with the text and form, over Discord's ${DISCORD_MESSAGE_MAX} bytes (25 MiB) a message; send them in more than one message; nothing was sent` : undefined;
 };
 
 // the attachments' part of a repeat-check key: empty without files, so a text post keeps its key
