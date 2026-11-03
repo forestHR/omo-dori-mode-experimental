@@ -7,14 +7,27 @@ import { join } from "node:path";
 // the same place, reply target and text as one sent in the last SEND_DEDUPE_MS is not sent again; the caller is told the
 // first message's id instead. Edits are never checked, and --again sends a repeat on purpose.
 export const SEND_DEDUPE_MS = 10 * 60_000;
-// a claim without an id this old belongs to a sender that died before it finished; it is taken over
+// a claim without an id this old belongs to a sender that died before it finished; it is taken over. A sender still
+// at work (a big Slack upload takes minutes) renews its own claim every RENEW_MS, so it is never taken over alive.
 const PENDING_MS = 60_000;
+const RENEW_MS = PENDING_MS / 3;
 const POLL_MS = 200;
 const KEEP_MS = 24 * 60 * 60_000;
 
-type Mark = { readonly at: number; readonly id?: string };
+type Mark = { readonly at: number; readonly id?: string; readonly owner?: string };
 export type SendOnceResult = { readonly id: string; readonly duplicate: false } | { readonly id: string; readonly duplicate: true; readonly ageMs: number };
-export type SendOnceOptions = { readonly again?: boolean; readonly windowMs?: number; readonly now?: () => number; readonly sleep?: (ms: number) => Promise<void> };
+export type SendOnceOptions = {
+  readonly again?: boolean;
+  readonly windowMs?: number;
+  readonly now?: () => number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  // runs fn every ms until the returned stop is called (the claim renewal while send runs)
+  readonly every?: (ms: number, fn: () => void) => () => void;
+};
+const realEvery = (ms: number, fn: () => void): (() => void) => {
+  const h = setInterval(fn, ms);
+  return () => clearInterval(h);
+};
 
 const code = (e: unknown): string | undefined => (e as NodeJS.ErrnoException | undefined)?.code;
 const ignoreMissing = (e: unknown): void => {
@@ -85,15 +98,22 @@ export const sendOnce = async (dir: string, key: string, send: () => Promise<str
       if (code(e) !== "EEXIST") throw e;
     }
     if (fd !== undefined) {
+      const owner = crypto.randomUUID();
       try {
-        writeSync(fd, JSON.stringify({ at: now() }));
+        writeSync(fd, JSON.stringify({ at: now(), owner }));
       } finally {
         closeSync(fd);
       }
+      // only while the claim is still this sender's own and unfinished: one taken over is never written back
+      const stop = (opts.every ?? realEvery)(RENEW_MS, () => {
+        const m = readMark(path);
+        if (m && m.id === undefined && m.owner === owner) writeMark(path, { at: now(), owner });
+      });
       let id: string;
       try {
         id = await send();
       } catch (e) {
+        stop();
         try {
           unlinkSync(path);
         } catch (u) {
@@ -101,6 +121,7 @@ export const sendOnce = async (dir: string, key: string, send: () => Promise<str
         }
         throw e;
       }
+      stop();
       writeMark(path, { at: now(), id });
       return { id, duplicate: false };
     }

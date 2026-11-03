@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { run } from "../src/run.ts";
+import { sendOnce } from "../src/send-dedupe.ts";
 import { withState } from "./fakes.ts";
 
 test("Discord CLI enables typing by default, skips it on request, and leaves edits alone", async () => {
@@ -318,6 +319,7 @@ const fakeSlack = () => {
       if (path === "/api/files.completeUploadExternal") return Response.json({ ok: true, files: body.files });
       if (path === "/api/chat.postMessage") return Response.json({ ok: true, channel: body.channel, ts: "1700000100.000100" });
       if (path === "/api/reactions.remove") return Response.json({ ok: true });
+      if (path === "/api/files.info") return Response.json({ ok: true, file: { shares: { public: { C1: [{ ts: "1700000200.000200" }] } } } });
       return Response.json({ ok: false, error: "unknown_method" });
     },
   });
@@ -349,15 +351,19 @@ test("send slack --file uploads every file to its own URL, then shares them as o
         { path: "/api/reactions.remove", body: { channel: "C1", timestamp: "1700000000.000001", name: "eyes" } },
       ],
     });
+    // the thread is the Dori's own now, as after a post, so an untagged reply there wakes the lead
+    expect(JSON.parse(readFileSync(join(state.dir, "slack-threads.json"), "utf8")).map((t: { channel: string; rootTs: string }) => [t.channel, t.rootTs])).toEqual([["C1", "1700000000.000001"]]);
     // the same files and text again within 10 minutes are not shared twice
     const again = await slackCli(state.dir, server.port, args);
     expect({ code: again.code, duplicate: again.out.startsWith("SEND_DUPLICATE F1,F2"), calls: calls.length }).toEqual({ code: 0, duplicate: true, calls: 6 });
     // a file alone needs no text, and a text-only send still posts a message
     const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
     const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--text", "글만"]);
-    expect({ bare: bare.out, share: calls[8]?.body, text: text.out, post: calls.at(-1) }).toEqual({
-      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", post: { path: "/api/chat.postMessage", body: { channel: "C1", text: "글만" } },
+    expect({ bare: bare.out, share: calls[8]?.body, info: calls[9], text: text.out, post: calls.at(-1) }).toEqual({
+      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, info: { path: "/api/files.info", body: { file: "F3" } }, text: "SENT 1700000100.000100", post: { path: "/api/chat.postMessage", body: { channel: "C1", text: "글만" } },
     });
+    // the share in the channel is recorded under its own ts, which files.info named
+    expect(JSON.parse(readFileSync(join(state.dir, "slack-threads.json"), "utf8")).some((t: { rootTs: string }) => t.rootTs === "1700000200.000200")).toBe(true);
   } finally {
     server.stop(true);
     state.done();
@@ -389,9 +395,41 @@ test("send --file refuses a missing, empty, too big or non-regular file, more th
       const r = await slackCli(state.dir, server.port, args);
       got.push({ code: r.code, line: r.err.split(" ")[0] });
     }
-    expect({ got, calls }).toEqual({ got: cases.map(([line]) => ({ code: 2, line })), calls: [] });
+    // text with a $( is refused before any file goes out, as for a text post
+    const unsafe = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", ok, "--text", "deck $(whoami)"]);
+    expect({ got, unsafe: unsafe.code !== 0 && !unsafe.out.includes("SENT"), calls }).toEqual({ got: cases.map(([line]) => ({ code: 2, line })), unsafe: true, calls: [] });
   } finally {
     server.stop(true);
+    state.done();
+  }
+});
+
+test("a send still at work after the pending minute (a big upload) renews its own claim, so the same send started then waits and does not send again", async () => {
+  const state = withState();
+  try {
+    let t = 0;
+    const ticks = new Set<() => void>();
+    const every = (_ms: number, fn: () => void) => {
+      ticks.add(fn);
+      return () => ticks.delete(fn);
+    };
+    let finish: (id: string) => void = () => {};
+    let sends = 0;
+    const first = sendOnce(state.dir, "k", () => {
+      sends++;
+      return new Promise<string>((r) => (finish = r));
+    }, { now: () => t, every });
+    // 61 s of upload, the claim renewed on the way
+    for (const at of [20_000, 40_000, 61_000]) {
+      t = at;
+      for (const f of ticks) f();
+    }
+    const second = sendOnce(state.dir, "k", async () => {
+      sends++;
+      return "second";
+    }, { now: () => t, every, sleep: async () => finish("first") });
+    expect({ first: await first, second: await second, sends, renewing: ticks.size }).toEqual({ first: { id: "first", duplicate: false }, second: { id: "first", duplicate: true, ageMs: 0 }, sends: 1, renewing: 0 });
+  } finally {
     state.done();
   }
 });

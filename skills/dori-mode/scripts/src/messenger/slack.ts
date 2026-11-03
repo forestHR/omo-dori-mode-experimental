@@ -47,8 +47,12 @@ export class Slack {
   }
 
   // Every file gets its own upload URL and bytes, then one completeUploadExternal shares them all as one message, with
-  // the comment as its text (initial_comment) and in the thread when threadTs is given. Returns the file ids in order.
-  async upload(channel: string, files: readonly UploadFile[], threadTs?: string, comment?: string): Promise<string[]> {
+  // the comment as its text (initial_comment) and in the thread when threadTs is given. The comment is checked before
+  // any request. Returns the file ids in order and the share's ts. The share is recorded in the thread ledger like a
+  // post, so a reply under it wakes the lead: in a thread that thread; in the channel the share's own ts, which the
+  // complete call does not name, so files.info is asked until it lists the share (untracked says why it could not).
+  async upload(channel: string, files: readonly UploadFile[], threadTs?: string, comment?: string): Promise<{ ids: string[]; ts?: string; untracked?: string }> {
+    const text = comment ? guardText(comment) : undefined;
     const done: { id: string; title: string }[] = [];
     for (const f of files) {
       const slot = await this.call("files.getUploadURLExternal", { filename: f.filename, length: f.length });
@@ -56,8 +60,33 @@ export class Slack {
       if (put.status !== 200) throw new MessengerError(`slack upload ${f.filename}: ${put.status}`, put.status);
       done.push({ id: String(slot.file_id), title: f.title ?? f.filename });
     }
-    await this.call("files.completeUploadExternal", { files: done, channel_id: channel, ...(threadTs ? { thread_ts: threadTs } : {}), ...(comment ? { initial_comment: guardText(comment) } : {}) });
-    return done.map((f) => f.id);
+    await this.call("files.completeUploadExternal", { files: done, channel_id: channel, ...(threadTs ? { thread_ts: threadTs } : {}), ...(text ? { initial_comment: text } : {}) });
+    const ids = done.map((f) => f.id);
+    if (threadTs) {
+      await this.ledger?.record(channel, threadTs, (this.clock.now() / 1000).toFixed(6));
+      return { ids };
+    }
+    let ts: string | undefined;
+    try {
+      ts = await this.shareTs(ids[0] ?? "", channel);
+    } catch (e) {
+      if (!(e instanceof MessengerError)) throw e;
+      return { ids, untracked: e.message };
+    }
+    if (!ts) return { ids, untracked: `slack files.info listed no share of ${ids[0]} in ${channel} yet` };
+    await this.ledger?.record(channel, ts, ts);
+    return { ids, ts };
+  }
+
+  // the ts of a file's share in a channel (public or private), once Slack has posted it; tries times, a second apart
+  async shareTs(fileId: string, channel: string, tries = 4): Promise<string | undefined> {
+    for (let i = 0; i < tries; i++) {
+      if (i) await this.clock.sleep(1000);
+      const shares = ((await this.call("files.info", { file: fileId })).file as { shares?: Record<string, Record<string, { ts?: string }[]>> } | undefined)?.shares;
+      const ts = shares?.public?.[channel]?.[0]?.ts ?? shares?.private?.[channel]?.[0]?.ts;
+      if (ts) return ts;
+    }
+    return undefined;
   }
 
   async setPresence(presence: "auto" | "away"): Promise<void> {

@@ -1701,10 +1701,11 @@ try {
           let posted: { channel: string; ts: string } | undefined;
           if (uploads.length)
             await once(async () => {
-              const ids = await slack.upload(to, uploads, thread, text || undefined);
-              // completeUploadExternal names no message ts; the share is newer than every message before this moment
-              posted = { channel: to, ts: (Date.now() / 1000).toFixed(6) };
-              return ids.join(",");
+              const r = await slack.upload(to, uploads, thread, text || undefined);
+              // in a thread the share's ts is not asked for: it is newer than every message before this moment
+              posted = { channel: to, ts: r.ts ?? (Date.now() / 1000).toFixed(6) };
+              if (r.untracked) console.log(`SLACK_THREAD_UNTRACKED ${to}: ${r.untracked}; a reply under these files wakes the lead only when it mentions the Dori`);
+              return r.ids.join(",");
             });
           else await once(async () => (posted = await slack.post(to, text, thread)).ts);
           // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off

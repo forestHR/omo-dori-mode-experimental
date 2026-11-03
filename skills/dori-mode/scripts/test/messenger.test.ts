@@ -69,11 +69,30 @@ test("a Slack upload asks for an upload URL per file, sends the bytes there, the
   });
   const file = (filename: string, bytes: number[]) => ({ filename, length: bytes.length, read: async () => new Uint8Array(bytes) });
   const files = [file("report.png", [1, 2, 3]), file("deck.pdf", [4])];
-  const ids = await new Slack(http, sleeps().clock, { token: "t" }).upload("C1", files, "5.6", "the deck");
-  expect(ids).toEqual(["F1", "F2"]);
+  const r = await new Slack(http, sleeps().clock, { token: "t" }).upload("C1", files, "5.6", "the deck");
+  expect(r).toEqual({ ids: ["F1", "F2"] });
   expect(seen.map((r) => r.url.split("/").pop())).toEqual(["files.getUploadURLExternal", "1", "files.getUploadURLExternal", "2", "files.completeUploadExternal"]);
   expect(JSON.parse(String(seen[2]?.body))).toEqual({ filename: "deck.pdf", length: 1 });
   expect(JSON.parse(String(seen[4]?.body))).toEqual({ files: [{ id: "F1", title: "report.png" }, { id: "F2", title: "deck.pdf" }], channel_id: "C1", thread_ts: "5.6", initial_comment: "the deck" });
+});
+
+test("a Slack share in the channel asks files.info, a second apart, until it lists the share's ts; without files:read it says why it is untracked", async () => {
+  const file = { filename: "a.pdf", length: 1, read: async () => new Uint8Array([1]) };
+  const slot = (req: HttpRequest) => (req.url.endsWith("files.getUploadURLExternal") ? ok({ ok: true, upload_url: "https://files.example/up/1", file_id: "F1" }) : req.url.startsWith("https://files.example") ? { status: 200, headers: {}, body: "OK" } : undefined);
+  let infos = 0;
+  const listed = fakeHttp((req) => slot(req) ?? (req.url.endsWith("files.info") ? ok({ ok: true, file: { shares: ++infos < 3 ? {} : { private: { C1: [{ ts: "9.1" }] } } } }) : ok({ ok: true })));
+  const { clock, waited } = sleeps();
+  expect(await new Slack(listed.http, clock, { token: "t" }).upload("C1", [file])).toEqual({ ids: ["F1"], ts: "9.1" });
+  expect([infos, waited]).toEqual([3, [1000, 1000]]);
+  const scopeless = fakeHttp((req) => slot(req) ?? (req.url.endsWith("files.info") ? ok({ ok: false, error: "missing_scope" }) : ok({ ok: true })));
+  expect(await new Slack(scopeless.http, sleeps().clock, { token: "t" }).upload("C1", [file])).toEqual({ ids: ["F1"], untracked: "slack files.info: missing_scope" });
+});
+
+test("a Slack upload whose text carries a $( substitution is refused before any file goes out", async () => {
+  const { http, seen } = fakeHttp(() => ok({ ok: true }));
+  const file = { filename: "a.pdf", length: 1, read: async () => new Uint8Array([1]) };
+  await expect(new Slack(http, sleeps().clock, { token: "t" }).upload("C1", [file], undefined, "deck $(whoami)")).rejects.toBeInstanceOf(UnsafeMessageError);
+  expect(seen).toHaveLength(0);
 });
 
 test("a Telegram reply starts as Thinking…, streams drafts no faster than the interval, then persists as a real message", async () => {

@@ -48,6 +48,7 @@ const fakeSlack = () => {
     fetch: async (req, srv) => {
       const url = new URL(req.url);
       if (url.pathname === "/ws") return srv.upgrade(req) ? undefined : new Response("no", { status: 400 });
+      if (url.pathname === "/up") return new Response("OK");
       const method = url.pathname.replace("/api/", "");
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       calls.push({ method, auth: req.headers.get("authorization") ?? "", body });
@@ -64,6 +65,9 @@ const fakeSlack = () => {
       }
       if (method === "users.info") return reply({ user: { profile: { display_name: `name-${String(body.user)}` } } });
       if (method === "chat.postMessage") return reply({ channel: body.channel, ts: "1700000100.000100" });
+      if (method === "files.getUploadURLExternal") return reply({ upload_url: `http://localhost:${port}/up`, file_id: "F1" });
+      if (method === "files.completeUploadExternal") return reply({ files: body.files });
+      if (method === "files.info") return reply({ file: { shares: { public: { C1: [{ ts: "1700000100.000900" }] } } } });
       if (method === "reactions.add" && failing.reactStall) return new Promise<Response>(() => {});
       if (method === "reactions.add" && failing.reactHold) return new Promise<Response>((r) => held.add.push(() => r(reply({}))));
       const unreact = failing.unreactBy[String(body.timestamp)] ?? failing.unreact;
@@ -280,6 +284,23 @@ test("answering with dori send slack takes the watcher's eyes off the messages i
   expect(unreacted(slack).length).toBe(3);
   await send(w, slack, ["--to", "C1", "--thread", "1700000000.000300", "--text", "b 답"]);
   expect(unreacted(slack).at(-1)).toBe("C1 1700000000.000300 eyes bot");
+});
+
+test("files the Dori shares are its own thread like a post: an untagged reply under them, in the channel or in the thread they answered, wakes the lead", async () => {
+  // Given the lead shares a deck in the channel and again in a thread, through dori send slack --file
+  const slack = fakeSlack();
+  const w = await watcher(slack);
+  const deck = join(dirname(w.o.threads), "deck.pdf");
+  writeFileSync(deck, "pdf");
+  const top = await send(w, slack, ["--to", "C1", "--file", deck, "--text", "발표자료"]);
+  const th = await send(w, slack, ["--to", "C1", "--thread", "1700000000.000700", "--file", deck]);
+  expect([top.code, top.out.trim(), th.code, th.out.trim()]).toEqual([0, "SENT F1", 0, "SENT F1"]);
+  // When people answer under each share without tagging the Dori
+  slack.event({ type: "message", channel: "C1", user: "UGUEST", text: "고마워", ts: "1700000100.000950", thread_ts: "1700000100.000900" });
+  slack.event({ type: "message", channel: "C1", user: "UGUEST", text: "이것도 봐 줘", ts: "1700000100.000960", thread_ts: "1700000000.000700" });
+  await slack.until("two own-thread SLACK_MSG lines", () => w.msgs().length === 2);
+  // Then both wake the lead as replies in its own thread
+  expect(w.rows().map((r) => [r.id, r.addressed])).toEqual([["1700000100.000950", "own-thread"], ["1700000100.000960", "own-thread"]]);
 });
 
 test("an answer in the channel itself, with no thread, takes the eyes off the channel's earlier messages, not those inside a thread", async () => {
