@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
 import { captureTmux, listAoePanes, liveSessions, paneLife, QUESTION_MARK, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
@@ -123,24 +122,6 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
 export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || isOmoExecutable(config.agentCommand[0] ?? "");
 export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
 
-// The refused text dori left armed in omo (submit.ts PaneKeys.armed): one file per pane, <stateDir>/submit-armed/<pane>,
-// written whole to a temporary file and renamed into place, so dori runs typing into other panes at the same time never
-// overwrite it and a reader never sees half of it
-export const armedStore = (stateDir: string, pane: string): NonNullable<PaneKeys["armed"]> => {
-  const dir = join(stateDir, "submit-armed");
-  const file = join(dir, encodeURIComponent(pane));
-  return {
-    get: () => (existsSync(file) ? readFileSync(file, "utf8") : undefined),
-    set: (text) => {
-      if (text === undefined) return rmSync(file, { force: true });
-      mkdirSync(dir, { recursive: true });
-      const tmp = `${file}.${process.pid}.tmp`;
-      writeFileSync(tmp, text);
-      renameSync(tmp, file);
-    },
-  };
-};
-
 export type TypeOptions = { readonly asText?: boolean };
 
 const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string, opts: TypeOptions = {}): PaneKeys => {
@@ -160,7 +141,7 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
       read: () => readScreen(run, config.backend, pane),
     };
   const send = (part: string) => run(herdr ? ["herdr", "pane", "send-text", pane, part] : ["tmux", "send-keys", "-t", target(pane), "-l", "--", part]);
-  const KEYS = { enter: ["enter", "Enter"], clear: ["ctrl+u", "C-u"], escape: ["esc", "Escape"] } as const;
+  const KEYS = { enter: ["enter", "Enter"], clear: ["ctrl+u", "C-u"] } as const;
   const key = (name: keyof typeof KEYS) => run(herdr ? ["herdr", "pane", "send-keys", pane, KEYS[name][0]] : ["tmux", "send-keys", "-t", target(pane), KEYS[name][1]]);
   const where = herdr ? `herdr pane ${pane}` : `tmux session ${pane}`;
   return {
@@ -179,8 +160,6 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
     enter: async () => { await key("enter"); },
     read: () => captureTmux(run, pane),
     clear: async () => { await key("clear"); },
-    escape: async () => { await key("escape"); },
-    armed: armedStore(config.stateDir, pane),
     sendRefusedAsText: opts.asText,
     delivered: transcriptCheck(run, clock, config.sessionsDir, pane, text),
     runsOmoCommands: true,
