@@ -9,6 +9,7 @@ import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
 import { isHerdrPane } from "./herdr.ts";
 import { reviveHerdr } from "./herdr-sessions.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
+import { CheckpointError, Checkpoints } from "./checkpoints.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
@@ -174,6 +175,11 @@ const USAGE = `dori <command> [options]
                                        (NAME=VALUE for a lane, --unset=NAME for a --use-gpu lane or any other session;
                                        nothing without launchEnv); used by setups/discord-aoe/self-restart.sh
   sync   [--write]                     registry vs live panes; read-only unless --write; a SIGNALS line per open lane with a record
+  checkpoint <key> --step ID --result TEXT --evidence PATH [--remote-effect RECEIPT]...
+                                       record a finished step in <stateDir>/lane-state/<key>/checkpoints.jsonl (locked);
+                                       the same step again with the same data is a no-op, with other data it is refused;
+                                       one --remote-effect per receipt (a push, a merge), each recorded under one step only
+  checkpoints <key>                    print the lane's finished steps (JSON); read them before resuming remote work
   claim-done [<key>] --evidence TEXT [--summary TEXT] [--posted ID|LINK] [--post-summary]
                                        key defaults to the lane registered for this pane (the tmux session it runs in, else
                                        $HERDR_PANE_ID); --summary: 2 to 5 plain lines for the owner's thread in his language.
@@ -539,6 +545,7 @@ const flags = parseArgs({
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
+    step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
     "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
   },
 });
@@ -2155,6 +2162,22 @@ try {
       if (r.failed) process.exit(1);
       break;
     }
+    case "checkpoint": {
+      const target = await lane(key ?? die("checkpoint needs a lane key"));
+      // parseArgs takes one value per flag; a second bare receipt would otherwise be dropped and its effect repeated later.
+      const stray = flags.positionals.slice(1);
+      if (stray.length) die(`checkpoint: unexpected argument ${stray[0]}; give each receipt its own --remote-effect`);
+      const result = new Checkpoints(config.stateDir).write(target.key, {
+        step: need("step"), result: need("result"), evidence: [need("evidence")], remoteEffects: many("remote-effect"),
+      }, realClock.now());
+      console.log(JSON.stringify(result));
+      break;
+    }
+    case "checkpoints": {
+      if (!key || !(await deps.registry.read(key))) die("checkpoints needs a registered lane key");
+      console.log(JSON.stringify(new Checkpoints(config.stateDir).read(key ?? ""), null, 2));
+      break;
+    }
     case "transcribe":
       console.log(await transcribe(run, config.hooks.transcribe, key ?? die("transcribe needs an audio file path")));
       break;
@@ -2163,6 +2186,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError) die(e.message);
+  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError) die(e.message);
   throw e;
 }

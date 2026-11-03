@@ -173,6 +173,7 @@ Done = command ["bun","test"] stdout~" 0 fail"; file qa/report.json json:.passed
 | `dori dead-panes [--loop MIN]` | 报告已停止的智能体 pane |
 | `dori guard [--loop MIN]` | 负载、内存、磁盘和 pane 数量告警 |
 | `dori fix-attempt <key> --metric M --hypothesis H` | 记一次你让 lane 做的修复;lane 在这类汇报里加 `(fix: M / H)`,同一指标、同一假设到第三次时,`SAME_FIX_3` 提醒你让 lane 转去查根因;记录之前先列出该指标上已经试过的假设(`PRIOR_FIX`) |
+| `dori checkpoint <key> --step ID --result TEXT --evidence PATH [--remote-effect RECEIPT]...` / `dori checkpoints <key>` | lane 把完成的每一步记一次，连同它做过的远程操作(push、merge)的回执，恢复前先读回来，重启的 lane 不会重复 push 或 merge;同一步写入不同内容，或写入另一步已有的回执，会被拒绝 |
 | `dori signals [--lane K \| --cwd DIR \| --tag T]` | 同一工作领域里以前的 lane 试过什么、结果如何:编号的修复尝试和转去查根因的时刻(也从 `[REPORT]` 行和 lead 的重新指示里读取)、按指标的标记修复、带理由的完成声明驳回、重发和催促次数、结果、该领域的驳回率和返工、警告。重新指示 lane 之前先看它 |
 | `dori scorecard [--date D] [--post]` | 只用记录算出的每日 token 成绩单(不调用模型):每个验证完成的成本和完成声明的驳回率并排，返工最多的 lane、首次回复中位数/p90、lead 的上下文税;保存到 `<stateDir>/scorecard/<日期>.json` 和 `latest.md` 供 lead 查看,`--post` 也发到 Discord(默认关闭;每天保存的 systemd timer 在 Discord + aoe 配置里) |
 | `dori heavy <label> [--mem 70G] -- <cmd>` | 负载低时在带内存上限的独立 scope 中运行构建、测试或 GPU 任务(超出时只停该任务,lane 不受影响);已有任务在跑时,只有 GPU、内存、CPU 各自仍剩 10% 以上才同时运行 |

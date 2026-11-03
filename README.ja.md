@@ -173,6 +173,7 @@ watcher はレーンを閉じるときに、シェルを通さずこの確認を
 | `dori dead-panes [--loop MIN]` | 止まったエージェントの pane を報告 |
 | `dori guard [--loop MIN]` | 負荷、メモリ、ディスク、pane 数の警告 |
 | `dori fix-attempt <key> --metric M --hypothesis H` | レーンに頼んだ修正を 1 回数える。レーンはそうした報告に `(fix: M / H)` を付け、同じ指標・同じ仮説で 3 回目になると `SAME_FIX_3` が根本原因の調査に切り替えるよう知らせる。記録の前に、その指標で既に試した仮説(`PRIOR_FIX`)を表示する |
+| `dori checkpoint <key> --step ID --result TEXT --evidence PATH [--remote-effect RECEIPT]...` / `dori checkpoints <key>` | レーンが終えた手順を一度ずつ、行ったリモート操作(push、merge)の受領記録とともに書き、再開前に読み戻す。再起動したレーンが push や merge を繰り返さない。同じ手順を別の内容で書くか、別の手順が既に持つ受領記録を書くと拒否 |
 | `dori signals [--lane K \| --cwd DIR \| --tag T]` | ある作業領域で過去のレーンが何を試し、どうなったか: 番号付きの修正試行と根本原因調査への切り替え(`[REPORT]` 行とリードの再指示からも読む)、指標ごとのタグ付き修正、理由付きの完了申告の却下、再送・催促の数、結果、領域の却下率・手戻り、警告。レーンに再指示する前に読む |
 | `dori scorecard [--date D] [--post]` | 記録だけから出す 1 日のトークン成績表(モデル呼び出しなし): 検証済み完了あたりのコストと完了申告の却下率を並べて、手戻りの多いレーン上位、最初の返信の中央値/p90、リードのコンテキスト税。リードが読むため `<stateDir>/scorecard/<日付>.json` と `latest.md` に保存、`--post` で Discord にも送る(既定はオフ。毎日保存する systemd timer は Discord + aoe セットアップにある) |
 | `dori heavy <label> [--mem 70G] -- <cmd>` | 負荷が低いときにビルド・テスト・GPU ジョブをメモリ上限付きの専用 scope で実行（超えたらそのジョブだけ止まり、レーンは残る）。実行中のジョブがあれば GPU・メモリ・CPU がそれぞれ 10% 以上残るときだけ同時に実行 |
