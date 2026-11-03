@@ -119,6 +119,7 @@ Not in `dori.env`; the wrapper, a unit or dori itself sets these for one run:
 | `DORI_LEAD_PANE` | unit | Overrides `leadPane` |
 | `DORI_DISCORD_SHADOW_INBOX` | a shadow listener | See [Switching an existing listener over](#switching-an-existing-listener-over) |
 | `DORI_CLOSING_LANE`, `DORI_HANDOVER_DETACHED` | dori, for its own child processes | Internal; never set them by hand |
+| `DORI_HANDOVER_AUTO_GRANT` | `dori freshness`, for the handover it starts | Internal: the token of a one-use grant under `<stateDir>/handover/auto-grants/`; an `auto:` approval holds only with it, so it cannot be set by hand |
 
 ### config.json
 

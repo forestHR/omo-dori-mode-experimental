@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 
 import { ackHandover, handover, type HandoverDeps, launchOf, manifestPath, missingMonitors } from "../src/handover.ts";
-import { quietReason, readRollovers, appendRollover } from "../src/rollover.ts";
+import { quietReason, readRollovers, appendRollover, mintAutoGrant } from "../src/rollover.ts";
 import { readFrozen } from "../src/frozen.ts";
 import { QuestionStore } from "../src/messenger/discord-cards.ts";
 import type { Lane } from "../src/registry.ts";
@@ -726,10 +726,18 @@ test("an automatic lead rollover tells the owner afterwards with what it crossed
   const off: HandoverDeps = { ...base, reportOwner: async (_thread, text) => { posted.push(text); return "msg-9"; } };
   const on: HandoverDeps = { ...off, config: { ...off.config, handover: { ...off.config.handover, autoRolloverLead: true } } };
   // When
-  const refused = await handover(off, { approvedBy: "auto:handover.autoRolloverLead", title: "lead2" });
-  const r = await handover(on, { approvedBy: "auto:handover.autoRolloverLead", title: "lead2" });
+  const grant = () => mintAutoGrant(state.dir, "lead", "lead", base.clock.now());
+  const refused = await handover(off, { approvedBy: "auto:handover.autoRolloverLead", autoGrant: grant(), title: "lead2" });
+  // typed by hand with the key on (the string alone): refused with what to use, and not logged as an automatic run
+  const rowsBefore = readRollovers(state.dir).length;
+  const byHand = await handover(on, { approvedBy: "auto:handover.autoRolloverLead", title: "lead2" });
+  const handRows = readRollovers(state.dir).length - rowsBefore;
+  const r = await handover(on, { approvedBy: "auto:handover.autoRolloverLead", autoGrant: grant(), title: "lead2" });
   // Then
   expect(refused.code).toBe(2);
+  expect(byHand.code).toBe(2);
+  expect(printed.find((l) => l.includes("HANDOVER_APPROVAL"))).toStartWith("HANDOVER_REFUSED the lead moves to a new session only with an approval: HANDOVER_APPROVAL auto:handover.autoRolloverLead is the approval of a run freshness starts by itself");
+  expect(handRows).toBe(0);
   expect(r).toMatchObject({ code: 0, to: NEW });
   expect(posted).toHaveLength(1);
   // the owner's notice says how long the old session is kept, with no pane, arrow or key; the thaw command is in the watch log

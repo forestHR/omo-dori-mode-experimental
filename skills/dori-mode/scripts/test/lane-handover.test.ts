@@ -1,15 +1,15 @@
 // allow: SIZE_OK - existing shared handover simulation; the new assertion checks one OS stop per agent.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { pauseLane } from "../src/done-flow.ts";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { autoReadyLine, freshnessTick, resumeArgs } from "../src/freshness.ts";
 import { closeDueFrozen, readFrozen } from "../src/frozen.ts";
 import { ackHandover, manifestPath } from "../src/handover.ts";
-import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
-import { appendRollover, approvalProblem, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
+import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, type LaneHandoverOptions, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
+import { appendRollover, approvalProblem, AUTO_GRANT_MS, mintAutoGrant, takeAutoGrant, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
 import { stuckTop, stuckView } from "../src/explore.ts";
 import { recordFix } from "../src/same-fix.ts";
 import { QuestionStore } from "../src/messenger/discord-cards.ts";
@@ -754,7 +754,7 @@ test("an approval is an answered rollover card for this lane's current session, 
   // a link holds only for a message the inbox has from the owner
   const inbox = join(mkdtempSync(join(tmpdir(), "dori-approval-")), "inbox.jsonl");
   writeFileSync(inbox, [{ id: "3", channel_id: "2", author_id: OWNER, content: "roll it over" }, { id: "4", channel_id: "2", author_id: "999", content: "roll it over" }].map((x) => JSON.stringify(x)).join("\n"));
-  const check = (ref: string | undefined, on = false, canReport = false) => approvalProblem(ref, card, { on, key: "handover.autoRolloverLanes" }, "demo", "p1", log, canReport, inboxMessages(inbox, [OWNER]));
+  const check = (ref: string | undefined, on = false, canReport = false, granted = false) => approvalProblem(ref, card, { on, key: "handover.autoRolloverLanes", granted }, "demo", "p1", log, canReport, inboxMessages(inbox, [OWNER]));
   // When / Then
   expect(check("Q1")).toBeUndefined();
   expect(check("q1")).toBeUndefined();
@@ -770,9 +770,12 @@ test("an approval is an answered rollover card for this lane's current session, 
   expect(check("https://discord.com/channels/1/9/3")).toContain("is in channel 2 in the inbox, not in 9");
   for (const words of ["not approved", "owner said yes", "https://discord.com/channels/1/2", "https://example.com/channels/1/2/3"]) expect(check(words)).toContain("neither an answered rollover card");
   expect(check(undefined)).toStartWith("no approval");
-  expect(check("auto:handover.autoRolloverLanes")).toContain("the automation key is off");
-  expect(check("auto:handover.autoRolloverLanes", true)).toContain("an automatic rollover needs a way to tell the owner afterwards");
-  expect(check("auto:handover.autoRolloverLanes", true, true)).toBeUndefined();
+  // the automatic string holds only with the grant of a run freshness started; typed by hand it is refused and says what to use
+  expect(check("auto:handover.autoRolloverLanes", true, true)).toStartWith("HANDOVER_APPROVAL auto:handover.autoRolloverLanes is the approval of a run freshness starts by itself");
+  expect(check("auto:handover.autoRolloverLanes", true, true)).toContain('--approved-by "lead:<reason and the signal behind it>" or "lead:<reason>, owner <link of the owner\'s message that asked for it>"');
+  expect(check("auto:handover.autoRolloverLanes", false, false, true)).toContain("the automation key is off");
+  expect(check("auto:handover.autoRolloverLanes", true, false, true)).toContain("an automatic rollover needs a way to tell the owner afterwards");
+  expect(check("auto:handover.autoRolloverLanes", true, true, true)).toBeUndefined();
   expect(check("auto:anything", true)).toBe("auto:anything is not the automatic approval of this side; only auto:handover.autoRolloverLanes is");
   // the lead decides with a reason and the signal behind it, and only when the owner can be told afterwards
   expect(check("lead:STUCK rung 4 on loss, research did not help", false, true)).toBeUndefined();
@@ -785,6 +788,68 @@ test("an approval is an answered rollover card for this lane's current session, 
   expect(check("lead:\ub2e8\uacc4\ub97c \ud310\ub2e8\ud574 \ubcf4\ub2c8 \uc62e\uae38 \ub54c", false, true)).toContain("does not say the reason");
   expect(check("lead:after the outage 3 h ago it looked off", false, true)).toContain("does not say the reason");
   expect(check("lead:context 85% after 6 compactions", false, true)).toBeUndefined();
+});
+
+test("auto approval borrowing: a hand-run that passes auto:handover.autoRolloverLanes is refused with HANDOVER_APPROVAL, logs no rollover row and opens nothing; the run given freshness's grant moves the lane", async () => {
+  // Given: OkDori herdr-qa (05:09Z) and GongDori e7-beyond-eth (05:50Z, 25 s after an owner link was refused) on 2026-11-03,
+  // hand-runs with the automatic string while the key was on
+  const base = await setup();
+  const deps: LaneHandoverDeps = { ...base, config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } }, reportOwner: async () => "msg-1" };
+  ready(deps, [15]);
+  // When: by hand, with a made-up grant, then as freshness starts it
+  const byHand = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO });
+  const madeUp = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, autoGrant: "0".repeat(32) });
+  const handLines = printed.filter((l) => l.startsWith("HANDOVER_REFUSED demo"));
+  const rows = readRollovers(state.dir).length;
+  const openedByHand = opened();
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
+  // Then
+  expect([byHand.code, madeUp.code]).toEqual([2, 2]);
+  expect(handLines).toHaveLength(2);
+  for (const l of handLines) expect(l).toContain(": HANDOVER_APPROVAL auto:handover.autoRolloverLanes is the approval of a run freshness starts by itself");
+  expect(rows).toBe(0);
+  expect(openedByHand).toBe(false);
+  expect(r.code).toBe(0);
+  expect(printed).toContain(`HANDOVER_COMMITTED demo ${NEW}`);
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", decidedBy: "auto" });
+});
+
+test("an automatic grant is taken once, only for the side and key it was minted for, within AUTO_GRANT_MS", () => {
+  // Given
+  const dir = mkdtempSync(join(tmpdir(), "dori-grant-"));
+  const t0 = Date.parse("2026-11-03T12:00:00Z");
+  const g = mintAutoGrant(dir, "lane", "demo", t0);
+  // When / Then: once, then never again
+  expect(takeAutoGrant(dir, "lane", "demo", g, t0 + 1_000)).toBe(true);
+  expect(takeAutoGrant(dir, "lane", "demo", g, t0 + 2_000)).toBe(false);
+  // another lane's or the lead's grant, a stale one, and anything that is no token hold nothing
+  expect(takeAutoGrant(dir, "lane", "other", mintAutoGrant(dir, "lane", "demo", t0), t0)).toBe(false);
+  expect(takeAutoGrant(dir, "lead", "demo", mintAutoGrant(dir, "lane", "demo", t0), t0)).toBe(false);
+  expect(takeAutoGrant(dir, "lane", "demo", mintAutoGrant(dir, "lane", "demo", t0), t0 + AUTO_GRANT_MS + 1)).toBe(false);
+  for (const bad of [undefined, "", "../../registry", AUTO]) expect(takeAutoGrant(dir, "lane", "demo", bad, t0)).toBe(false);
+  // a grant no run took is dropped by the next mint once stale
+  mintAutoGrant(dir, "lane", "demo", t0);
+  mintAutoGrant(dir, "lane", "demo", t0 + AUTO_GRANT_MS + 1);
+  expect(readdirSync(join(dir, "handover", "auto-grants"))).toHaveLength(1);
+});
+
+test("the ready mark's start again of a lead's refused handover goes through the real handover with the lead's approval and needs no grant", async () => {
+  // Given: a lead's handover refused for the lane's chain 15
+  const base: LaneHandoverDeps = { ...(await setup()), reportOwner: async () => "msg-1" };
+  const LEAD_OK = "lead:STUCK rung 4 on loss after research";
+  await laneHandover(base, "demo", "aoe_lead_x", { approvedBy: LEAD_OK });
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "refused", blocked: "work" });
+  ready(base, [15], new Date(base.clock.now() + 1_000).toISOString());
+  // When: freshness starts it again, the hook running the real lane handover with what it is given
+  const codes: number[] = [];
+  await freshnessTick(base, "/home/test", { signals: async () => ({}), alive: () => false, resume: async (key, approvedBy, request) => {
+    codes.push((await laneHandover(base, key, "aoe_lead_x", { approvedBy, ...request })).code);
+    return { started: true, line: "unit=u" };
+  } });
+  // Then
+  expect(codes).toEqual([0]);
+  expect(printed).toContain(`HANDOVER_COMMITTED demo ${NEW}`);
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", decidedBy: "lead", approvedBy: LEAD_OK });
 });
 
 test("a dry run checks a given approval the same way and says so, writing nothing to the rollover log", async () => {
@@ -1161,7 +1226,7 @@ test("an automatic rollover never moves a lane that watches a training chain: re
   table = [...aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 18, ppid: 11, cmd: WATCH }];
   await deps.registry.patch("demo", { rolloverDue: { pane: OLD, at: "2026-10-11T16:00:00Z", crossed: ["context after compaction 330k >= 300k"], autoAt: "2026-10-11T16:30:00Z", tries: 1 } });
   // When
-  const auto = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  const auto = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
   const byHand = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
   // Then
   expect(auto.code).toBe(2);
@@ -1180,7 +1245,7 @@ test("a lane tagged training is left to the lead as well; ordinary monitors and 
   await deps.registry.patch("demo", { tags: ["rl", "training"] });
   ready(deps, [15]);
   // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
   // Then
   expect(r.code).toBe(2);
   expect(printed[0]).toContain("a training or eval chain (tag training)");
@@ -1209,6 +1274,8 @@ test("a ready mark covers chains only: a turn that started after it still refuse
 });
 
 const AUTO = "auto:handover.autoRolloverLanes";
+// what freshness gives the run it starts (cli.ts auto hook): the automatic approval and a one-use grant for this lane
+const autoRun = (deps: LaneHandoverDeps, extra: Partial<LaneHandoverOptions> = {}, key = "demo"): LaneHandoverOptions => ({ approvedBy: AUTO, autoGrant: mintAutoGrant(deps.config.stateDir, "lane", key, deps.clock.now()), ...extra });
 const BUSY = `${HIGH}\n • Working (esc to interrupt)`;
 
 test("an automatic start waits for the lane's idle moment and freezes it right then, before the new session opens; a turn that slips in is thawed and waited for again", async () => {
@@ -1233,7 +1300,7 @@ test("an automatic start waits for the lane's idle moment and freezes it right t
   table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
   w.screens[OLD] = BUSY;
   // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   // Then
   expect(r.code).toBe(0);
   expect(printed.filter((l) => l.startsWith("HANDOVER_WAIT_IDLE demo"))).toHaveLength(1);
@@ -1257,11 +1324,11 @@ test("an automatic start whose lane stays busy for the whole wait is refused as 
   table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
   w.screens[OLD] = BUSY;
   // When
-  const busy = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  const busy = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   const waited = sleeps;
   table = aoeTable();
   w.screens[OLD] = HIGH;
-  const work = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  const work = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   // Then
   expect([busy.code, work.code]).toEqual([2, 2]);
   expect(waited).toBe(400);
@@ -1317,7 +1384,7 @@ test("busy mark scope: an automatic start stops waiting once only the status lin
   table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
   w.screens[OLD] = BORDER_BUSY;
   // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   // Then
   expect(r.code).toBe(0);
   expect(printed.filter((l) => l.startsWith("HANDOVER_WAIT_IDLE demo"))).toHaveLength(1);
@@ -1648,10 +1715,10 @@ test("an automatic lane rollover tells the owner afterwards with what it crossed
   const base = await setup();
   const deps: LaneHandoverDeps = { ...base, config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } }, reportOwner: async (thread, text) => { posted.push([thread, text]); return "msg-2"; } };
   // When: first with the lane's local chain still running (no ready mark), then at a safe point
-  const refused = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  const refused = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
   const postedAfterRefusal = posted.length;
   ready(deps, [15]);
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
   // Then
   expect(refused.code).toBe(2);
   expect(printed.some((l) => l.startsWith("HANDOVER_REFUSED") && l.includes("would die"))).toBe(true);
@@ -1975,7 +2042,7 @@ test("an automatic start held by the old session's running tasks never moves the
   const hooks = {
     signals: async (pane: string) => (pane === OLD ? { contextPct: 85 } : {}),
     alive: (pid: number) => live.has(pid),
-    auto: async (_who: "lead" | "lane", key: string) => `code ${(await laneHandover(deps, key, "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" })).code}`,
+    auto: async (_who: "lead" | "lane", key: string) => `code ${(await laneHandover(deps, key, "aoe_lead_x", autoRun(deps, {}, key))).code}`,
   };
   const tick = async (min: number): Promise<string[]> => {
     clock.at = T0 + min * 60_000;

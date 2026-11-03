@@ -23,7 +23,7 @@ import { type Lane, statusOf } from "./registry.ts";
 import { iso } from "./run.ts";
 import { descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, ROUND_TRIES, section, seedRestatement, wholeBullet, words } from "./restatement.ts";
-import { appendRollover, approvalProblem, autoReason, type Candidate, clearQuiet, COMMITTED, decidedBy, inboxMessages, LEAD_PREFIX, lastProposal, limitsFor, ownerQuotes, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Signals, sessionSignals, setQuiet, type Step, type Supplement, userLines } from "./rollover.ts";
+import { appendRollover, APPROVAL_BORROWED, approvalProblem, autoReason, type Candidate, clearQuiet, COMMITTED, decidedBy, inboxMessages, LEAD_PREFIX, lastProposal, limitsFor, ownerQuotes, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Signals, sessionSignals, setQuiet, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { turnRunning } from "./submit.ts";
 import { watchLog } from "./watch-log.ts";
 
@@ -58,6 +58,8 @@ export type HandoverDeps = FlowDeps & Pick<FreezeDeps, "procs"> & {
 export type HandoverOptions = {
   // the approval: lead:<reason and signal>, the owner's answered card Qn, a message link or their words (rollover.ts approvalProblem); --dry-run needs none
   readonly approvedBy?: string;
+  // the one-use grant freshness wrote for the run it started (DORI_HANDOVER_AUTO_GRANT): an auto: approval holds only with it
+  readonly autoGrant?: string;
   readonly title?: string;
   readonly model?: string;
   readonly note?: string;
@@ -751,9 +753,10 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
     deps.print(line);
     if (!opts.dryRun) watchLog(config.watchLog, deps.clock, { source: "handover", line });
   };
-  const refuse = (why: string): HandoverResult => {
+  const refuse = (why: string, logged = true): HandoverResult => {
     emit(`HANDOVER_REFUSED ${why}`);
-    if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lead", at, key: "lead", from: config.leadPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why] });
+    // a borrowed auto: string is no automatic run: logged as one, freshness would read it as its own run's result (lastAuto)
+    if (logged && !opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lead", at, key: "lead", from: config.leadPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why] });
     return { code: 2 };
   };
   if (!omoSession(config)) return refuse("dori handover needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
@@ -765,8 +768,8 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
   const lacking = opts.note ? missingHeadings(readFileSync(opts.note, "utf8"), LEAD_SUMMARY_HEADINGS) : [];
   if (lacking.length) return refuse(`the old lead's summary ${opts.note} lacks ${lacking.map((h) => `## ${h}`).join(", ")} (dori handover --template prints the headings)`);
   // a dry run needs no approval, but a given one is checked the same way, so it can be tried before the real run
-  const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLead, key: "handover.autoRolloverLead" }, "lead", config.leadPane, readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox, deps.ownerIds ?? []));
-  if (unapproved) return refuse(`the lead moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
+  const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLead, key: "handover.autoRolloverLead", granted: decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && takeAutoGrant(config.stateDir, "lead", "lead", opts.autoGrant, deps.clock.now()) }, "lead", config.leadPane, readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox, deps.ownerIds ?? []));
+  if (unapproved) return refuse(`the lead moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`, !unapproved.startsWith(APPROVAL_BORROWED));
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
   const old = sessionFor(await liveSessions(deps.run), config.leadPane);
   if (!old) return refuse(`no live session for leadPane ${config.leadPane}`);
