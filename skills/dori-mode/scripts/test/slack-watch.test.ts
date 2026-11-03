@@ -584,6 +584,50 @@ test("--wait starts the watcher once the tokens appear in dori.env", async () =>
   expect(out).not.toContain(APP);
 });
 
+test("a second watcher on the same state dir logs SLACK_WATCH_LOCK_FAIL and exits 1, the first keeps running; a dead watcher's lock is taken over", async () => {
+  // Given one watcher waiting for tokens (it holds the lock while it waits)
+  const slack = fakeSlack();
+  const dir = scratch();
+  const env = { ...process.env, DORI_CONFIG: join(dir, "missing.json"), DORI_STATE_DIR: dir, DORI_ENV_FILE: join(dir, "dori.env"), DORI_SLACK_WAIT_MS: "100" };
+  const first = Bun.spawn(["bun", WATCH, "--wait"], { env, stdout: "pipe" });
+  cleanups.push(() => first.kill());
+  let out = "";
+  (async () => {
+    for await (const chunk of first.stdout) {
+      out += new TextDecoder().decode(chunk);
+      slack.changed();
+    }
+  })();
+  await slack.until("SLACK_WATCH_WAIT", () => out.includes("SLACK_WATCH_WAIT"));
+  // When a second one starts
+  const second = await run(["env", ...Object.entries(env).filter(([k]) => k.startsWith("DORI_")).map(([k, v]) => `${k}=${v}`), "bun", WATCH, "--wait"]);
+  // Then it refuses and the first is untouched
+  expect(second.code).toBe(1);
+  expect(second.out).toContain(`SLACK_WATCH_LOCK_FAIL another slack watcher is running (pid ${first.pid},`);
+  expect(first.exitCode).toBeNull();
+  // Given the first is gone without cleaning up (a kill -9 leaves its lock behind)
+  first.kill(9);
+  await first.exited;
+  expect(existsSync(join(dir, "slack-watch.lock"))).toBe(true);
+  // When a new watcher starts, Then it takes the stale lock and waits as usual
+  const third = Bun.spawn(["bun", WATCH, "--wait"], { env, stdout: "pipe" });
+  cleanups.push(() => third.kill());
+  let out3 = "";
+  (async () => {
+    for await (const chunk of third.stdout) {
+      out3 += new TextDecoder().decode(chunk);
+      slack.changed();
+    }
+  })();
+  await slack.until("third SLACK_WATCH_WAIT", () => out3.includes("SLACK_WATCH_WAIT"));
+  expect(JSON.parse(readFileSync(join(dir, "slack-watch.lock"), "utf8")).pid).toBe(third.pid);
+  // a clean stop removes the lock
+  third.kill("SIGTERM");
+  await third.exited;
+  expect(existsSync(join(dir, "slack-watch.lock"))).toBe(false);
+  slack.server.stop(true);
+});
+
 test("writeEnvValues replaces only the named lines and leaves the file 0600", () => {
   // Given
   const file = join(scratch(), "dori.env");

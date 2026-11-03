@@ -350,6 +350,12 @@ tokens are in `dori.env`, so the monitor can be armed before the owner has insta
   found by a WebSocket ping every 30 s: no frame and no pong since the last one prints `SLACK_WATCH_STALE ...` and
   opens a new one. A connection that cannot be opened is `SLACK_CONNECT_FAIL`, and an `auth.test` that fails at start
   (Slack or the network down) is `SLACK_AUTH_FAIL`; both are retried from 1 s up to every 60 s instead of exiting.
+- **One watcher.** Slack hands each envelope to only one of an app's Socket Mode connections, so a second watcher
+  (another terminal, an old monitor left running) takes messages away from the one the Dori's monitor reads. The
+  watcher holds `<stateDir>/slack-watch.lock` (its pid) from the start, `--wait` included; a second one on the same
+  state dir prints `SLACK_WATCH_LOCK_FAIL another slack watcher is running (pid <pid>, ...)` and exits 1, and a lock left
+  by a dead process is taken over. A watcher on another machine with the same app token splits messages the same way
+  and no lock file sees it: run it on one machine only.
 - **Messages.** A person's message (plain, `thread_broadcast` or `file_share`) becomes one inbox row. Bot messages,
   the app's own, edits and deletes are not taken in. A mention in a channel arrives twice (`app_mention` and
   `message.channels`) and Slack retries an envelope it thinks was lost: each message is taken in once.

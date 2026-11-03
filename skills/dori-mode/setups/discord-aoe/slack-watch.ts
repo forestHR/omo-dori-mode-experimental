@@ -4,7 +4,7 @@
 // (scope "slack"); a DM, a mention of the bot or a reply in a thread the Dori posted in also prints one SLACK_MSG line for
 // the lead's monitor. Replies go out with dori send slack --to <channel> [--thread <ts>] under the bot's name.
 // --wait waits for the tokens instead of exiting; --set-tokens asks for them on the terminal and writes them to dori.env.
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { configPath, envFilePath, loadConfig, loadEnvFile, resolveInstance } from "../../scripts/src/config.ts";
 import { newAttempt, noteUneyed, readUneyed } from "../../scripts/src/messenger/slack.ts";
@@ -334,6 +334,48 @@ export const startWatch = async (o: SlackWatchOptions, log: (line: string) => vo
   );
 };
 
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+// One watcher per state dir. Slack hands each envelope to only one of an app's Socket Mode connections, so a second
+// watcher takes messages away from the one the lead's monitor reads (2026-11-03: three DMs went to a watcher started in
+// a terminal nobody read). Returns why this one may not run, or undefined once the lock is its own; a lock left by a
+// dead process is taken over.
+export const takeWatchLock = (file: string, isAlive: (pid: number) => boolean = alive): string | undefined => {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(file, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { flag: "wx" });
+      return undefined;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+    let held: { pid?: number; at?: string } = {};
+    try {
+      held = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      // a half-written or foreign file: treated as stale below
+    }
+    if (held.pid && held.pid !== process.pid && isAlive(held.pid)) return `another slack watcher is running (pid ${held.pid}, started ${held.at ?? "?"}; ${file})`;
+    rmSync(file, { force: true });
+  }
+  return `could not take the slack watcher lock ${file}`;
+};
+
+const releaseWatchLock = (file: string): void => {
+  try {
+    if ((JSON.parse(readFileSync(file, "utf8")) as { pid?: number }).pid === process.pid) rmSync(file, { force: true });
+  } catch {
+    // already gone or replaced: nothing of ours to remove
+  }
+};
+
 // Replaces (or adds) the given KEY=VALUE lines in an env file and leaves it mode 0600; other lines stay as they were.
 export const writeEnvValues = (path: string, values: Record<string, string>): void => {
   const lines = existsSync(path) ? readFileSync(path, "utf8").replace(/\n$/, "").split("\n") : [];
@@ -398,6 +440,15 @@ if (import.meta.main) {
     console.log(`SLACK_WATCH_OFF ${why}`);
     process.exit(0);
   }
+  // taken before --wait too: two waiting watchers would otherwise both connect once the tokens appear
+  const lock = join(config.stateDir, "slack-watch.lock");
+  const busy = takeWatchLock(lock);
+  if (busy) {
+    log(`SLACK_WATCH_LOCK_FAIL ${busy}: Slack would split messages between the two, so this one exits`);
+    process.exit(1);
+  }
+  process.on("exit", () => releaseWatchLock(lock));
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(0));
   if (why) {
     const every = Number(process.env.DORI_SLACK_WAIT_MS) > 0 ? Number(process.env.DORI_SLACK_WAIT_MS) : 30_000;
     log(`SLACK_WATCH_WAIT ${why}; reading ${envFilePath()} every ${every / 1000}s`);
