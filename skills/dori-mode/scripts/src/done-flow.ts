@@ -22,6 +22,7 @@ import { checkDone, type SignalIo } from "./done-signals.ts";
 import { gateMissing } from "./merge-gate.ts";
 import { ownerSummary } from "./close-summary.ts";
 import { CostRecordBusy, laneSessionUsage, Supervision } from "./supervision.ts";
+import { Lessons, type LessonInput } from "./lessons.ts";
 
 export type FlowDeps = {
   readonly run: Runner;
@@ -340,7 +341,7 @@ export const unpushedWork = async (deps: FlowDeps, lane: Lane): Promise<string[]
 // and archived: no summary is CLOSE_SUMMARY_MISSING, a post that did not go out is CLOSE_SUMMARY_NOT_SENT, and either way
 // nothing is changed and the lane stays open. When the lane's result is already in the thread (posted, else the claim's
 // posted) and no summary is given here, none is posted: CLOSE_SUMMARY_SKIPPED, and the thread is marked as usual.
-export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summary?: string, posted?: string): Promise<{ readonly closed: boolean; readonly lines: string[] }> => {
+export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summary?: string, posted?: string, lesson?: Pick<LessonInput, "rule" | "evidence">): Promise<{ readonly closed: boolean; readonly lines: string[] }> => {
   const exists = deps.exists ?? existsSync;
   const checks = await checkDone(lane.done, deps.run, signalIo(deps, lane));
   const lines = checks.map((c) => `SIGNAL ${c.ok ? "OK " : "NOT"} ${c.signal} -> ${c.detail}`);
@@ -446,6 +447,15 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
   const at = iso(deps.clock);
   const receipt = { checks, note, cleanup };
   await deps.registry.write(withStatus(lane, "closed", note, at, { closedAt: at, receipt }));
+  // dori close --lesson (dori-superagent #65): kept only after the close is recorded, and a failure to keep it is a warning
+  // that never undoes or blocks the close.
+  if (lesson) {
+    try {
+      lines.push(`LESSON ${new Lessons(deps.config.stateDir).add({ ...lesson, lane: lane.key, cwd: root }, deps.clock.now()).id}`);
+    } catch (e) {
+      warnings.push(`LESSON_WARNING ${lane.key}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   // Only now, with this lane recorded closed, is it no longer working there. The thread turns waiting when what is left
   // waits on the owner: an open card or a paused lane. A lane still working keeps it working, and a done-claimed one is
   // still ours (the lead decides), so then the mark is left alone. Read again here, since a card answered during the
