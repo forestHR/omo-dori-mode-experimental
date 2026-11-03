@@ -88,6 +88,8 @@ Work no script can check (a design review, a judgement call) stays in the lane's
 
 **A job that must outlive the lane's session** (a server, a long run the next session watches) starts in a terminal session of its own: `setsid <job>` or `systemd-run --user <job>`. `nohup <job> &`, `<job> & disown` and a job whose parent shell ended stay in the pane's terminal session, and herdr ends that whole session when the pane closes (`dori close`, a handover); a job an eval cell starts stays in the kernel's session, which ends with the agent. omo's bash tool ends what is left in its process group when the command returns, so a plain `<job> &` there does not even outlive the command. A lane handover counts such a job as a local chain: it waits for the lane's ready mark and tells the new session to restart it (rollover.md, "Local chain").
 
+**When the lane is moved to a new session while it works,** it gets one `[LEAD] The lead moves <key> to a new session, but the lane is busy (...)` line (or `An automatic rollover of <key> ...`). At its next safe point it writes the conversation summary, runs `dori handover ready <key> --note <file>` and ends its turn; the move then happens by itself at the idle moment, nobody runs it again (rollover.md, step 3).
+
 ## Repeated fixes
 
 Fixing the same symptom again and again on the same idea burns tokens without moving. A lane tags a report that is a fix attempt with `(fix: <metric> / <hypothesis>)`, e.g. `[REPORT] e7 | milestone | raised the reward again (fix: deadlock count / reward too small)`. When you re-instruct a lane to fix something, record it yourself:

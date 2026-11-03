@@ -1,7 +1,7 @@
 // allow: SIZE_OK - existing shared handover simulation; the new assertion checks one OS stop per agent.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { pauseLane } from "../src/done-flow.ts";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -543,7 +543,8 @@ test("a paused lane gets no rollover proposal, and pausing does not make it safe
   expect(due.filter((a) => a.lane === "demo")).toEqual([]);
   expect([chain.code, turn.code]).toEqual([2, 2]);
   expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die");
-  expect(printed.at(-1)).toContain("a turn is running");
+  // the lead's request waits after its refusal (HANDOVER_PENDING follows it)
+  expect(printed.findLast((l) => l.startsWith("HANDOVER_REFUSED"))).toContain("a turn is running");
   expect(opened()).toBe(false);
 });
 
@@ -1417,6 +1418,94 @@ test("an automatic start whose lane stays busy for the whole wait is refused as 
   expect(existsSync(join(state.dir, "handover", "lanes", "demo.lock"))).toBe(false);
 });
 
+const LEAD_STUCK = "lead:STUCK rung 4 on loss after research";
+const takeoverFile = () => join(state.dir, "handover", "lanes", "demo.takeover.json");
+
+test("a lead's handover refused while the lane is busy asks the lane for its safe point itself and says the move waits: nothing more to type by hand", async () => {
+  // Given: the lead typed "[LEAD] reach a safe point ..." by hand after each refusal (47 re-runs by hand in 3 weeks)
+  const deps = await setup();
+  table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
+  w.screens[OLD] = BUSY;
+  // When
+  const busy = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  table = aoeTable();
+  w.screens[OLD] = HIGH;
+  const work = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // Then
+  expect([busy.code, work.code]).toEqual([2, 2]);
+  const asks = sent(w).filter((t) => t.startsWith("[LEAD] The lead moves demo to a new session") && t.includes("dori handover ready demo --note <file>"));
+  expect(asks).toHaveLength(2);
+  const pending = printed.filter((l) => l.startsWith("HANDOVER_PENDING demo: "));
+  expect(pending).toHaveLength(2);
+  expect(pending[0]).toContain("starts by itself the moment the lane is idle");
+  expect(pending[1]).toContain("starts by itself once the lane marks ready or the work it named ended");
+  expect(opened()).toBe(false);
+});
+
+test("a lead's --force while a run waits for the lane's idle moment is taken over by that run: one move, forced, with the lead's approval", async () => {
+  // Given: ZzangDori herdr-switch 2026-11-03 09:10:45Z, a --force refused "another handover is running (pid 666199)"
+  const base = await setup();
+  const c = fakeClock(Date.parse("2026-10-11T16:35:00Z"));
+  let polls = 0;
+  const deps: LaneHandoverDeps = {
+    ...base,
+    clock: { now: () => c.at, sleep: async (ms: number) => { c.at += ms; polls++; if (polls === 2) writeFileSync(takeoverFile(), JSON.stringify({ pid: 4242, at: new Date(c.at).toISOString(), approvedBy: LEAD_STUCK, force: true, request: {} })); simulate(); } },
+    config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } },
+    reportOwner: async () => "msg-1",
+  };
+  live.add(4242);
+  table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
+  w.screens[OLD] = BUSY;
+  // When: the lane stays busy the whole time
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
+  // Then
+  expect(r.code).toBe(0);
+  expect(printed.find((l) => l.startsWith("HANDOVER_TAKEN_OVER demo: "))).toContain("pid 4242");
+  expect(printed.some((l) => l.startsWith("HANDOVER_FORCED demo: a turn is running"))).toBe(true);
+  expect(printed).toContain(`HANDOVER_COMMITTED demo ${NEW}`);
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", approvedBy: LEAD_STUCK, decidedBy: "lead" });
+  expect(existsSync(takeoverFile())).toBe(false);
+  expect(sent(w).some((t) => t.startsWith("[LEAD] The lead moves demo"))).toBe(false);
+});
+
+test("a run that finds the lane's lock held hands its approval to the holder and reports the holder's result; a holder that does not take it (mid-move) leaves the run refused as before", async () => {
+  // Given
+  const base = await setup();
+  let claim = false;
+  const deps: LaneHandoverDeps = {
+    ...base,
+    reportOwner: async () => "msg-1",
+    clock: { ...base.clock, sleep: async () => {
+      if (claim && existsSync(takeoverFile())) {
+        writeFileSync(`${takeoverFile()}.claimed`, readFileSync(takeoverFile()));
+        rmSync(takeoverFile());
+        appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-10-11T16:40:00.000Z", key: "demo", from: OLD, to: NEW, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "done", reasons: [] });
+        live.delete(77);
+      }
+      simulate();
+    } },
+  };
+  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
+  const lock = () => writeFileSync(join(state.dir, "handover", "lanes", "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
+  lock();
+  live.add(77);
+  // When: the holder is mid-move and takes nothing
+  const refused = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  const leftover = existsSync(takeoverFile());
+  // the holder waits for the idle moment and takes it
+  claim = true;
+  const taken = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  // Then
+  expect(refused.code).toBe(2);
+  expect(printed.some((l) => l.startsWith("HANDOVER_REFUSED demo: another handover is running (pid 77"))).toBe(true);
+  expect(leftover).toBe(false);
+  expect(taken.code).toBe(0);
+  expect(printed.find((l) => l.startsWith("HANDOVER_TAKEN_OVER demo: "))).toContain("pid 77");
+  expect(printed.at(-1)).toStartWith("HANDOVER_TAKEN_OVER_RESULT demo: done");
+  expect(opened()).toBe(false);
+  expect(JSON.parse(readFileSync(`${takeoverFile()}.claimed`, "utf8"))).toMatchObject({ approvedBy: LEAD_STUCK, force: true });
+});
+
 // omo's input box sits between two ─ borders; the status lines under it can quote "esc to interrupt" (here the cwd and a
 // session title), while omo's own running-turn mark is on the box's top border
 const QUOTED = HIGH.replace("old transcript line\n❯ \n────", "old transcript line\n────\n❯ \n────").replace("~/work •", "~/work/esc to interrupt •").replace("(OmO) mem:x", "(OmO) Fix esc to interrupt indicator");
@@ -1437,7 +1526,7 @@ test("busy mark scope: an idle lane whose status lines quote esc to interrupt is
   expect(idleLines.some((l) => l.includes("a turn is running"))).toBe(false);
   expect(idleLines.some((l) => l.startsWith("HANDOVER_DRY_RUN demo"))).toBe(true);
   expect(busy.code).toBe(2);
-  expect(printed.at(-1)).toContain("a turn is running");
+  expect(printed.findLast((l) => l.startsWith("HANDOVER_REFUSED"))).toContain("a turn is running");
   expect(opened()).toBe(false);
 });
 
@@ -1835,8 +1924,8 @@ test("a lead's handover refused while the lane was busy starts again once, with 
   refused(9, LEAD_OK, "busy", "aoe_demo_00000000");
   ready(deps, [], at(10));
   expect(await tick(11)).toEqual([]);
-  // a lead request refused busy, with the mark written before it: nothing (that run already saw the mark)
-  refused(12, LEAD_OK, "busy");
+  // a lead request refused for work, with the mark written before it: nothing (that run already saw the mark)
+  refused(12, LEAD_OK, "work");
   expect(await tick(13)).toEqual([]);
   // the mark from another pane: nothing
   ready(deps, [], at(14), "aoe_demo_00000000");
@@ -1845,7 +1934,7 @@ test("a lead's handover refused while the lane was busy starts again once, with 
   ready(deps, [], at(16));
   expect(await tick(17)).toEqual(["demo started"]);
   expect(resumes).toEqual([`demo ${LEAD_OK}`]);
-  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUMED demo started: the ready mark of ${at(16)} in ${OLD} follows the request of ${at(12)} (refused busy); started again with the same approval "${LEAD_OK}": unit=u1`);
+  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUMED demo started: the ready mark of ${at(16)} in ${OLD} follows the request of ${at(12)} (refused work); started again with the same approval "${LEAD_OK}": unit=u1`);
   // the same mark never starts it twice, in this sweep's process or the next one's
   expect(await tick(18)).toEqual([]);
   expect(await tick(25)).toEqual([]);
@@ -1864,13 +1953,13 @@ test("a lead's handover refused while the lane was busy starts again once, with 
   expect(await tick(30)).toEqual(["demo started"]);
   expect(resumes).toHaveLength(3);
   // a mark older than readyMin by the time a sweep sees it: no start, the lead hears of it once
-  refused(31, LEAD_OK, "busy");
+  refused(31, LEAD_OK, "work");
   ready(deps, [], at(32));
   expect(await tick(63)).toEqual(["demo skipped"]);
   expect(await tick(64)).toEqual([]);
   expect(resumes).toHaveLength(3);
   expect(sent(w).filter((t) => t.startsWith("[DORI] demo: the handover you asked for"))).toHaveLength(1);
-  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUME_SKIPPED demo skipped: the ready mark of ${at(32)} in ${OLD} follows the request of ${at(31)} (refused busy), not started again: the ready mark is older than 30 min`);
+  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_READY_RESUME_SKIPPED demo skipped: the ready mark of ${at(32)} in ${OLD} follows the request of ${at(31)} (refused work), not started again: the ready mark is older than 30 min`);
   // a refusal logged by an older version (no request: its --keep-old or --note unknown) is never started again; the lead
   // hears of it once and runs it again
   refused(65, LEAD_OK, "busy", OLD, true);
@@ -1879,6 +1968,47 @@ test("a lead's handover refused while the lane was busy starts again once, with 
   expect(await tick(68)).toEqual([]);
   expect(resumes).toHaveLength(3);
   expect(sent(w).filter((t) => t.includes("that request was logged before its options were kept"))).toHaveLength(1);
+});
+
+test("the lead's waiting handover starts again by itself: a busy refusal at the next sweep (the run waits for the idle moment), a work refusal once its chains ended; one start per refusal; a long wait is told to the lead once and goes on", async () => {
+  // Given: 17 refusals for a running turn and 39 for chains on six Doris, each started again by hand
+  const base = await setup();
+  const T0 = Date.parse("2026-10-11T16:35:00Z");
+  const clock = fakeClock(T0);
+  const deps = { ...base, clock, config: { ...base.config, handover: { ...base.config.handover, readyMin: 30 } } };
+  const running = new Set<number>([501]);
+  const resumes: string[] = [];
+  const hooks = { signals: async () => ({}), alive: (pid: number) => running.has(pid), resume: async (key: string, approvedBy: string) => { resumes.push(`${key} ${approvedBy}`); return { started: true, line: "unit=u1" }; } };
+  const tick = async (min: number): Promise<string[]> => {
+    clock.at = T0 + min * 60_000;
+    await deps.registry.patch("demo", { lastReplyAt: clock.at });
+    return (await freshnessTick(deps, "/home/test", hooks)).filter((a) => a.kind === "ready_resume").map((a) => `${a.lane} ${a.detail.split(":")[0]}`);
+  };
+  const refused = (min: number, blocked: "work" | "busy", pids?: number[]) =>
+    appendRollover(state.dir, { kind: "rollover", who: "lane", at: new Date(T0 + min * 60_000).toISOString(), key: "demo", from: OLD, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "refused", reasons: ["x"], blocked, ...(pids ? { pids } : {}), request: {} });
+  // When / Then: refused while a turn ran: started at the next sweep, no ready mark needed, once
+  refused(0, "busy");
+  expect(await tick(1)).toEqual(["demo started"]);
+  expect(await tick(2)).toEqual([]);
+  // the waiting run came back busy after its wait: started again
+  refused(21, "busy");
+  expect(await tick(22)).toEqual(["demo started"]);
+  // refused for a chain: nothing while it runs, a start once it ended
+  refused(23, "work", [501]);
+  expect(await tick(24)).toEqual([]);
+  running.delete(501);
+  expect(await tick(25)).toEqual(["demo started"]);
+  expect(resumes).toEqual([`demo ${LEAD_STUCK}`, `demo ${LEAD_STUCK}`, `demo ${LEAD_STUCK}`]);
+  // refused for work with no ready mark coming: the lead hears once that it still waits, past readyMin since the first ask
+  refused(26, "work", [502]);
+  running.add(502);
+  expect(await tick(27)).toEqual([]);
+  expect(await tick(57)).toEqual(["demo waiting"]);
+  expect(await tick(58)).toEqual([]);
+  expect(sent(w).filter((t) => t.startsWith("[DORI] demo: the handover you asked for") && t.includes("still waits"))).toHaveLength(1);
+  running.delete(502);
+  expect(await tick(59)).toEqual(["demo started"]);
+  expect(resumes).toHaveLength(4);
 });
 
 test("the lead's refusal of a busy lane says that the lane's ready mark starts it again, and that start is given the options the refused run was given", async () => {
