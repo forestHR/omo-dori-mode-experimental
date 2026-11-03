@@ -1533,15 +1533,39 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((status, json.loads(body)["error"]), (403, "owner-todo-required"))
         self.assertEqual((len([r for r in self.todo_reads() if r[0] == "GET"]), len(self.writes())), (2, 1))
 
-    async def test_todo_that_is_not_an_open_recent_card_approval_is_refused(self):
-        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
+    async def test_open_todo_holds_past_24_hours_until_it_is_finished_held_deleted_or_cancelled(self):
+        # Owner 2026-11-03 10:53 KST "그래 열려있는동안 해": the window is the todo being open, not 24 hours from the
+        # card. The setup keeps owner_todo.max_age_hours 24 as installed configs do; the gate no longer reads it.
+        self.assertEqual(self.config["owner_todo"]["max_age_hours"], 24)
+        for hours in (25, 24 * 30):
+            with self.subTest(f"open, approved {hours} hours ago"):
+                self.todo = {**self.todo, "approved_at": (dt.datetime.now(dt.timezone.utc)
+                                                          - dt.timedelta(hours=hours)).isoformat()}
+                status, _ = await self.todo_request()
+                self.assertEqual(status, 200)
+        self.assertEqual((len(self.writes()), len(self.todo_uses())), (2, 2))
+        opened = dict(self.todo)
+        owner = {"id": "1", "bot": False}
+        ends = {"finished": ({"status": "완료"}, None), "held": ({"status": "보류"}, None),
+                "deleted (the dashboard no longer knows it)": ({"asked_as": TODO[:-1] + "9"}, None),
+                "owner ⛔ on the card": ({}, {("3001", quote("✅")): [owner], ("3001", quote("⛔")): [owner]})}
+        for name, (change, reactions) in ends.items():
+            with self.subTest(name):
+                self.todo = {**opened, **change}
+                if reactions is not None:
+                    self.reactions = reactions
+                status, body = await self.todo_request()
+                self.assertEqual((status, json.loads(body)["error"]), (403, "owner-todo-required"))
+        self.assertEqual((len(self.writes()), len(self.todo_uses())), (2, 2))
+
+    async def test_todo_that_is_not_an_open_card_approval_is_refused(self):
         ahead = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat()
         cases = {"taken in without a card": {"auto_applied": True}, "no auto_applied": {"auto_applied": None},
                  "auto_applied not a boolean": {"auto_applied": "false"}, "no card": {"card": None},
                  "card without a message": {"card": {"channel_id": "30", "message_id": ""}},
                  "card not ids": {"card": {"channel_id": "30/../31", "message_id": "3001"}},
                  "card not an object": {"card": "30/3001"},
-                 "approved too long ago": {"approved_at": old}, "approved in the future": {"approved_at": ahead},
+                 "approved in the future": {"approved_at": ahead},
                  "no timezone": {"approved_at": "2026-11-02T00:00:00"}, "never approved": {"approved_at": ""},
                  "done": {"status": "완료"}, "on hold": {"status": "보류"}, "unknown status": {"status": "open"},
                  "other todo": {"todo_id": TODO[:-1] + "2", "asked_as": TODO}, "unknown todo": {"asked_as": TODO[:-1] + "9"}}

@@ -1013,8 +1013,10 @@ class Gate:
         card asks first). The gate asks the dashboard itself on every write and refuses on any doubt.
 
         The todo must exist under that id, have come in through the owner's approval card (auto_applied false and
-        the card's channel and message), still be open and have been approved no longer than max_age_hours ago
-        (the same 24-hour window as an order, owner Q353). The gate then checks the card on Discord itself: the
+        the card's channel and message), still be open (열림/진행) and carry an approval time that is not in the future.
+        It holds while the todo is open, not 24 hours from the card (owner 2026-11-03 10:53 KST "그래 열려있는동안 해"):
+        a finished, held or deleted todo ends it, and owner_todo.max_age_hours is no longer read. The gate then checks
+        the card on Discord itself: the
         owner's own account (not a bot) reacted ✅ and not ⛔ on that message, in a channel of the owner's guild.
         Then it records the use on the dashboard (POST .../use) and refuses if that fails. Only the proof changes:
         writes that reach outside still park on the approval card.
@@ -1038,7 +1040,7 @@ class Gate:
             if (data.get("todo_id") != identity or data.get("auto_applied") is not False
                     or not re.fullmatch(r"\d{1,20}", channel) or not re.fullmatch(r"\d{1,20}", message)
                     or data.get("status") not in settings.get("open_statuses", OPEN_TODO_STATUSES)
-                    or not 0 <= age <= settings.get("max_age_hours", 24) * 3600):
+                    or not 0 <= age):
                 raise Refused("owner-todo-required")
             authorization = "Bot " + Path(self.config["owner_proof"]["token_file"]).read_text().strip()
             card_path = f"/channels/{channel}/messages/{message}"
