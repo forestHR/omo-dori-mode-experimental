@@ -79,6 +79,11 @@ export class ThreadStatusQueue {
     return "scheduled";
   }
 
+  // The status still waiting to be applied for a thread (a rename held back by a 429, or inside its short wait).
+  pending(thread: string): ThreadStatus | undefined {
+    return this.load()[thread]?.status;
+  }
+
   flush(thread: string): Promise<FlushResult> {
     const next = (this.running.get(thread) ?? Promise.resolve<FlushResult>("none")).then(() => this.apply(thread));
     this.running.set(thread, next);

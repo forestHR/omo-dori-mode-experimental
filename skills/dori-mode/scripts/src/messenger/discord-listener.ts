@@ -451,7 +451,8 @@ export class DiscordListener {
     const info = await this.d.dc.call<ThreadInfo>("GET", `/channels/${threadId}`);
     const name = info.name ?? "";
     const done = isDoneName(name, this.d.words);
-    if (!done && !isOwnerTurnName(name, this.d.words)) return;
+    // a waiting still queued (our reply's rename held back by a 429) is answered too, before it is applied
+    if (!done && !isOwnerTurnName(name, this.d.words) && this.d.cards.statuses.pending(threadId) !== "waiting") return;
     await this.d.cards.statuses.request(threadId, "working");
     this.d.log(`${done ? "THREAD_REOPENED" : "THREAD_ANSWERED"} ${threadId}`);
   }

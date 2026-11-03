@@ -240,6 +240,14 @@ test("the owner writing in a closed thread reopens it as working; an open thread
   expect(logs.filter((l) => l.startsWith("THREAD_REOPENED"))).toEqual(["THREAD_REOPENED 501", "THREAD_REOPENED 502"]);
 });
 
+test("the owner answering while our reply's 🔔 still waits out a 429 replaces it with working before it is applied", async () => {
+  const { listener, cards } = setup((req) => (/\/channels\/521$/.test(req.url) ? { parent_id: CHANNEL, name: "🔄 talking", type: 11, thread_metadata: { archived: false } } : {}));
+  mkdirSync(`${state.dir}/discord`, { recursive: true });
+  writeFileSync(`${state.dir}/discord/thread-status.json`, JSON.stringify({ "521": { status: "waiting", due: Date.parse("2026-01-02T03:10:00Z"), tries: 1, rev: 1 } }));
+  await listener.onMessage(msg("3001", { channel_id: "521" }));
+  expect(cards.statuses.pending("521")).toBe("working");
+});
+
 test("the owner answering a thread that showed his turn (🔔 with no card, the old ⏸️, ❗) makes it ours again, and one that ended ⛔ or 💤 reopens", async () => {
   const names: Record<string, string> = { "511": "🔔 asked you", "512": "⏸️ old wait", "513": "❗ 🔐 share failed", "514": "⛔ ✉️ cancelled mail", "515": "💤 ✉️ replaced draft" };
   const { listener, seen, logs } = setup((req) => {
