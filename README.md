@@ -249,7 +249,7 @@ The Windows subset in `.github/workflows/windows.yml` is run by hand, not on pus
 gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref feat/herdr-windows
 ```
 
-Replace `feat/herdr-windows` with the branch to validate. The workflow runs the native Windows process, freeze, revive, session-discovery and PowerShell-literal tests, plus their herdr backend tests. Suites built on POSIX shell, process-table and launch-world fixtures stay in the Linux suite. Native Windows installation and supervision are a separate dependent change.
+Replace `feat/herdr-windows` with the branch to validate. The workflow runs the native Windows process, refusal, revive, session-discovery and PowerShell-literal tests, plus their herdr backend tests. Windows freeze, thaw and handover refuse without changing processes or records; that implementation is deferred to `feat/herdr-windows-freeze`. Suites built on POSIX shell, process-table and launch-world fixtures stay in the Linux suite. Native Windows installation and supervision are a separate dependent change.
 
 ## License
 

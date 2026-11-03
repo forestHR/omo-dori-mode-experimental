@@ -1,8 +1,29 @@
 import { expect, test } from "bun:test";
 import { agentLine } from "../src/herdr.ts";
 import { agentPath } from "../src/aoe.ts";
-import { AGENT, procTable, WIN_PROCS } from "../src/session-id.ts";
+import { AGENT, descendants, procTable, WIN_PROCS, winProcs } from "../src/session-id.ts";
 import { run, type Runner } from "../src/run.ts";
+
+test("Windows process discovery rejects a recycled parent newer than its child", () => {
+  const table = winProcs(JSON.stringify([
+    { ProcessId: 10, ParentProcessId: 0, StartedAt: "2026-11-03T10:00:00Z" },
+    { ProcessId: 11, ParentProcessId: 10, StartedAt: "2026-11-03T09:00:00Z", CommandLine: "omo.exe" },
+    { ProcessId: 12, ParentProcessId: 10, StartedAt: "2026-11-03T10:01:00Z" },
+  ]));
+  expect(table.map((p) => [p.pid, p.ppid])).toEqual([[10, 0], [11, 0], [12, 10]]);
+  expect(descendants(table, 10).map((p) => p.pid)).toEqual([12]);
+});
+
+test("process traversal visits a cyclic tree once without including its root", () => {
+  const table = [
+    { pid: 10, ppid: 12, cmd: "pwsh.exe" },
+    { pid: 11, ppid: 10, cmd: "omo.exe" },
+    { pid: 12, ppid: 11, cmd: "child" },
+    { pid: 13, ppid: 13, cmd: "self-parent" },
+  ];
+  expect(descendants(table, 10).map((p) => p.pid)).toEqual([11, 12]);
+  expect(descendants(table, 13)).toEqual([]);
+});
 
 test("Windows process discovery recognizes omo executables and bundle paths", async () => {
   // Given a Win32_Process response including a process without a command line.

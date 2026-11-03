@@ -9,6 +9,7 @@ import { strayTasks, taskRecords } from "./background.ts";
 import { type HandoverWatcher } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { type FreezeDeps, type FrozenRecord, type Sig, freezePane, writeFrozen } from "./frozen.ts";
+import { windowsHandoverRefusal } from "./windows-handover.ts";
 import { pointInstanceAlerts } from "./handover-alerts.ts";
 import { endOldMonitors } from "./handover-monitors.ts";
 import { leadMovedText, noteLaneTell } from "./lane-tells.ts";
@@ -732,6 +733,10 @@ export const takeLock = (file: string, alive: (pid: number) => boolean, at: stri
 type MoveContext = { readonly note: string; readonly stamp: string; readonly dir: string; readonly title: string; readonly model: string; readonly units: readonly string[]; readonly emit: (line: string) => void; readonly mark: (step: string, ok: boolean) => void; readonly supplements: Supplement[]; frozen?: FrozenRecord };
 
 export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): Promise<HandoverResult> => {
+  if (process.platform === "win32") {
+    deps.print(windowsHandoverRefusal("lead", "lead"));
+    return { code: 2 };
+  }
   const { config } = deps;
   const at = iso(deps.clock);
   const stamp = at.replace(/[-:]/g, "").replace("T", "-").slice(0, 15);

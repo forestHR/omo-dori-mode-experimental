@@ -16,6 +16,7 @@ import { captureTmux, closeAoeSession, envMismatch, inputLine, isClosedLine, lan
 import { turnRunning } from "./submit.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { freezePane, freezeSignal, writeFrozen } from "./frozen.ts";
+import { windowsHandoverRefusal } from "./windows-handover.ts";
 import { endOldMonitors } from "./handover-monitors.ts";
 import { ackFile, endStrayTasks, type HandoverDeps, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
 import { awaitPrompt } from "./launch.ts";
@@ -634,6 +635,10 @@ const IDLE_POLL_MS = 3_000;
 // Work that would die (a local chain, a background eval cell) or go on unreachable (a background task) refuses at once
 // (blocked work).
 export const laneHandover = async (input: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions = {}): Promise<LaneHandoverResult> => {
+  if (process.platform === "win32") {
+    input.print(windowsHandoverRefusal(key));
+    return { code: 2 };
+  }
   const deps = { ...input, signal: freezeSignal(input.signal) };
   if (!opts.waitIdleMin || opts.dryRun) return attempt(deps, key, here, opts);
   const emit = (line: string): void => {

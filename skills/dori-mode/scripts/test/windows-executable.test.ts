@@ -54,7 +54,7 @@ test.each(programs)("review 3 type keeps omo safety checks for %s", async (progr
   expect(sent(world)).toEqual([]);
 });
 
-test.each(programs)("review 3 handover accepts the native configuration %s", async (program) => {
+test.each(programs)("native configuration %s follows platform handover policy", async (program) => {
   // Given a live lane, its process table and a native executable configuration.
   const brief = join(dir, "brief.md");
   writeFileSync(brief, "# Native handover\n");
@@ -65,9 +65,10 @@ test.each(programs)("review 3 handover accepts the native configuration %s", asy
     procs: async () => [{ pid: 4000, ppid: 1, cmd: "pwsh.exe" }, { pid: 4001, ppid: 4000, cmd: `"${program}"` }],
     envOf: () => "", alive: () => false, signal: () => true, realpath: (path) => path, nonce: () => "native", print: () => {},
   };
-  // When the public handover preflight writes its real dry-run handover note.
+  // When the public handover preflight runs.
   const result = await laneHandover(deps, "native", "w0:p0", { dryRun: true });
-  // Then the executable passes all handover preconditions, not the non-omo refusal.
-  expect(result.code).toBe(0);
-  expect(await Bun.file(result.note ?? "").exists()).toBe(true);
+  // Then Linux accepts the executable, while Windows refuses before writing a note.
+  expect(result.code).toBe(process.platform === "win32" ? 2 : 0);
+  if (process.platform === "win32") expect(result.note).toBeUndefined();
+  else expect(await Bun.file(result.note ?? "").exists()).toBe(true);
 });

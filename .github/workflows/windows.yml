@@ -33,5 +33,5 @@ jobs:
             ./test/windows-review.test.ts `
             ./test/windows-shell.test.ts `
             ./test/windows-executable.test.ts `
-            ./test/windows-freeze.test.ts
+            ./test/windows-refusal.test.ts
           exit $LASTEXITCODE

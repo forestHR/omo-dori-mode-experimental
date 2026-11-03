@@ -23,7 +23,7 @@ export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Comma
 export const winProcs = (json: string): Proc[] => {
   try {
     const rows: unknown = JSON.parse(json || "[]");
-    return (Array.isArray(rows) ? rows : [rows]).flatMap((r: unknown): Proc[] => {
+    const table = (Array.isArray(rows) ? rows : [rows]).flatMap((r: unknown): Proc[] => {
       if (typeof r !== "object" || r === null || !("ProcessId" in r) || typeof r.ProcessId !== "number" || !r.ProcessId) return [];
       return [{
         pid: r.ProcessId,
@@ -34,6 +34,9 @@ export const winProcs = (json: string): Proc[] => {
         stat: "",
       }];
     });
+    const byPid = new Map(table.map((p) => [p.pid, p]));
+    // A parent PID can have been reused after the child's original parent exited.
+    return table.map((p) => Date.parse(byPid.get(p.ppid)?.startedAt ?? "") > Date.parse(p.startedAt ?? "") ? { ...p, ppid: 0 } : p);
   } catch (error) {
     if (error instanceof SyntaxError) return [];
     throw error;
@@ -54,7 +57,10 @@ export const descendants = (table: readonly Proc[], root: number): Proc[] => {
   for (const p of table) byParent.set(p.ppid, [...(byParent.get(p.ppid) ?? []), p]);
   const out: Proc[] = [];
   const queue = [...(byParent.get(root) ?? [])];
+  const seen = new Set([root]);
   for (let p = queue.shift(); p; p = queue.shift()) {
+    if (seen.has(p.pid)) continue;
+    seen.add(p.pid);
     out.push(p);
     queue.push(...(byParent.get(p.pid) ?? []));
   }
