@@ -286,19 +286,25 @@ const resumeFile = (stateDir: string, key: string): string => join(stateDir, "ha
 // refusal (the claim names the refusal), never given up: refused while a turn ran, at the next sweep (the started run waits
 // for the idle moment); refused for work, when the lane marks ready after it or every chain and task it named ended. A
 // request still waiting handover.readyMin after it was first asked is told to the lead once, and goes on waiting.
+const STARTED_GRACE_MS = 2 * 60_000;
+
 const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pane: string): Promise<SweepAct[]> => {
   if (!hooks.resume) return [];
   const stateDir = deps.config.stateDir;
   const asked = waitingRequest(readRollovers(stateDir), key, pane);
   if (!asked) return [];
   const claimed = resumeFile(stateDir, key);
-  const claim = readJson<{ request?: string; since?: string; approvedBy?: string; result?: string; toldAt?: string; readyAt?: string }>(claimed);
+  const claim = readJson<{ request?: string; since?: string; approvedBy?: string; result?: string; toldAt?: string; readyAt?: string; at?: string }>(claimed);
   const by = (asked.approvedBy ?? "").trim();
   // the first ask of this waiting request: a run started again for it and refused again carries it on
   const since = claim?.since && claim.approvedBy === by && claim.result === "started" ? claim.since : claim?.request === asked.at && claim.since ? claim.since : asked.at;
   // a refusal started once (or skipped for good) is done; one still waiting, or skipped for a stale ready mark, is looked at
   // again: a fresh mark or its work ending still starts it (review 320)
-  if (claim?.request === asked.at && claim.result !== "waiting" && claim.result !== "stale-mark") return [];
+  // a started run that died before it wrote another row (no live run holds the lane, checked below) is started again by a
+  // ready mark newer than its start, once its startup grace has passed (review 320)
+  const fresh = readJson<ReadyMark>(readyFile(stateDir, key));
+  const abandoned = claim?.result === "started" && deps.clock.now() - Date.parse(claim.at ?? "") > STARTED_GRACE_MS && fresh?.pane === pane && Date.parse(fresh.at ?? "") > Date.parse(claim.at ?? "");
+  if (claim?.request === asked.at && claim.result !== "waiting" && claim.result !== "stale-mark" && !abandoned) return [];
   const alive = hooks.alive ?? pidAlive;
   if (handoverRunning(stateDir, "lane", key, alive)) return [];
   const now = deps.clock.now();

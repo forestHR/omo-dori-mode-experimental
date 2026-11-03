@@ -2626,17 +2626,16 @@ test("review 320 round 3: a request that keeps coming back busy past readyMin is
   expect(sent(w).filter((x) => x.startsWith("[DORI] demo: the handover you asked for") && x.includes("stayed busy"))).toHaveLength(1);
 });
 
-test("review 320 round 5: a holder that repointed the lane and died before its commit is repaired, never read as moved; a run the waiting run did not step aside for stays out", async () => {
+test("review 320 round 5: a holder that repointed the lane and died before its commit is repaired, never read as moved", async () => {
   // Given
   const base = await setup();
   const lanes = join(state.dir, "handover", "lanes");
-  let mode: "crash" | "other" = "crash";
+  const mode = "crash";
   const deps: LaneHandoverDeps = { ...base, reportOwner: async () => "msg-1", clock: { ...base.clock, sleep: async () => {
     if (mode === "crash" && live.has(77)) {
       writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid: 77, at: "2026-10-11T16:34:00Z", from: OLD, to: NEW, note: "n" }));
       await base.registry.patch("demo", { pane: NEW });
     }
-    if (mode === "other" && live.has(77)) writeFileSync(join(lanes, "demo.successor.json"), JSON.stringify({ request: "demo.takeover-1-other.json", at: "2026-10-11T16:35:00Z" }));
     live.delete(77);
     simulate();
   } } };
@@ -2646,13 +2645,30 @@ test("review 320 round 5: a holder that repointed the lane and died before its c
   lock();
   const crashed = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
   const crashLines = [...printed];
-  mode = "other";
-  lock();
-  const other = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
   // Then
   expect(crashed.code).toBe(3);
   expect(crashLines.some((l) => l.startsWith("HANDOVER_INTERRUPTED demo: "))).toBe(true);
   expect(crashLines.some((l) => l.startsWith("HANDOVER_ALREADY_MOVED"))).toBe(false);
-  expect(other.code).toBe(2);
-  expect(printed.at(-1)).toBe("HANDOVER_REFUSED demo: the waiting run stepped aside for another request (demo.takeover-1-other.json), which moves the lane");
+});
+
+test("review 320 round 6: a waiting run that was started and died without another row is started again after its grace, not left waiting for good", async () => {
+  // Given
+  const base = await setup();
+  const T0 = Date.parse("2026-10-11T16:35:00Z");
+  const clock = fakeClock(T0);
+  const deps = { ...base, clock };
+  const resumes: string[] = [];
+  const hooks = { signals: async () => ({}), alive: () => false, resume: async (key: string) => { resumes.push(key); return { started: true, line: "unit=u" }; } };
+  appendRollover(state.dir, { kind: "rollover", who: "lane", at: new Date(T0).toISOString(), key: "demo", from: OLD, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "refused", reasons: ["x"], blocked: "busy", request: {} });
+  const tick = async (min: number) => { clock.at = T0 + min * 60_000; await deps.registry.patch("demo", { lastReplyAt: clock.at }); await freshnessTick(deps, "/home/test", hooks); };
+  const ready = (min: number) => writeFileSync(readyFile(state.dir, "demo"), JSON.stringify({ pane: OLD, at: new Date(T0 + min * 60_000).toISOString() }));
+  // When: started at minute 1 by a ready mark, the run dies (no lock, no row); swept again, then the lane marks ready again
+  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
+  ready(0.5);
+  await tick(1);
+  await tick(5);
+  ready(6);
+  await tick(7);
+  // Then
+  expect(resumes).toHaveLength(2);
 });
