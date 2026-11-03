@@ -5,9 +5,9 @@ This branch preserves the native suspension implementation from PR #301 at
 Windows freeze, thaw, and handover are refused in the native-process PR.
 
 Before a later freeze PR, address review round 4's suspended-state finding:
-Win32_Process supplies no suspended-state information. Detect already suspended
-agents and refuse before changing them; do not add a suspend count to a process
-that was suspended outside the current transaction. Test that rejection and
-verify that thaw neither leaves a process suspended nor resumes an unrelated
-suspension. The per-transaction duplicate-stop guard alone does not establish
-that safety property.
+Win32_Process supplies no suspended-state information, so stoppedAgent cannot
+recognize a suspended Windows agent while a handover is in progress, before
+its replacement record exists. Expose native suspension state or track freezes
+across invocations. Add an actual Windows suspend -> submit -> thaw regression
+asserting that neither text nor Enter is sent to the suspended agent.
+The per-transaction duplicate-stop guard alone does not fix this messaging gap.
