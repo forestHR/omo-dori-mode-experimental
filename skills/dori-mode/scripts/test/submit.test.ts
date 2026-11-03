@@ -69,6 +69,39 @@ test("a text omo took from the box but never put in the transcript stays NOT_SUB
   expect(r.reason).toContain("the text is not in the session's transcript");
 });
 
+// A slash command runs in omo itself: no user message in the transcript (/goal pause writes nothing there at all), only a
+// notice above the box. Shaped after test pane w1:p17 on 2026-11-03, where /thinking low applied but read NOT_SUBMITTED.
+const slashTyped = (above: readonly string[], text: string) => [...above, BORDER, `❯ ${text}`, BORDER, " ~/qa • effort medium"].join("\n");
+const slashDone = (above: readonly string[]) => [...above, BORDER, "❯ ", BORDER, " ~/qa • effort low"].join("\n");
+
+test("a slash command omo answered with a notice above the emptied box is SUBMITTED, with no transcript entry", async () => {
+  const above = [" Update Available", ""];
+  const { keys } = keysFor([slashTyped(above, "/thinking low"), slashDone([...above, " Thinking level: low"])]);
+  const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/thinking low");
+  expect(r).toEqual({ status: "SUBMITTED", reason: "input box empty and omo shows the command's result: Thinking level: low" });
+});
+
+test("the same notice printed again by a repeated slash command still counts as new", async () => {
+  const above = [" Thinking level: low", ""];
+  const { keys } = keysFor([slashTyped(above, "/thinking low"), slashDone([...above, " Thinking level: low"])]);
+  expect((await submitText(keys, fakeClock(0), "/thinking low")).status).toBe("SUBMITTED");
+});
+
+test("a slash command whose box emptied with nothing new above it stays NOT_SUBMITTED", async () => {
+  const above = [" Thinking level: low", ""];
+  const { keys } = keysFor([slashTyped(above, "/goal pause"), slashDone(above)]);
+  const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/goal pause");
+  expect(r.status).toBe("NOT_SUBMITTED");
+  expect(r.reason).toContain("no new line from omo above the box");
+});
+
+test("a plain text is not confirmed by a new line above the box: it still needs a turn, the Steering queue or the transcript", async () => {
+  const { keys } = keysFor([slashTyped([], "[LEAD] hello"), slashDone([" Thinking level: low"])]);
+  const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "[LEAD] hello");
+  expect(r.status).toBe("NOT_SUBMITTED");
+  expect(r.reason).toContain("the text is not in the session's transcript");
+});
+
 test("the transcript counts a user message with the text's first line from the send on, not an older one or the agent quoting it", () => {
   const line = (role: string, at: string, text: string) => JSON.stringify({ type: "message", timestamp: at, message: { role, content: [{ type: "text", text }] } });
   const text = "[LEAD] The lead moved to tmux session aoe_new\nsecond line";
