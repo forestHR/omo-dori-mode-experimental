@@ -9,7 +9,7 @@ import { autoReadyLine, freshnessTick, resumeArgs } from "../src/freshness.ts";
 import { closeDueFrozen, readFrozen } from "../src/frozen.ts";
 import { ackHandover, manifestPath } from "../src/handover.ts";
 import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
-import { appendRollover, approvalProblem, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
+import { appendRollover, approvalProblem, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, peerStuckLines, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
 import { stuckTop, stuckView } from "../src/explore.ts";
 import { recordFix } from "../src/same-fix.ts";
 import { QuestionStore } from "../src/messenger/discord-cards.ts";
@@ -880,6 +880,43 @@ test("rollover-stats gives counts, approval time, step times and the lane's qual
   const lead = rolloverStats([{ ...entries[1], approvedBy: "lead:STUCK rung 4", decidedBy: "lead", reason: "STUCK rung 4", ownerReport: { message: "m1" } }, { ...entries[1], decidedBy: "lead", ownerReport: { error: "429" } }] as never, [], Date.parse("2026-10-11T12:30:00Z"));
   expect(lead[2]).toContain("; decided by the lead (STUCK rung 4), owner told: m1");
   expect(lead[4]).toContain("owner told: MISSING (429)");
+});
+
+test("rollover-stats ends with each stuck rollover and what came of it: resolved, not resolved or unknown, in the lane's words", async () => {
+  // Given: four stuck moves (one moved again, one closed by the lead without a line), a context move, and a refused stuck run
+  const move = (key: string, at: string, extra: object = {}) => ({ kind: "rollover", who: "lane", at, key, from: OLD, to: NEW, decidedBy: "auto", signals: { stuck: { metric: "review", n: 4, rung: 4 } }, steps: [], result: "done", reasons: [], ...extra });
+  const entries = [
+    move("a", "2026-10-11T10:00:00Z"),
+    { kind: "outcome", at: "2026-10-11T10:19:00Z", key: "a", rolloverAt: "2026-10-11T10:00:00Z", resolved: true, line: "read the reviewer's diff instead of the summary", by: "claim-done" },
+    move("b", "2026-10-11T11:00:00Z", { decidedBy: "lead" }),
+    { kind: "outcome", at: "2026-10-11T12:00:00Z", key: "b", rolloverAt: "2026-10-11T11:00:00Z", resolved: false, line: "same wall", by: "claim-done" },
+    move("c", "2026-10-11T12:00:00Z"),
+    { kind: "outcome", at: "2026-10-11T12:30:00Z", key: "c", rolloverAt: "2026-10-11T12:00:00Z", line: "owner dropped it", by: "close" },
+    move("d", "2026-10-11T13:00:00Z"),
+    move("d", "2026-10-11T14:00:00Z", { signals: { contextPct: 90 } }),
+    move("e", "2026-10-11T15:00:00Z", { result: "refused" }),
+  ];
+  // When
+  const out = rolloverStats(entries as never, [], Date.parse("2026-10-11T16:00:00Z"));
+  // Then
+  const at = out.findIndex((l) => l.startsWith("STUCK_OUTCOMES "));
+  expect(out.slice(at)).toEqual([
+    "STUCK_OUTCOMES here stuck_rollovers=4 (auto 3) resolved=1 not_resolved=1 unknown=2",
+    `STUCK_ROLLOVER here a 2026-10-11T10:00:00Z by auto on "review" (4x) -> resolved 19 min after (claim-done): read the reviewer's diff instead of the summary`,
+    `STUCK_ROLLOVER here b 2026-10-11T11:00:00Z by lead on "review" (4x) -> not resolved 60 min after (claim-done): same wall`,
+    `STUCK_ROLLOVER here c 2026-10-11T12:00:00Z by auto on "review" (4x) -> unknown 30 min after (close): owner dropped it`,
+    `STUCK_ROLLOVER here d 2026-10-11T13:00:00Z by auto on "review" (4x) -> moved again at 2026-10-11T14:00:00Z, no line`,
+  ]);
+  // and each other Dori's log is read as its account; one that cannot be read says so
+  const log = entries.map((e) => JSON.stringify(e)).join("\n");
+  const calls: string[][] = [];
+  const peers = await peerStuckLines(async (argv) => {
+    calls.push([...argv]);
+    return argv[3] === "soodori" ? { code: 0, out: log, err: "" } : { code: 1, out: "", err: "sudo: a password is required" };
+  }, ["soodori:/home/soodori/.soodori/state/rollover-log.jsonl", "okdori:/home/okdori/.okdori/state/rollover-log.jsonl", "bad"]);
+  expect(calls[0]).toEqual(["sudo", "-n", "-u", "soodori", "cat", "/home/soodori/.soodori/state/rollover-log.jsonl"]);
+  expect(peers[0]).toBe("STUCK_OUTCOMES soodori stuck_rollovers=4 (auto 3) resolved=1 not_resolved=1 unknown=2");
+  expect(peers.slice(-2)).toEqual(["STUCK_OUTCOMES okdori UNREADABLE: sudo: a password is required", "STUCK_OUTCOMES bad UNREADABLE: give <user>:<absolute path of its rollover-log.jsonl>"]);
 });
 
 test("compactions are counted from the session log, reading only what was added since the last count", () => {

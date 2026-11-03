@@ -23,6 +23,7 @@ import { gateMissing } from "./merge-gate.ts";
 import { ownerSummary } from "./close-summary.ts";
 import { CostRecordBusy, laneSessionUsage, Supervision } from "./supervision.ts";
 import { Lessons, type LessonInput } from "./lessons.ts";
+import { appendRollover, outcomeLine, outcomeMissing, pendingStuck, readRollovers } from "./rollover.ts";
 
 export type FlowDeps = {
   readonly run: Runner;
@@ -97,7 +98,25 @@ export const recordThreadPost = async (registry: Registry, pane: string, thread:
 
 const resultPost = (lane: Lane, now: number): ThreadPost | undefined => lane.threadPosts?.findLast((p) => now - Date.parse(p.at) <= RESULT_POST_MS);
 
-export type ClaimOptions = { readonly posted?: string; readonly postSummary?: boolean };
+// rolloverOutcome: a lane moved to a new session for being stuck (rung 4) says in one line what it did differently after
+// the move; resolved false when the move did not solve it (the lane is done another way)
+export type ClaimOptions = { readonly posted?: string; readonly postSummary?: boolean; readonly rolloverOutcome?: { readonly line: string; readonly resolved: boolean } };
+
+// The outcome of the lane's stuck rollover, kept in the rollover log next to it once the claim is recorded:
+// ROLLOVER_OUTCOME_MISSING when the lane owes one and gave none (nothing is recorded), else what the claim output adds.
+const claimOutcome = (deps: FlowDeps, lane: Lane, at: string, given: ClaimOptions["rolloverOutcome"]): { readonly missing?: string; readonly write: () => string } => {
+  const pending = pendingStuck(readRollovers(deps.config.stateDir), lane.key);
+  const line = given ? outcomeLine(given.line) : "";
+  if (!pending) return { write: () => (line ? `\nROLLOVER_OUTCOME_SKIPPED ${lane.key}: no stuck rollover of this lane waits for a line` : "") };
+  if (!line) return { missing: outcomeMissing(lane.key, pending), write: () => "" };
+  const resolved = given?.resolved !== false;
+  return {
+    write: () => {
+      appendRollover(deps.config.stateDir, { kind: "outcome", at, key: lane.key, rolloverAt: pending.at, resolved, line, by: "claim-done" });
+      return `\nROLLOVER_OUTCOME ${lane.key} ${resolved ? "resolved" : "not resolved"} (rollover ${pending.at}): ${line}`;
+    },
+  };
+};
 
 // summary: what the owner's thread gets when the lane closes (dori claim-done --summary), kept with the claim; posted: the
 // lane's result already in its thread (opts.posted, else its own post there in the last RESULT_POST_MS), so the close posts
@@ -106,19 +125,22 @@ export const claimDone = async (deps: FlowDeps, lane: Lane, evidence: string, su
   const at = iso(deps.clock);
   const posted = opts.postSummary || !hasThread(lane) ? undefined : (opts.posted ?? resultPost(lane, deps.clock.now())?.id);
   const claim = { at, evidence, emitted: false, ...(summary?.trim() ? { summary: summary.trim() } : {}), ...(posted ? { posted } : {}) };
+  const outcome = claimOutcome(deps, lane, at, opts.rolloverOutcome);
+  if (outcome.missing) return outcome.missing;
   const postedLine = posted ? `\nRESULT_ALREADY_POSTED ${lane.key} ${posted}: the close posts no summary in the thread (the lane's result is there); --post-summary posts it anyway` : "";
   // A paused lane waits on a human, so its claim is recorded and announced but never closes it on a timer.
   if (statusOf(lane) === "paused") {
     await deps.registry.write({ ...lane, claim, history: [...(lane.history ?? []), { at, status: "paused", note: `done claimed while paused: ${evidence}` }] });
     if (lane.pane) await sendVerified(deps.run, deps.clock, deps.config, lane.pane, `[LEAD] done claim recorded for ${lane.key}, but the lane is paused, so it does not close automatically; the lead decides. Stay idle until then.`);
-    return `LANE_DONE_CLAIMED_PAUSED ${lane.key} ${lane.pane ?? "-"} ${evidence}${postedLine}`;
+    return `LANE_DONE_CLAIMED_PAUSED ${lane.key} ${lane.pane ?? "-"} ${evidence}${postedLine}${outcome.write()}`;
   }
   await deps.registry.write(withStatus(lane, "done-claimed", evidence, at, { claim }));
+  const outcomeNote = outcome.write();
   if (lane.pane) {
     const closesAt = new Date(deps.clock.now() + windowMs(deps)).toISOString().slice(11, 16);
     await sendVerified(deps.run, deps.clock, deps.config, lane.pane, `[LEAD] done claim recorded for ${lane.key}: this lane closes automatically at ${closesAt}Z (${deps.config.closeAfterMin} minutes) unless the lead objects with reasons. Stay idle until then; an objection arrives here as [LEAD] not done.`);
   }
-  return `LANE_DONE_CLAIMED ${lane.key} ${lane.pane ?? "-"} ${evidence}${postedLine}`;
+  return `LANE_DONE_CLAIMED ${lane.key} ${lane.pane ?? "-"} ${evidence}${postedLine}${outcomeNote}`;
 };
 
 // The lead often gives a lane new work right after it claimed done (the owner's feedback on its result). On 2026-10-31
