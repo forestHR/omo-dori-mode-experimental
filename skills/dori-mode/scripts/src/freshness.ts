@@ -109,12 +109,19 @@ export type RolloverHooks = {
   readonly leadTranscript?: () => Promise<string | undefined>;
 };
 
-const pidAlive = (pid: number): boolean => {
+// A zombie (it ended, its parent has not collected it: an eval kernel's Popen child) answers kill 0 but runs nothing: a
+// waiting handover whose chain ended as one never started again (QA lane qa-hsa, 2026-11-03 13:28Z).
+export const pidAlive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
+  } catch {
+    return true;
   }
 };
 
