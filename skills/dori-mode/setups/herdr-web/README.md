@@ -10,8 +10,9 @@ TUI talks to the account's own default `~/.config/herdr/herdr.sock`, so browser 
 server, not a second session store, and closing a browser leaves the sessions running. ttyd needs `--writable`; without
 it keyboard input is disabled. ttyd's HTML gets a viewport declaration, so phone browsers use their real width.
 
-The proxy reuses `AOE_SERVE_PASSPHRASE` from `~/.config/agent-of-empires/serve.env`. It does not copy or log the
-passphrase. It binds loopback only. On login it sets a random token, valid for the life of the proxy process, in a
+The proxy takes the passphrase from `HERDR_WEB_PASSPHRASE` in its env file below; when that is unset it reuses
+`AOE_SERVE_PASSPHRASE` from `~/.config/agent-of-empires/serve.env` (optional, so an account that never ran aoe needs no
+aoe file), so a Dori that moved from aoe logs in with its old passphrase. It does not copy or log the passphrase. It binds loopback only. On login it sets a random token, valid for the life of the proxy process, in a
 cookie named `herdr_session_<front-port>`, with HttpOnly, Secure, SameSite=Strict and Path=/. Cookies have no port scope,
 so several Dori on one host each need a cookie with its own name. Restarting the proxy logs everyone out. Requests and
 WebSocket upgrades without the cookie get the login page. The Origin must equal `HERDR_WEB_ORIGIN` exactly. ttyd is
@@ -28,6 +29,8 @@ Both read `~/.config/herdr/web-<front-port>.env` (mode 0600):
 ```ini
 HERDR_TTYD_PORT=<a free loopback port>
 HERDR_WEB_ORIGIN=https://<this host's tailnet name>[:<https port>]
+# only on an account without aoe's serve.env (a fresh install); a moved Dori leaves it out and keeps its aoe passphrase
+HERDR_WEB_PASSPHRASE=<a passphrase, for example from openssl rand -hex 16>
 ```
 
 ## Deploy

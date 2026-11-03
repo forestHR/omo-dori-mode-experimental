@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { startProxy } from "./proxy.ts";
+import { passphraseFrom, startProxy } from "./proxy.ts";
 
 const servers: ReturnType<typeof startProxy>[] = [];
 afterEach(() => { for (const server of servers.splice(0)) server.stop(true); });
@@ -15,6 +15,13 @@ function fixture(upstreamPort = 1) {
   servers.push(server);
   return { origin, port };
 }
+
+test("takes HERDR_WEB_PASSPHRASE first, else the old aoe serve passphrase, else none", () => {
+  expect(passphraseFrom({ HERDR_WEB_PASSPHRASE: "own", AOE_SERVE_PASSPHRASE: "aoe" })).toBe("own");
+  expect(passphraseFrom({ AOE_SERVE_PASSPHRASE: "aoe" })).toBe("aoe");
+  expect(passphraseFrom({ HERDR_WEB_PASSPHRASE: "", AOE_SERVE_PASSPHRASE: "aoe" })).toBe("aoe");
+  expect(passphraseFrom({})).toBeUndefined();
+});
 
 test("refuses the wrong passphrase", async () => {
   // Given
