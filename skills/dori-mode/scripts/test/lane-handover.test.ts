@@ -1700,6 +1700,46 @@ test("an ask that did not reach the lane outlives the resumed run's own refusal:
   expect(asks()).toHaveLength(1);
 });
 
+test("a newer facts snapshot written beside one of the same second is the one read next time: a job only it lists stays listed (review 320 round 10)", async () => {
+  // Given: two runs in one second, the second wrote demo-<stamp>-<pid>.json
+  const deps = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  mkdirSync(lanes, { recursive: true });
+  writeFileSync(join(lanes, "demo-20261010-120000.json"), JSON.stringify({ detached: [], chains: [] }));
+  writeFileSync(join(lanes, "demo-20261010-120000-4242.json"), JSON.stringify({ detached: [{ pid: 41, cmd: "sleep 9999" }], chains: [] }));
+  table = baseTable().filter((p) => p.pid !== 15 && p.pid !== 16);
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
+  // Then
+  expect(printed.at(-1)).toMatch(/detached jobs left alone: (?:\d+,)*41(?:,\d+)*$/);
+  expect(r.note).toBeDefined();
+});
+
+test("a resumed run that died after it repointed the lane is started again by freshness so its move is repaired, once per grace period (review 320 round 10)", async () => {
+  // Given: the lead's request waits (refused busy in OLD); its resumed run repointed the lane to NEW and died before committing
+  const base = await setup();
+  const T0 = Date.parse("2026-10-11T16:35:00Z");
+  const clock = fakeClock(T0);
+  const deps = { ...base, clock };
+  appendRollover(state.dir, WAITING);
+  await deps.registry.patch("demo", { pane: NEW, lastReplyAt: T0 });
+  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
+  writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid: 999, at: "2026-10-11T16:30:00Z", from: OLD, to: NEW, note: "/x.md" }));
+  const resumes: string[] = [];
+  const hooks = { signals: async () => ({}), alive: (pid: number) => live.has(pid), resume: async (key: string, approvedBy: string) => { resumes.push(`${key} ${approvedBy}`); return { started: true, line: "unit=u1" }; } };
+  // When
+  await freshnessTick(deps, "/home/test", hooks);
+  clock.at = T0 + 60_000;
+  await deps.registry.patch("demo", { lastReplyAt: clock.at });
+  await freshnessTick(deps, "/home/test", hooks);
+  clock.at = T0 + 4 * 60_000;
+  await deps.registry.patch("demo", { lastReplyAt: clock.at });
+  await freshnessTick(deps, "/home/test", hooks);
+  // Then: started at once, not again within the grace period, again after it while the journal is still there
+  expect(resumes).toEqual([`demo ${LEAD_STUCK}`, `demo ${LEAD_STUCK}`]);
+  expect(readFileSync(deps.config.watchLog, "utf8")).toContain(`HANDOVER_INTERRUPTED_RESUMED demo started: the run of pid 999 died after it repointed the lane to ${NEW}`);
+});
+
 // omo's input box sits between two ─ borders; the status lines under it can quote "esc to interrupt" (here the cwd and a
 // session title), while omo's own running-turn mark is on the box's top border
 const QUOTED = HIGH.replace("old transcript line\n❯ \n────", "old transcript line\n────\n❯ \n────").replace("~/work •", "~/work/esc to interrupt •").replace("(OmO) mem:x", "(OmO) Fix esc to interrupt indicator");

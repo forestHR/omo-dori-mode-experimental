@@ -334,7 +334,13 @@ export const foreignPids = (table: readonly Proc[], tree: ReadonlySet<number>): 
 const carried = (dir: string, key: string, alive: (pid: number) => boolean, known: ReadonlySet<number>): Job[] => {
   let files: string[] = [];
   try {
-    files = readdirSync(dir).filter((n) => new RegExp(`^${escape(key)}-\\d{8}-\\d{6}\\.json$`).test(n)).sort();
+    // <key>-<stamp>.json, or <key>-<stamp>-<pid>.json for a run that wrote second in the same second (the newer one)
+    const name = new RegExp(`^${escape(key)}-(\\d{8}-\\d{6})(?:-(\\d+))?\\.json$`);
+    const order = (n: string): string => {
+      const m = name.exec(n);
+      return `${m?.[1] ?? ""}-${m?.[2] === undefined ? "0" : "1"}-${(m?.[2] ?? "").padStart(10, "0")}`;
+    };
+    files = readdirSync(dir).filter((n) => name.test(n)).sort((a, b) => order(a).localeCompare(order(b)));
   } catch {
     return [];
   }

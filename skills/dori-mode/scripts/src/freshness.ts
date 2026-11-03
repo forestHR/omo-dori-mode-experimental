@@ -7,7 +7,7 @@ import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { leadAlert } from "./autoturn.ts";
 import { taskOpen, taskRecord } from "./background.ts";
-import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, safePointFile, safePointText, statusLine, waitingRequest } from "./lane-handover.ts";
+import { compactionStuckOn, type Pending, pendingFile, type ReadyMark, readyFile, safePointFile, safePointText, statusLine, waitingRequest } from "./lane-handover.ts";
 import { COMMITTED, crossed, dueReasons, limitsFor, readRollovers, type RolloverEntry, type RolloverRequest, type Signals, type Who } from "./rollover.ts";
 import { auditDue, type Committed, weeklyDue, writeMarker } from "./rollover-audit.ts";
 import { dailyAuditSince, linksDue } from "./directive-audit.ts";
@@ -291,8 +291,31 @@ const STARTED_GRACE_MS = 2 * 60_000;
 const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pane: string): Promise<SweepAct[]> => {
   if (!hooks.resume) return [];
   const stateDir = deps.config.stateDir;
-  const asked = waitingRequest(readRollovers(stateDir), key, pane);
+  // a resumed run that died after it repointed the lane (its journal: from the request's pane to this one, a dead process)
+  // left the move uncommitted: the request of the pane it came from is started again, so its run repairs the move first
+  // (HANDOVER_INTERRUPTED), once per grace period while the journal is there (review 320 round 10)
+  const alive0 = hooks.alive ?? pidAlive;
+  const journal = readJson<Pending>(pendingFile(stateDir, key));
+  const broken = journal && journal.to === pane && journal.from !== pane && !alive0(journal.pid) ? journal : undefined;
+  const asked = waitingRequest(readRollovers(stateDir), key, broken ? broken.from : pane);
   if (!asked) return [];
+  if (broken) {
+    if (handoverRunning(stateDir, "lane", key, alive0)) return [];
+    const repairFile = join(stateDir, "handover", "lanes", `${key}.repair-resume.json`);
+    const tried = readJson<{ journal?: string; at?: string }>(repairFile);
+    const now = deps.clock.now();
+    if (tried?.journal === broken.at && now - Date.parse(tried.at ?? "") <= STARTED_GRACE_MS) return [];
+    mkdirSync(join(stateDir, "handover", "lanes"), { recursive: true });
+    writeFileSync(repairFile, `${JSON.stringify({ journal: broken.at, at: new Date(now).toISOString() })}\n`);
+    const by = (asked.approvedBy ?? "").trim();
+    const r = await hooks.resume(key, by, asked.request ?? {});
+    const line = r.started
+      ? `HANDOVER_INTERRUPTED_RESUMED ${key} started: the run of pid ${broken.pid} died after it repointed the lane to ${pane} (journal of ${broken.at}); the request of ${asked.at} started again with the same approval ${JSON.stringify(by)} repairs it first: ${r.line}`
+      : `HANDOVER_INTERRUPTED_RESUME_FAILED ${key} failed: the run of pid ${broken.pid} died after it repointed the lane to ${pane}; the request of ${asked.at} could not be started again (${r.line}); the next sweep tries again`;
+    if (!r.started) rmSync(repairFile, { force: true });
+    watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line });
+    return [{ kind: "ready_resume", lane: key, detail: line.slice(line.indexOf(" ", line.indexOf(" ") + 1) + 1) }];
+  }
   // the safe-point ask the pane did not take (a herdr question open, a pane gone for a moment) is typed again each sweep
   // until it is, once per request: without it the lane never learns it should mark ready (review 320 round 8)
   const askFile = safePointFile(stateDir, key);
