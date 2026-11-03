@@ -759,7 +759,6 @@ class Gate:
         self.write_lock = asyncio.Lock()
         self.vault_lock = asyncio.Lock()
         self.approval_lock = asyncio.Lock()
-        self.message_locks: dict[str, asyncio.Lock] = {}
         self.approval_task = None
         self.order_facts = {}
         self.todo_facts = {}
@@ -1599,7 +1598,7 @@ class Gate:
             raise Refused("batch-refused", extra={"reasons": reasons})
         identity = hashlib.sha256(json.dumps({"owner_message": proof, "title": title, "items": items},
                                              ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        async with self.message_lock(proof), self.approval_lock:
+        async with self.approval_lock:
             known = self.batch(identity)
             if known:
                 if known["status"] not in {"pending", "approved"}:
@@ -1808,9 +1807,9 @@ class Gate:
             name = " ".join(name.splitlines()) or f"파일 이름을 읽지 못함 · {shared[1][:40]}"
             role = DRIVE_ROLES.get(str({**fallback, **data}.get("role", "")), "")
             title = (f"{name} 공유({role})" if role else f"{name} 공유") if shared[2] == "permissions" else f"{name} 댓글"
-        # Owner Q474 (2026-11-03): from choosing the thread until the card is on record, no other card of the same
-        # owner message chooses one, so cards asked at once still share the thread (lock order: message, then approval).
-        async with self.message_lock(proof):
+        # Owner Q474 (2026-11-03): from choosing the thread until the card is on record, no other card chooses one and
+        # the poller decides nothing, so cards asked at once share the thread and no thread is closed under a new card.
+        async with self.approval_lock:
             thread = await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
             await self.supersede(thread, api, op, path, method, title, body)
             # Owner 2026-10-19 00:00 KST: the card shows who, what and the reactions; the reason,
@@ -1857,7 +1856,7 @@ class Gate:
 
         Owner Q474 (2026-11-03, "드라이브 공유는 묶음 한 스레드"): the cards one owner message asks for share one
         thread, so a card or batch whose message already has an undecided card or batch goes into that thread
-        (2026-10-30 one request made eighteen Drive sharing threads in two minutes). Callers hold message_lock.
+        (2026-10-30 one request made eighteen Drive sharing threads in two minutes). Callers hold approval_lock.
         """
         for record in [*self.pending(), *self.batches()]:
             if (proof and record.get("owner_message") == proof and record.get("status", "pending") == "pending"
@@ -1888,34 +1887,30 @@ class Gate:
         print("GATE_CARD_THREAD_FALLBACK", file=sys.stderr, flush=True)
         return channel
 
-    def message_lock(self, proof) -> asyncio.Lock:
-        """The lock one owner message's cards take while they choose a thread and go on record."""
-        return self.message_locks.setdefault(str(proof), asyncio.Lock())
-
     async def supersede(self, thread, api, op, path, method, title, body=b"") -> None:
         """A newer card for the same work in the same thread replaces the older undecided one.
 
         A sharing grant (Drive permission, Calendar ACL) is the same work only for the same grantee: two cards in one
-        thread may share one file or calendar with two people, and the second must not replace the first."""
+        thread may share one file or calendar with two people, and the second must not replace the first.
+        The caller holds approval_lock."""
         incoming = grantee(body)  # read once: the loop below reuses `body` for the Discord replies
-        async with self.approval_lock:
-            for entry in self.pending():
-                if (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
-                        or entry.get("path") != path or entry.get("status") != "pending"
-                        or method == "POST" and entry.get("title") != title
-                        or method == "POST" and path.endswith(("/permissions", "/acl"))
-                        and grantee(base64.b64decode(entry.get("body") or "")) != incoming):
-                    continue
-                base = f"/channels/{entry['channel']}/messages/{entry['message']}"
-                if await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅"):
-                    continue  # the owner already decided that card; the poller handles it
-                (self.state / "pending" / (entry["id"] + ".json")).unlink(missing_ok=True)
-                self.deny(entry["uid"], "google", entry["method"], entry["path"], "superseded")
-                status, _, body = await self.bot_call("GET", base)
-                original = json_object(body).get("content", "") if 200 <= status < 300 else ""
-                await self.bot_call("PATCH", base, {
-                    "content": ("🔁 새 판으로 대체됨 — 이 카드는 실행되지 않습니다\n" + original)[:2000],
-                    "allowed_mentions": {"parse": []}})
+        for entry in self.pending():
+            if (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
+                    or entry.get("path") != path or entry.get("status") != "pending"
+                    or method == "POST" and entry.get("title") != title
+                    or method == "POST" and path.endswith(("/permissions", "/acl"))
+                    and grantee(base64.b64decode(entry.get("body") or "")) != incoming):
+                continue
+            base = f"/channels/{entry['channel']}/messages/{entry['message']}"
+            if await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅"):
+                continue  # the owner already decided that card; the poller handles it
+            (self.state / "pending" / (entry["id"] + ".json")).unlink(missing_ok=True)
+            self.deny(entry["uid"], "google", entry["method"], entry["path"], "superseded")
+            status, _, body = await self.bot_call("GET", base)
+            original = json_object(body).get("content", "") if 200 <= status < 300 else ""
+            await self.bot_call("PATCH", base, {
+                "content": ("🔁 새 판으로 대체됨 — 이 카드는 실행되지 않습니다\n" + original)[:2000],
+                "allowed_mentions": {"parse": []}})
 
     async def owner_reacted(self, base, emoji) -> bool:
         after = None
@@ -2101,7 +2096,8 @@ class Gate:
 
     async def approval_loop(self):
         try:
-            await self.close_decided_threads()
+            async with self.approval_lock:  # no card is choosing its thread while the sweep closes threads
+                await self.close_decided_threads()
         except (Refused, OSError, ValueError, KeyError, http.client.HTTPException):
             print("GATE_THREAD_SWEEP_FAILED", file=sys.stderr, flush=True)
         while True:

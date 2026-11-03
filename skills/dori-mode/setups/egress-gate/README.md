@@ -207,8 +207,9 @@ thread in the approval channel (any thread failure falls back to the channel); a
 `🔔 🔐 <kind> · <what>` (🔔: a card in it waits on the owner). The cards one owner message asks for
 share one thread (owner Q474, 2026-11-03; one request had made eighteen Drive sharing threads in two
 minutes): a card or a batch card whose owner message already has an undecided card or batch card in a
-thread goes into that thread, in any order and also when they arrive at once (a per-message lock covers
-choosing the thread until the card is on record). A thread whose cards were all decided is not reused. A newer card
+thread goes into that thread, in any order and also when they arrive at once. Choosing the thread until the
+card is on record holds the approval lock, so neither another card nor the poller's decisions (which close
+threads) run in between. A thread whose cards were all decided is not reused. A newer card
 for the same work in the same thread (same API, operation and path; for creates, the same
 title) replaces the older undecided card: it is marked `🔁 새 판으로 대체됨` and never runs.
 Once the last card in a thread the gate opened (its name starts `🔐 ` after any leading mark) is decided,

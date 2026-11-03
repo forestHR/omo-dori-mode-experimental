@@ -48,6 +48,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.thread_meta = {}
         self.thread_patches = []
         self.thread_history = {}
+        self.on_card_post = None  # awaited when a card message is posted, before the fake answers
         self.author = "1"
         self.webhook = None
         self.proof_time = gate.utc()
@@ -251,6 +252,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     elif method == "PATCH":
                         self.cards[message] = json.loads(body)["content"]
                 elif route.endswith("/messages") and method == "POST":
+                    if self.on_card_post:
+                        await self.on_card_post()
                     if parts[2] in self.thread_meta and "thread_metadata" in self.thread_meta[parts[2]]:
                         self.thread_meta[parts[2]]["thread_metadata"]["archived"] = False  # Discord reopens
                     message = str(1000 + len(self.cards))
@@ -549,6 +552,27 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*(self.share(f) for f in "fgh"), self.submit_batch(origin="30/100"))
         self.assertEqual(self.created_threads, ["/channels/20/threads"])
         self.assertEqual(self.card_threads(), ["777"] * 4)
+
+    async def test_a_decision_while_a_card_joins_the_thread_never_closes_the_thread_under_it(self):
+        # Given: a card of one owner message waits in its thread and the owner has cancelled it.
+        self.approval()
+        await self.share("f")
+        self.react(self.service.pending()[0]["message"], "⛔")
+        polls = []
+
+        async def poll_while_the_card_is_posted():
+            self.on_card_post = None
+            held = self.service.approval_lock.locked()  # by the submission: nothing else runs now
+            polls.append(asyncio.ensure_future(self.service.poll_approvals()))
+            if not held:
+                await polls[0]  # nothing holds the poller off: it decides and closes mid-submission
+        self.on_card_post = poll_while_the_card_is_posted
+        # When: a second card of that message is posted while the poller decides the first.
+        await self.share("g")
+        await asyncio.gather(*polls)
+        # Then: the new card waits in that thread, which is neither archived nor titled decided.
+        self.assertEqual(self.card_threads(), ["777"])
+        self.assertEqual([patch for patch in self.thread_patches if patch[0] == "777"], [])
 
     async def test_another_owner_message_gets_its_own_thread_and_a_decided_thread_is_not_reused(self):
         self.approval()
