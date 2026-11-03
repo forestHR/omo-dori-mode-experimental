@@ -2,7 +2,7 @@ import { appendFileSync, closeSync, mkdirSync, openSync, writeFileSync } from "n
 import { dirname, join, resolve } from "node:path";
 
 import { configPath, envFilePath } from "./config.ts";
-import { powershellLiteral } from "./powershell.ts";
+import { powershellData as data } from "./powershell.ts";
 import type { Clock } from "./run.ts";
 
 // dori serve: one process that keeps a Dori's long-running loops up where there is no systemd and no bash (native
@@ -94,19 +94,22 @@ export const taskArgv = (bun: string, cli: string, stateDir: string): string[] =
   const state = resolve(stateDir);
   const entry = join(state, "serve-task.ps1");
   mkdirSync(state, { recursive: true });
-  writeFileSync(entry, `\uFEFF$env:DORI_CONFIG = ${powershellLiteral(resolve(configPath()))}
-$env:DORI_ENV_FILE = ${powershellLiteral(resolve(envFilePath()))}
-$env:DORI_STATE_DIR = ${powershellLiteral(state)}
-& ${powershellLiteral(bun)} ${powershellLiteral(cli)} serve --log ${powershellLiteral(join(state, "serve.log"))}
+  // paths and names go in as data (powershellData), never as PowerShell text
+  writeFileSync(entry, `\uFEFF$env:DORI_CONFIG = ${data(resolve(configPath()))}
+$env:DORI_ENV_FILE = ${data(resolve(envFilePath()))}
+$env:DORI_STATE_DIR = ${data(state)}
+$doriArgv = @(${[bun, cli, "serve", "--log", join(state, "serve.log")].map(data).join(", ")})
+$doriRest = @($doriArgv | Select-Object -Skip 1)
+& $doriArgv[0] @doriRest
 exit $LASTEXITCODE
 `);
   const registration = [
     "$ErrorActionPreference = 'Stop'",
-    `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${powershellLiteral(`-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${entry}"`)}`,
+    `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${data(`-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${entry}"`)}`,
     "$trigger = New-ScheduledTaskTrigger -AtLogOn",
     "$settings = New-ScheduledTaskSettingsSet",
     "$settings.ExecutionTimeLimit = 'PT0S'",
-    `Register-ScheduledTask -TaskName ${powershellLiteral(TASK_NAME)} -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null`,
+    `Register-ScheduledTask -TaskName ${data(TASK_NAME)} -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null`,
   ].join("; ");
   return ["powershell", "-NoProfile", "-NonInteractive", "-Command", registration];
 };

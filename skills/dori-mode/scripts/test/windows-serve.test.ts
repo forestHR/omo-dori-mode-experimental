@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { powershellLiteral as quote } from "../src/powershell.ts";
@@ -66,6 +66,29 @@ const taskFixture = () => {
     },
   } as const;
 };
+
+test("the task script and its registration carry paths and names only as data, never as PowerShell text", () => {
+  // Given instance paths holding quotes, curly quotes and shell metacharacters.
+  const root = mkdtempSync(join(tmpdir(), "dori-task-data-"));
+  const dir = join(root, "O'\u2019Connor & semi; $name");
+  const previous = process.env.DORI_CONFIG;
+  try {
+    process.env.DORI_CONFIG = join(dir, "chosen.json");
+    // When the task script and its registration are generated.
+    const argv = taskArgv("bun", join(dir, "cli.ts"), join(dir, "state"));
+    const script = readFileSync(join(dir, "state", "serve-task.ps1"), "utf8");
+    // Then no path text appears in either, only base64 decoded in the shell.
+    for (const text of [script, argv.join(" ")]) {
+      expect(text).not.toContain("Connor");
+      expect(text).not.toContain("semi;");
+      expect(text).toContain("FromBase64String");
+    }
+  } finally {
+    if (previous === undefined) delete process.env.DORI_CONFIG;
+    else process.env.DORI_CONFIG = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test.skipIf(process.platform !== "win32")("review 2 registers an unlimited supervisor execution time", async () => {
   // Given isolated task files and a unique registration name.
