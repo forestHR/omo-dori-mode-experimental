@@ -74,6 +74,16 @@ test("a quiet done thread in the owner's channel is archived; working, waiting, 
   expect(lines).toEqual(['THREAD_AUTO_ARCHIVED 301 quiet=40m "✅ 도리 상태 파일 깃 관리"']);
 });
 
+test("a quiet Yoodori thread that ended ⛔ or 💤 is archived like a done one; ❗ waits for the owner and stays open", async () => {
+  const { w, dc } = world([
+    { id: "341", name: "⛔ ✉️ 취소한 메일", lastMin: 60 },
+    { id: "342", name: "💤 ✉️ 새 초안으로 바뀐 메일", lastMin: 60 },
+    { id: "343", name: "❗ 🔐 실패한 공유", lastMin: 600 },
+  ]);
+  await archiveDoneThreads(deps(dc));
+  expect(w.patches).toEqual([{ id: "341", body: { archived: true } }, { id: "342", body: { archived: true } }]);
+});
+
 test("a done thread an open lane, an open question card or a pending status rename still holds stays open", async () => {
   const { w, dc } = world([
     { id: "311", name: "✅ shared with an open lane", lastMin: 600 },

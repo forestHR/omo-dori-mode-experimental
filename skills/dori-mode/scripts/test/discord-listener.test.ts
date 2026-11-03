@@ -240,6 +240,24 @@ test("the owner writing in a closed thread reopens it as working; an open thread
   expect(logs.filter((l) => l.startsWith("THREAD_REOPENED"))).toEqual(["THREAD_REOPENED 501", "THREAD_REOPENED 502"]);
 });
 
+test("the owner answering a thread that showed his turn (🔔 with no card, the old ⏸️, ❗) makes it ours again, and one that ended ⛔ or 💤 reopens", async () => {
+  const names: Record<string, string> = { "511": "🔔 asked you", "512": "⏸️ old wait", "513": "❗ 🔐 share failed", "514": "⛔ ✉️ cancelled mail", "515": "💤 ✉️ replaced draft" };
+  const { listener, seen, logs } = setup((req) => {
+    const id = /\/channels\/(\d+)$/.exec(req.url)?.[1] ?? "";
+    return id in names ? { parent_id: CHANNEL, name: names[id], type: 11, thread_metadata: { archived: id === "514" || id === "515" } } : {};
+  });
+  for (const [n, thread] of Object.keys(names).entries()) await listener.onMessage(msg(`200${n}`, { channel_id: thread }));
+  const patches = seen.filter((r) => r.method === "PATCH").map((r) => [r.url.replace("https://discord.com/api/v10", ""), JSON.parse(String(r.body)).name]);
+  expect(patches).toEqual([
+    ["/channels/511", "🔄 asked you"],
+    ["/channels/512", "🔄 old wait"],
+    ["/channels/513", "🔄 🔐 share failed"],
+    ["/channels/514", "🔄 ✉️ cancelled mail"],
+    ["/channels/515", "🔄 ✉️ replaced draft"],
+  ]);
+  expect(logs.filter((l) => /^THREAD_(REOPENED|ANSWERED)/.test(l))).toEqual(["THREAD_ANSWERED 511", "THREAD_ANSWERED 512", "THREAD_ANSWERED 513", "THREAD_REOPENED 514", "THREAD_REOPENED 515"]);
+});
+
 test("a voice note is transcribed into the inbox row; a failed transcription still records the message", async () => {
   let fail = false;
   const { listener, inbox, logs } = setup(() => ({}), { transcribe: async () => { if (fail) throw new Error("stt down"); return "ship it"; } });

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { DiscordWords } from "../config.ts";
 import type { Discord } from "./discord.ts";
 import { type Interaction, modalValue, openCardIds, type QuestionCards } from "./discord-cards.ts";
-import { isDoneName, type ThreadInfo } from "./discord-thread.ts";
+import { isDoneName, isOwnerTurnName, type ThreadInfo } from "./discord-thread.ts";
 import { MessengerError } from "./http.ts";
 import type { Timers } from "./typing.ts";
 
@@ -440,17 +440,20 @@ export class DiscordListener {
   }
 
   // The owner writing in a closed thread brings the work back: unarchive it and mark it working again. Writing in a
-  // thread with an open question card re-checks its mark, which follows the card (waiting) unless a lane in the thread
-  // is working, not the reply.
+  // thread that showed his turn (🔔 with no card left, ❗) answers it: it is ours again, working. Writing in a thread
+  // with an open question card re-checks its mark, which follows the card (waiting) unless a lane in the thread is
+  // working, not the reply.
   private async recheckThread(threadId: string, openCards: readonly string[]): Promise<void> {
     if (openCards.length) {
       await this.d.cards.statuses.request(threadId, "working");
       return;
     }
     const info = await this.d.dc.call<ThreadInfo>("GET", `/channels/${threadId}`);
-    if (!isDoneName(info.name ?? "", this.d.words)) return;
+    const name = info.name ?? "";
+    const done = isDoneName(name, this.d.words);
+    if (!done && !isOwnerTurnName(name, this.d.words)) return;
     await this.d.cards.statuses.request(threadId, "working");
-    this.d.log(`THREAD_REOPENED ${threadId}`);
+    this.d.log(`${done ? "THREAD_REOPENED" : "THREAD_ANSWERED"} ${threadId}`);
   }
 
   async onInteraction(i: Interaction): Promise<void> {

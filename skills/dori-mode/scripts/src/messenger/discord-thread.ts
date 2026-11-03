@@ -99,7 +99,14 @@ export const threadName = (status: ThreadMark, title: string, words: DiscordWord
   return `${outcome ?? statusMark(status, words)} ${rest}`;
 };
 
-export const isDoneName = (name: string, words: DiscordWords): boolean => name.startsWith(STATUS_EMOJI.done) || name.startsWith(`[${words.done}]`);
+// A thread that ended and may sit archived: done, or a Yoodori request cancelled (⛔) or replaced or withdrawn (💤).
+// ❗ (failed) is not: it waits for the owner, like 🔔.
+export const isDoneName = (name: string, words: DiscordWords): boolean =>
+  [STATUS_EMOJI.done, "⛔", "💤"].some((m) => name.startsWith(m)) || name.startsWith(`[${words.done}]`);
+
+// A thread that shows the owner's turn: 🔔 (or the old ⏸️), ❗, or this setting's waiting word.
+export const isOwnerTurnName = (name: string, words: DiscordWords): boolean =>
+  [STATUS_EMOJI.waiting, "⏸", "❗"].some((m) => name.startsWith(m)) || name.startsWith(`[${words.waiting}]`);
 
 export const progressText = (status: "working" | "done", text: string, words: DiscordWords): string =>
   words.statusStyle === "emoji" ? (status === "working" ? `⏳ · ${text}` : `${STATUS_EMOJI.done} ${text}`) : `${words[status]}: ${text}`;
