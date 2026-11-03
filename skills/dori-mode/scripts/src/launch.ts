@@ -612,7 +612,9 @@ const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string
   // the shared opener (herdr.ts): a tab labelled with the key, a workspace first on a fresh server, the agent run there
   let opened: { readonly pane: string; readonly tab?: string };
   try {
-    opened = await openHerdrSession(deps.run, deps.clock, { title: key, cwd, argv, env: { ...env, PATH: agentPath(argv[0] ?? "omo") }, ...(deps.config.laneWorkspace ? { workspace: deps.config.laneWorkspace } : {}) });
+    // omo needs node for its hooks (agentPath); another agent starts with the server's PATH as before
+    const path = basename(argv[0] ?? "") === "omo" ? { PATH: agentPath(argv[0] ?? "omo") } : {};
+    opened = await openHerdrSession(deps.run, deps.clock, { title: key, cwd, argv, env: { ...env, ...path }, ...(deps.config.laneWorkspace ? { workspace: deps.config.laneWorkspace } : {}) });
   } catch (e) {
     throw new LaunchFailed(e instanceof Error ? e.message : String(e));
   }

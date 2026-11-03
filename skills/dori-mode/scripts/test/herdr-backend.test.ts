@@ -140,3 +140,32 @@ test("launch on a fresh herdr server (no workspace yet) opens the lane in a work
   expect(r.lane).toMatchObject({ pane: "w1:p2", tab: "w1:t2" });
 });
 
+
+test("under a herdr config a tmux session of any name (no aoe_ prefix) still goes to tmux: screen and shell pid", async () => {
+  const deps = omo();
+  await readScreen(deps.run, "herdr", "lead");
+  await shellPidOf("lead", { run: deps.run, sessionsDir: dir, backend: "herdr" });
+  expect(world.calls.some((c) => c[0] === "herdr")).toBe(false);
+  expect(world.calls.map((c) => c.slice(0, 2).join(" "))).toEqual(["tmux capture-pane", "tmux display-message"]);
+});
+
+test("a herdr launch of an agent that is no omo needs no node: it starts with the server's PATH", async () => {
+  const brief = join(dir, "brief.md");
+  await Bun.write(brief, "# brief\n");
+  const deps = omo({ agentCommand: ["claude", "{prompt}"] });
+  const path = process.env.PATH;
+  const nvm = process.env.NVM_DIR;
+  process.env.PATH = "/nonexistent";
+  process.env.NVM_DIR = join(dir, "no-nvm");
+  try {
+    const base = deps.run;
+    const run: Runner = async (argv, o) => (argv[1] === "tab" && argv[2] === "create" ? { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w1:p3", tab_id: "w1:t3" } } }), err: "" } : base(argv, o));
+    const r = await launchLane({ ...deps, run, readGoal: async () => ({ status: "active" }) }, { noThread: "QA", key: "nonode", title: "nonode", brief, done: "file /x", cwd: "/tmp" });
+    expect(r.startup).not.toContain("NO_NODE");
+    expect(world.calls.find((c) => c[2] === "run")?.[4] ?? "").not.toContain("PATH=");
+  } finally {
+    process.env.PATH = path;
+    if (nvm === undefined) delete process.env.NVM_DIR;
+    else process.env.NVM_DIR = nvm;
+  }
+});

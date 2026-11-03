@@ -2,7 +2,6 @@ import { readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { tmuxPanePid } from "./aoe.ts";
-import { isHerdrPane } from "./herdr.ts";
 import type { Backend } from "./config.ts";
 import type { Runner } from "./run.ts";
 
@@ -64,10 +63,8 @@ export const hasSessionSelector = (argv: readonly string[]): boolean => argv.som
 export type SessionDeps = { readonly run: Runner; readonly sessionsDir: string; readonly backend?: Backend; readonly listDir?: (dir: string) => readonly string[] };
 
 export const shellPidOf = async (pane: string, deps: SessionDeps): Promise<number> => {
-  // the pane id says its backend (an aoe session stays tmux after the Dori's config moved to herdr): aoe.ts tmuxPanePid
-  if (deps.backend === "aoe" || isHerdrPane(pane) || pane.startsWith("aoe_")) return tmuxPanePid(deps.run, pane);
-  const info = await deps.run(["herdr", "pane", "process-info", "--pane", pane]);
-  return info.code === 0 ? Number((JSON.parse(info.out) as { result?: { process_info?: { shell_pid?: number } } }).result?.process_info?.shell_pid ?? 0) : 0;
+  // the pane id says its backend, whatever the config says (aoe.ts tmuxPanePid: herdr process-info for a herdr pane id)
+  return tmuxPanePid(deps.run, pane);
 };
 
 export const resolveSession = async (pane: string, cwd: string, table: readonly Proc[], deps: SessionDeps): Promise<SessionHit> => {

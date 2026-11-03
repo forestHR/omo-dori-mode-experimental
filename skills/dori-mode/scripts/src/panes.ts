@@ -30,12 +30,9 @@ export const listPanes = async (run: Runner, backend: Backend): Promise<Pane[]> 
   return (JSON.parse(r.out) as { result: { panes: Pane[] } }).result.panes;
 };
 
-// an aoe session (a tmux name) is read through tmux whatever the config says, a herdr pane through herdr (captureTmux
-// dispatches on the pane id)
-export const readScreen = async (run: Runner, backend: Backend, pane: string, lines?: number): Promise<string> =>
-  backend === "aoe" || isHerdrPane(pane) || pane.startsWith("aoe_")
-    ? captureTmux(run, pane, lines)
-    : (await run(["herdr", "pane", "read", pane, "--source", lines ? "recent" : "visible", ...(lines ? ["--lines", String(lines)] : [])])).out;
+// a tmux name is read through tmux and a herdr pane id through herdr, whatever the config says (captureTmux dispatches on
+// the pane id: only a herdr pane id holds ":")
+export const readScreen = async (run: Runner, _backend: Backend, pane: string, lines?: number): Promise<string> => captureTmux(run, pane, lines);
 
 // tmux refuses one send-keys argument much longer than 16 KB (2026-10-19: 15,000 bytes typed, 20,000 refused), so a long
 // text (a directive block, a report) is typed in pieces of at most this many bytes, whole characters only, before the Enter.
@@ -120,10 +117,10 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
 // An aoe session, and a herdr pane (an id with ":", herdr.ts) of a Dori that runs omo there, get the same checks: a gone,
 // dead or frozen pane is named and nothing is typed, the text waits for omo's ❯ prompt, and the session's transcript is
 // evidence of delivery. A herdr Dori whose agentCommand is no omo keeps the bare herdr keys.
-// Whether dori drives omo in this session the aoe way: every aoe session (a tmux name aoe_..., also under a herdr config
-// while the Dori moves), and the herdr panes of a Dori whose agentCommand is omo.
+// Whether dori drives omo in this session the aoe way: every tmux session (also under a herdr config while the Dori
+// moves), and the herdr panes of a Dori whose agentCommand is omo.
 export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || basename(config.agentCommand[0] ?? "") === "omo";
-export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => (isHerdrPane(pane) ? omoSession(config) : config.backend === "aoe" || pane.startsWith("aoe_"));
+export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
 
 const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): PaneKeys => {
   const herdr = isHerdrPane(pane);

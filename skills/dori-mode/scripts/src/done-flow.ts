@@ -13,7 +13,6 @@ import { leadLimitTick, limitResumeTick } from "./lead-limit.ts";
 import { missedAnswersTick } from "./missed-answers.ts";
 import { hasThread, type Lane, type Registry, statusOf, type ThreadPost, withStatus } from "./registry.ts";
 import { type Clock, iso, type Runner } from "./run.ts";
-import { isHerdrPane } from "./herdr.ts";
 import { omoPane, sendVerified, submitToPane } from "./panes.ts";
 import { pendingGoalTick } from "./pending-goal.ts";
 import type { Submitted } from "./submit.ts";
@@ -422,7 +421,7 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
   }
   // an aoe session or a herdr pane is closed by its own backend (the pane id says which; a herdr pane's tab goes only when
   // the pane is all it holds); a lane of another herdr agent keeps the tab/pane close it had
-  if (lane.pane && (deps.config.backend === "aoe" || isHerdrPane(lane.pane) || lane.pane.startsWith("aoe_"))) {
+  if (lane.pane && omoPane(deps.config, lane.pane)) {
     cleanup.push(await closeAoeSession(deps.run, lane.pane));
   } else if (lane.tab) cleanup.push((await deps.run(["herdr", "tab", "close", lane.tab])).code === 0 ? `tab ${lane.tab} closed` : `tab ${lane.tab} not closed`);
   else if (lane.pane) cleanup.push((await deps.run(["herdr", "pane", "close", lane.pane])).code === 0 ? `pane ${lane.pane} closed` : `pane ${lane.pane} not closed`);
