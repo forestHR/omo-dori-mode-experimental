@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { closeAoeSession, envMismatch, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
+import { closeAoeSession, envMismatch, herdrAgentArgv, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
 import { agentLine, openHerdrSession } from "../src/herdr.ts";
 import { readScreen } from "../src/panes.ts";
 import { resolveSession, shellPidOf, topAgent } from "../src/session-id.ts";
@@ -183,4 +183,25 @@ test("the agent of a herdr lane keyed mcp-fix (its prompt on the command line) i
   expect(agentTree(table, 4000, 999).agent?.pid).toBe(4001);
   const run: Runner = async (argv) => ({ code: 0, out: argv[2] === "process-info" ? JSON.stringify({ result: { process_info: { shell_pid: 4000 } } }) : "", err: "" });
   expect((await resolveSession("w1:p1", "/tmp", table, { run, sessionsDir: dir, backend: "herdr" })).id).toBe("11111111-2222-4333-8444-555555555555");
+});
+
+test("upstream #66/#70 on herdr: an omo pane with a question open, and a bare-agent pane with only its shell or a blocked agent, get nothing", async () => {
+  const deps = omo();
+  world.screens = { "w1:p1": "Ask user · Which one?\n❯ " };
+  const q = await submitToPane(deps.run, deps.clock, deps.config, "w1:p1", "[LEAD] hi");
+  expect((q as { reason: string }).reason).toStartWith("PANE_BLOCKED: a question is open in w1:p1");
+  const bare = omo({ agentCommand: ["claude", "{prompt}"] });
+  const pane = (p: Record<string, unknown>): Runner => async (argv, o) => (argv[2] === "get" ? { code: 0, out: JSON.stringify({ result: { pane: { pane_id: "w1:p2", ...p } } }), err: "" } : fakeRunner(world)(argv, o));
+  const shell = await submitToPane(pane({}), bare.clock, bare.config, "w1:p2", "rm -rf /tmp/x");
+  expect((shell as { reason: string }).reason).toStartWith("PANE_DEAD: no agent runs in w1:p2");
+  const blocked = await submitToPane(pane({ agent: "claude", agent_status: "blocked" }), bare.clock, bare.config, "w1:p2", "yes");
+  expect((blocked as { reason: string }).reason).toStartWith("PANE_BLOCKED: the agent in w1:p2 waits on a confirmation");
+  expect(sent(world)).toEqual([]);
+});
+
+test("a handover's new herdr session keeps agentCommand's own options and picks a new session id unless the template names one", () => {
+  const argv = herdrAgentArgv(["omo", "--session-dir", "/s", "--model", "{model}", "{prompt}"], "m/x", "high");
+  expect(argv.slice(0, 2)).toEqual(["omo", "--session-id"]);
+  expect(argv.slice(3)).toEqual(["--session-dir", "/s", "--model", "m/x", "--thinking", "high"]);
+  expect(herdrAgentArgv(["omo", "--continue", "--model", "{model}", "{prompt}"], "m/x")).toEqual(["omo", "--continue", "--model", "m/x"]);
 });

@@ -21,6 +21,7 @@ import { iso } from "./run.ts";
 import { descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, ROUND_TRIES, section, seedRestatement, wholeBullet, words } from "./restatement.ts";
 import { appendRollover, approvalProblem, autoReason, type Candidate, clearQuiet, COMMITTED, decidedBy, inboxMessages, LEAD_PREFIX, lastProposal, limitsFor, ownerQuotes, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Signals, sessionSignals, setQuiet, type Step, type Supplement, userLines } from "./rollover.ts";
+import { turnRunning } from "./submit.ts";
 import { watchLog } from "./watch-log.ts";
 
 export type HandoverDeps = FlowDeps & Pick<FreezeDeps, "procs" | "signal"> & {
@@ -627,6 +628,9 @@ const verify = async (deps: HandoverDeps, facts: HandoverFacts, to: Target, veri
   const report = deps.nonce();
   const inbox = deps.nonce();
   const ack = (id: string) => `dori handover ack ${id} --state ${deps.config.stateDir}`;
+  // the probes go in once the new lead's first turn (reading the note) has ended, as a lane's does (lane-handover.ts verifyLane)
+  for (; i < tries && turnRunning(await captureTmux(deps.run, to.pane)); i++) await deps.clock.sleep(POLL_MS);
+  if (i >= tries) return { reasons: [`the first turn of ${to.pane} was still running after ${verifyMin} min; the probes were not sent`], session };
   const line = `[REPORT] handover-probe | milestone | ${PROBE} ${report}: run ${ack(report)}`;
   if (!(await sendVerified(deps.run, deps.clock, deps.config, routed, line))) return { reasons: [`the report probe did not reach ${routed}`], session };
   appendFileSync(deps.inbox, `${JSON.stringify({ ts: iso(deps.clock), id: `handover-${inbox}`, scope: "channel", kind: "handover-probe", content: `${PROBE} ${inbox}: run ${ack(inbox)}` })}\n`);
@@ -846,7 +850,7 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
     // the lead is no lane: it never starts with launchEnv, even when the handover runs from a lane's environment
     // the new lead opens in this Dori's backend: a herdr Dori's next to the old herdr lead (its workspace), an aoe lead moves to herdr once the config says so
     const workspace = config.backend === "herdr" && isHerdrPane(facts.from.pane) ? sessionFor(await liveSessions(deps.run), facts.from.pane)?.profile : undefined;
-    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", model, env: laneEnv(config.launchEnv, true), backend: config.backend, ...(workspace ? { workspace } : {}) });
+    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", agentCommand: config.agentCommand, model, env: laneEnv(config.launchEnv, true), backend: config.backend, ...(workspace ? { workspace } : {}) });
     mark("open", true);
   } catch (e) {
     mark("open", false);

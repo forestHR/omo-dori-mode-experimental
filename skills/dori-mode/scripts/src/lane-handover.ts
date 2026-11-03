@@ -11,7 +11,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 
 import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./background.ts";
-import { captureTmux, closeAoeSession, envMismatch, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
+import { captureTmux, closeAoeSession, envMismatch, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, paneLife, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
 import { turnRunning } from "./submit.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { freezePane, writeFrozen } from "./frozen.ts";
@@ -782,9 +782,11 @@ const pointLane = async (deps: LaneHandoverDeps, key: string, from: string, to: 
 // Repairs what an interrupted run left: while the old session lives it stays the lane and the new one is closed; when
 // only the new one lives (the old was already closed) the lane stays on the new one.
 export const recover = async (deps: LaneHandoverDeps, p: Pending, emit: (line: string) => void): Promise<void> => {
+  // an agent that runs, not a pane that is listed: a herdr pane keeps its shell after its agent ended
   const sessions = await liveSessions(deps.run);
-  const oldAlive = !!sessionFor(sessions, p.from);
-  const newAlive = !!sessionFor(sessions, p.to);
+  const alive = async (pane: string) => (isHerdrPane(pane) ? (await paneLife(deps.run, pane)).live : !!sessionFor(sessions, pane));
+  const oldAlive = await alive(p.from);
+  const newAlive = await alive(p.to);
   if (oldAlive) {
     if (p.agentPid) deps.signal(p.agentPid, "SIGCONT");
     await pointLane(deps, p.key, p.to, p.from, `pane back to ${p.from}: interrupted handover repaired`, emit);
@@ -811,7 +813,7 @@ const moveLane = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, facts
   try {
     // the new session opens in this Dori's backend, so a lane moves from aoe to herdr at its next handover
     const workspace = config.backend === "herdr" ? config.laneWorkspace || (isHerdrPane(from.pane) ? sessionFor(await liveSessions(deps.run), from.pane)?.profile : undefined) : undefined;
-    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", model: facts.model, ...(facts.thinking ? { thinking: facts.thinking } : {}), env: laneEnv(config.launchEnv, lane.useGpu), backend: config.backend, ...(workspace ? { workspace } : {}) });
+    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", agentCommand: config.agentCommand, model: facts.model, ...(facts.thinking ? { thinking: facts.thinking } : {}), env: laneEnv(config.launchEnv, lane.useGpu), backend: config.backend, ...(workspace ? { workspace } : {}) });
     ctx.mark("open", true);
   } catch (e) {
     ctx.mark("open", false);
@@ -888,7 +890,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   const checked = await verifyLane(deps, facts, pane, opts.verifyMin ?? config.handover.verifyMin, note.replace(/\.md$/, ".understood.md"), emit);
   ctx.supplements.push(...(checked.supplements ?? []));
   mark("verify", !checked.reasons.length);
-  if (checked.reasons.length && !sessionFor(await liveSessions(deps.run), from.pane)) {
+  if (checked.reasons.length && !(isHerdrPane(from.pane) ? (await paneLife(deps.run, from.pane)).live : !!sessionFor(await liveSessions(deps.run), from.pane))) {
     // nothing to go back to: the old session ended during the checks, so the new one stays the lane
     emit(`HANDOVER_OLD_GONE ${lane.key}: ${from.pane} ended during the checks (${checked.reasons.join("; ")}); the lane stays on ${pane}`);
     await tell(deps, pane, `[LEAD] ${COMMITTED}: the old session ended during the checks, so you are the ${lane.key} lane now although a check failed (${checked.reasons.join("; ")}); tell the lead what you see. ${config.launchKeywords}: go on with step 5 of the note.`);

@@ -91,7 +91,8 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   if (cmd === "herdr" && a1 === "pane" && (a2 === "get" || a2 === "process-info")) {
     const pane = (a2 === "get" ? argv[3] : argv[argv.indexOf("--pane") + 1]) ?? "";
     if (w.herdrGone?.includes(pane)) return { code: 1, out: JSON.stringify({ error: { code: "pane_not_found", message: `pane ${pane} not found` } }), err: "" };
-    if (a2 === "get") return ok(JSON.stringify({ result: { pane: { pane_id: pane, tab_id: `${pane.split(":")[0]}:t-${pane.split(":")[1] ?? ""}` } } }));
+    // herdr names the agent it detects in a pane and leaves the field out over a bare shell
+    if (a2 === "get") return ok(JSON.stringify({ result: { pane: { pane_id: pane, tab_id: `${pane.split(":")[0]}:t-${pane.split(":")[1] ?? ""}`, ...(w.herdrDead?.includes(pane) ? {} : { agent: "claude", agent_status: "idle" }) } } }));
     const fg = w.herdrDead?.includes(pane) ? [{ pid: 4000, cmdline: "-bash" }] : [{ pid: 4001, cmdline: "omo --model m" }];
     return ok(JSON.stringify({ result: { process_info: { pane_id: pane, shell_pid: 4000, foreground_processes: fg } } }));
   }

@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 
 import { closeHerdrSession, herdrAgentPid, herdrLife, herdrRead, herdrSessions, herdrShellPid, isHerdrPane, openHerdrSession, procEnv } from "./herdr.ts";
 import type { Pane } from "./panes.ts";
+import { hasSessionSelector } from "./session-id.ts";
 import type { Clock, Runner } from "./run.ts";
 import { turnRunning } from "./submit.ts";
 
@@ -243,12 +244,22 @@ export const agentPath = (tool: string): string => {
   return withPi(node, tool);
 };
 
-export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly backend?: "aoe" | "herdr"; readonly workspace?: string }): Promise<string> => {
+// The command a handover's new herdr session runs: the configured agentCommand with its own options kept (a --session-dir
+// included), the model filled in, the lane prompt left out (it is typed once the agent shows its prompt), a new
+// --session-id after the program unless the template picks its session itself, and --thinking when asked and not set.
+export const herdrAgentArgv = (template: readonly string[], model: string, thinking?: string): string[] => {
+  const words = template.filter((a) => !a.includes("{prompt}")).map((a) => a.replaceAll("{model}", model));
+  const [program = "omo", ...rest] = words;
+  const pinned = hasSessionSelector(rest) ? rest : ["--session-id", crypto.randomUUID(), ...rest];
+  return [program, ...pinned, ...(thinking && !rest.some((a) => a === "--thinking" || a.startsWith("--thinking=")) ? ["--thinking", thinking] : [])];
+};
+
+export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly backend?: "aoe" | "herdr"; readonly workspace?: string; readonly agentCommand?: readonly string[] }): Promise<string> => {
   const env = opts.env && Object.keys(opts.env).length ? opts.env : undefined;
   const callerPath = process.env.PATH ?? "";
   const path = agentPath(opts.tool);
   if (opts.backend === "herdr") {
-    const argv = [opts.tool, "--session-id", crypto.randomUUID(), "--model", opts.model, ...(opts.thinking ? ["--thinking", opts.thinking] : [])];
+    const argv = herdrAgentArgv(opts.agentCommand ?? [opts.tool, "--model", "{model}"], opts.model, opts.thinking);
     try {
       // a herdr pane takes the server's environment, not this caller's: the checked PATH always goes on its command line
       return (await openHerdrSession(run, clock, { title: opts.title, cwd: opts.cwd, argv, env: { ...env, PATH: path }, ...(opts.workspace ? { workspace: opts.workspace } : {}) })).pane;
