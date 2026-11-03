@@ -3,6 +3,7 @@ const head = `<meta name="viewport" content="width=device-width,initial-scale=1"
 <style>
 :root{--dori-state-height:40px}
 #dori-state{position:fixed;inset:0 0 auto;z-index:10;box-sizing:border-box;padding:7px 10px;
+max-height:30vh;max-height:30dvh;overflow-y:auto;
 display:flex;flex-wrap:wrap;gap:6px 14px;background:#151923;color:#eee;font:14px/1.5 system-ui}
 #dori-state .pane{display:flex;align-items:baseline;gap:5px;max-width:100%;box-sizing:border-box}
 #dori-state .label{overflow-wrap:anywhere;min-width:0}

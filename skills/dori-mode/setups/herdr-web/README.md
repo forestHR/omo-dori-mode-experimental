@@ -12,9 +12,9 @@ it keyboard input is disabled. Each new browser terminal first reads `leadPane` 
 (`DORI_CONFIG`, with `DORI_LEAD_PANE` overriding it), focuses that pane's tab, then attaches to herdr.
 Set `DORI_CONFIG` in the terminal unit's environment file when the account uses a non-default config.
 
-The terminal page has a wrapping pane-state bar, including the focused tab, above the terminal. Labels and states stay
-visible on phones; the terminal is resized to the remaining height. Its cookie-protected `GET /__dori/state` polls every
-three seconds. A state helper running as the terminal account shares one pending collection across clients and caches
+The terminal page has a wrapping pane-state bar, including the focused tab, above the terminal. It is capped at 30% of
+the viewport and scrolls internally when crowded; the terminal keeps the remaining height. Its cookie-protected
+`GET /__dori/state` polls every three seconds. A state helper running as the terminal account shares one pending collection across clients and caches
 its result for two seconds after collection completes. It reuses `herdrSessions` and `paneActivity`: agent screens are read
 through `herdrLife`/`herdrRead`, mapping busy/running to working, questions/waiting/errors to waiting, idle to idle,
 and panes without an agent to none. Herdr's own agent status is not used to judge omo.
@@ -104,6 +104,10 @@ bun test skills/dori-mode/setups/herdr-web
 
 The split-account test uses separate helper/proxy processes with different HOME, XDG_CONFIG_HOME and fake herdr data.
 The delayed-runner tests advance a fake clock while a collection is unresolved; they use no sleeps.
+The browser-layout test runs inside `bun test` using the installed omo browser skill and Chromium headless shell 1248.
+It renders 20 two-line labels at 390x844 and checks the bar cap, scrolling and remaining terminal height. Set
+`OMOWRIGHT_LOADER` or `HERDR_WEB_CHROMIUM` to override their paths; the defaults use the current user's omo install and
+`~/.cache/ms-playwright/chromium_headless_shell-1248/`. The test fails rather than skips when either is unavailable.
 
 Browser QA uses a temporary XDG_CONFIG_HOME, a task-owned browser profile, a test passphrase and ephemeral loopback
 ports, never the ports a Dori serves on. Secure cookies work on browser-trusted loopback HTTP for that test. A deployed
