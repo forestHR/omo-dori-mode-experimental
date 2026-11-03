@@ -363,6 +363,23 @@ test("the probe waits for the new session's first turn to end, so it comes as a 
   expect(sim.probeWhileBusy).toBe(false);
 });
 
+test("a first turn that never ends within the verify time gets no probe: the handover fails and goes back", async () => {
+  const deps = await setup();
+  ready(deps, [15]);
+  sim.busyFor = 1_000_000;
+  let probed = false;
+  const run = deps.run;
+  const r = await laneHandover({
+    ...deps,
+    run: async (argv, o) => {
+      if (argv[1] === "send-keys" && argv.includes(`=${NEW}:`) && (argv.at(-1) ?? "").includes("HANDOVER_PROBE")) probed = true;
+      return run(argv, o);
+    },
+  }, "demo", "aoe_lead_x", { ...OK, verifyMin: 1 });
+  expect(r.code).not.toBe(0);
+  expect(probed).toBe(false);
+});
+
 test("moves the lane: same cwd, model and thinking, registry and cards repointed, status, monitors and probe checked, then the old session closes", async () => {
   // Given
   const deps = await setup();

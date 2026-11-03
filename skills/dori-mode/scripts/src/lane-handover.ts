@@ -21,7 +21,7 @@ import { QuestionStore } from "./messenger/discord-cards.ts";
 import { herdrResult, isHerdrPane } from "./herdr.ts";
 import { omoSession, sendVerified } from "./panes.ts";
 import { type Lane, statusOf } from "./registry.ts";
-import { iso } from "./run.ts";
+import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
 import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
@@ -693,6 +693,7 @@ const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string
   // the probe goes in once the new session's first turn (reading the note) has ended: typed into a running turn it is a
   // steering line among tool results, which a session read as the last line of the note and held (herdr QA 2026-11-03)
   for (; i < tries && turnRunning(await captureTmux(deps.run, pane)); i++) await deps.clock.sleep(POLL_MS);
+  if (i >= tries) return { reasons: [`the first turn of ${pane} was still running after the verify time; the probe was not sent`], session };
   const id = deps.nonce();
   if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: write what you understood to ${understood} (${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds the note's quotes, decisions and tried fixes word for word: keep them, add yours), then run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
   emit(`HANDOVER_PROBE_SENT ${id} -> ${pane}`);
@@ -779,14 +780,18 @@ const pointLane = async (deps: LaneHandoverDeps, key: string, from: string, to: 
   emit(`HANDOVER_LANE ${key} pane -> ${to}; cards ${cards.length ? cards.join(",") : "none"}`);
 };
 
+// Whether a pane still has its agent: an aoe session while aoe lists it; a herdr pane while an agent runs in it (herdr
+// keeps the shell of a pane whose agent ended, so a listed pane is not enough)
+export const agentAlive = async (run: Runner, sessions: Awaited<ReturnType<typeof liveSessions>>, pane: string): Promise<boolean> =>
+  isHerdrPane(pane) ? (await paneLife(run, pane)).live : !!sessionFor(sessions, pane);
+
 // Repairs what an interrupted run left: while the old session lives it stays the lane and the new one is closed; when
 // only the new one lives (the old was already closed) the lane stays on the new one.
 export const recover = async (deps: LaneHandoverDeps, p: Pending, emit: (line: string) => void): Promise<void> => {
   // an agent that runs, not a pane that is listed: a herdr pane keeps its shell after its agent ended
   const sessions = await liveSessions(deps.run);
-  const alive = async (pane: string) => (isHerdrPane(pane) ? (await paneLife(deps.run, pane)).live : !!sessionFor(sessions, pane));
-  const oldAlive = await alive(p.from);
-  const newAlive = await alive(p.to);
+  const oldAlive = await agentAlive(deps.run, sessions, p.from);
+  const newAlive = await agentAlive(deps.run, sessions, p.to);
   if (oldAlive) {
     if (p.agentPid) deps.signal(p.agentPid, "SIGCONT");
     await pointLane(deps, p.key, p.to, p.from, `pane back to ${p.from}: interrupted handover repaired`, emit);
@@ -890,7 +895,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   const checked = await verifyLane(deps, facts, pane, opts.verifyMin ?? config.handover.verifyMin, note.replace(/\.md$/, ".understood.md"), emit);
   ctx.supplements.push(...(checked.supplements ?? []));
   mark("verify", !checked.reasons.length);
-  if (checked.reasons.length && !(isHerdrPane(from.pane) ? (await paneLife(deps.run, from.pane)).live : !!sessionFor(await liveSessions(deps.run), from.pane))) {
+  if (checked.reasons.length && !(await agentAlive(deps.run, await liveSessions(deps.run), from.pane))) {
     // nothing to go back to: the old session ended during the checks, so the new one stays the lane
     emit(`HANDOVER_OLD_GONE ${lane.key}: ${from.pane} ended during the checks (${checked.reasons.join("; ")}); the lane stays on ${pane}`);
     await tell(deps, pane, `[LEAD] ${COMMITTED}: the old session ended during the checks, so you are the ${lane.key} lane now although a check failed (${checked.reasons.join("; ")}); tell the lead what you see. ${config.launchKeywords}: go on with step 5 of the note.`);

@@ -245,13 +245,21 @@ export const agentPath = (tool: string): string => {
 };
 
 // The command a handover's new herdr session runs: the configured agentCommand with its own options kept (a --session-dir
-// included), the model filled in, the lane prompt left out (it is typed once the agent shows its prompt), a new
-// --session-id after the program unless the template picks its session itself, and --thinking when asked and not set.
+// included), the lane prompt left out (it is typed once the agent shows its prompt), a new --session-id after the
+// program, and the handover's --model and --thinking.
 export const herdrAgentArgv = (template: readonly string[], model: string, thinking?: string): string[] => {
-  const words = template.filter((a) => !a.includes("{prompt}")).map((a) => a.replaceAll("{model}", model));
-  const [program = "omo", ...rest] = words;
-  const pinned = hasSessionSelector(rest) ? rest : ["--session-id", crypto.randomUUID(), ...rest];
-  return [program, ...pinned, ...(thinking && !rest.some((a) => a === "--thinking" || a.startsWith("--thinking=")) ? ["--thinking", thinking] : [])];
+  const [program = "omo", ...rest] = template.filter((a) => !a.includes("{prompt}"));
+  // a handover always opens a new conversation with the model and thinking it asked for: the template's session
+  // selectors (--continue, --session ...) and its --model/--thinking give way; every other option stays
+  const replaced = (a: string) => hasSessionSelector([a]) || /^--(model|thinking)(=|$)/.test(a);
+  const takesValue = (a: string) => !a.includes("=") && ["--session", "--session-id", "--resume", "-r", "--fork", "--model", "--thinking"].includes(a);
+  const kept: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i] ?? "";
+    if (!replaced(a)) kept.push(a);
+    else if (takesValue(a) && i + 1 < rest.length && !(rest[i + 1] ?? "").startsWith("-")) i++;
+  }
+  return [program, "--session-id", crypto.randomUUID(), ...kept, "--model", model, ...(thinking ? ["--thinking", thinking] : [])];
 };
 
 export const openAoeSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly tool: string; readonly model: string; readonly thinking?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly backend?: "aoe" | "herdr"; readonly workspace?: string; readonly agentCommand?: readonly string[] }): Promise<string> => {
