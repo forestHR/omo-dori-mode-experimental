@@ -1,0 +1,18 @@
+[Unit]
+Description=herdr browser login proxy on port %i
+Requires=herdr-web-terminal@%i.service
+After=herdr-web-terminal@%i.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/agent-of-empires/serve.env
+EnvironmentFile=%h/.config/herdr/web-%i.env
+Environment=HERDR_WEB_PORT=%i
+ExecStart=%h/.bun/bin/bun %h/.dori/src/skills/dori-mode/setups/herdr-web/proxy.ts
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
