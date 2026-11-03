@@ -287,7 +287,7 @@ test("the close refuses a PR of a gated repo merged without dori merge, even aft
 
 test("text still sitting in the pane input after a poll window gets one more Enter", async () => {
   world.stuckReads = SUBMIT_TIMING.clearPolls;
-  expect(await sendVerified(at(T0).run, at(T0).clock, { ...at(T0).config, backend: "herdr" }, "w:p1", "[LEAD] stuck text still here")).toBe(true);
+  expect(await sendVerified(at(T0).run, at(T0).clock, { ...at(T0).config, backend: "herdr", agentCommand: ["claude", "{prompt}"] }, "w:p1", "[LEAD] stuck text still here")).toBe(true);
   expect(world.calls.filter((c) => c[2] === "send-keys")).toHaveLength(2);
 });
 

@@ -1,4 +1,5 @@
 import { paneLife } from "./aoe.ts";
+import { isHerdrPane } from "./herdr.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { submitToPane } from "./panes.ts";
 import type { Submitted } from "./submit.ts";
@@ -55,8 +56,10 @@ export const laneDeathTick = async (deps: FlowDeps): Promise<string[]> => {
     }
     if (now - first < CONFIRM_MS) continue;
     const oom = await oomLine(deps.run, pane, first - JOURNAL_BACK_MS).catch(() => undefined);
-    const reason = oom ? "메모리 부족" : life.how === "dead" ? `종료 코드 ${life.status}` : "tmux 세션 없음";
-    const why = oom ? `oom-kill (journal: ${oom})` : life.how === "dead" ? `pane dead, status ${life.status}` : "tmux session gone";
+    // a herdr pane keeps no exit status (herdr.ts herdrLife: status -1)
+    const herdr = isHerdrPane(pane);
+    const reason = oom ? "메모리 부족" : life.how === "dead" ? (life.status < 0 ? "에이전트 꺼짐" : `종료 코드 ${life.status}`) : herdr ? "herdr pane 없음" : "tmux 세션 없음";
+    const why = oom ? `oom-kill (journal: ${oom})` : life.how === "dead" ? (life.status < 0 ? "pane dead, no agent runs in it" : `pane dead, status ${life.status}`) : herdr ? "herdr pane gone" : "tmux session gone";
     out.push(`LANE_DIED ${lane.key} ${pane}: ${why}`);
     const lead = deps.config.leadPane;
     const sent: Submitted = lead ? await submitToPane(deps.run, deps.clock, deps.config, lead, laneDiedText(lane.key, reason)) : { status: "NOT_SUBMITTED", reason: "no leadPane" };

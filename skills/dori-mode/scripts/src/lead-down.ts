@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { FlowDeps } from "./done-flow.ts";
+import { paneLife } from "./aoe.ts";
+import { isHerdrPane } from "./herdr.ts";
+import { herdrLeadSession, readHerdrSessions, reviveHerdr } from "./herdr-sessions.ts";
+import { sendVerified } from "./panes.ts";
 import { findLead } from "./lead.ts";
 import { clock, ownerRows, placeOf, tailOf } from "./lead-limit.ts";
 import type { Runner } from "./run.ts";
@@ -20,6 +24,7 @@ import type { Runner } from "./run.ts";
 // - LEAD_UP when the session is back.
 
 const REVIVE_EVERY_MS = 10 * 60_000;
+const RECORD_EVERY_MS = 10 * 60_000;
 const REVIVE_MAX = 3;
 const DAY_MS = 24 * 60 * 60_000;
 const INBOX_TAIL_BYTES = 512 * 1024;
@@ -38,15 +43,12 @@ const readMark = (deps: FlowDeps, pane: string): DownMark | undefined => {
   }
 };
 
-// alive: its tmux session exists and its pane has not exited (a dead pane stays only with remain-on-exit)
-export const leadAlive = async (run: Runner, pane: string): Promise<boolean> => {
-  if ((await run(["tmux", "has-session", "-t", `=${pane}`])).code !== 0) return false;
-  const dead = await run(["tmux", "display-message", "-p", "-t", `=${pane}:`, "#{pane_dead}"]);
-  return !(dead.code === 0 && dead.out.trim() === "1");
-};
+// alive: its tmux session exists and its pane has not exited (a dead pane stays only with remain-on-exit); a herdr lead's
+// pane exists and an agent runs in it (aoe.ts paneLife)
+export const leadAlive = async (run: Runner, pane: string): Promise<boolean> => (await paneLife(run, pane)).live;
 
-export const revivedText = (since: string): string =>
-  `[DORI] LEAD_REVIVED: your session was down since ${since} (its tmux session was gone) and dori watch started it again in the same conversation. Read the owner's messages in the inbox since then and answer him.`;
+export const revivedText = (since: string, what = "tmux session"): string =>
+  `[DORI] LEAD_REVIVED: your session was down since ${since} (its ${what} was gone) and dori watch started it again in the same conversation. Read the owner's messages in the inbox since then and answer him.`;
 
 // the unit outlives this sweep: a tmux server that `aoe session start` starts stays in the unit's cgroup
 export const reviveArgv = (unit: string, id: string, tmux: string, prompt: string, env: Readonly<Record<string, string | undefined>>): string[] => [
@@ -75,6 +77,8 @@ export const leadDownTick = async (deps: FlowDeps, env: Readonly<Record<string, 
   const mark = readMark(deps, pane);
   const now = deps.clock.now();
   if (await leadAlive(deps.run, pane)) {
+    // a herdr lead's conversation is kept for its revive (herdr-sessions.ts), read again at most every RECORD_EVERY_MS
+    if (isHerdrPane(pane) && now - Date.parse(readHerdrSessions(deps.config.stateDir)[pane]?.at ?? "") >= RECORD_EVERY_MS) await herdrLeadSession(deps.run, deps.config, pane, true).catch(() => "");
     if (!mark) return [];
     rmSync(markPath(deps), { force: true });
     return [`LEAD_UP ${pane} down since ${mark.since} (${Math.round((now - Date.parse(mark.since)) / 60_000)} min, ${mark.revives} revive(s))`];
@@ -87,7 +91,7 @@ export const leadDownTick = async (deps: FlowDeps, env: Readonly<Record<string, 
   };
   if (!mark) {
     save(next);
-    out.push(`LEAD_DOWN ${pane} no live tmux session or pane; revive after ${deps.config.leadReviveMin} min`);
+    out.push(`LEAD_DOWN ${pane} no live ${isHerdrPane(pane) ? "herdr agent" : "tmux session"} or pane; revive after ${deps.config.leadReviveMin} min`);
   }
   const since = Date.parse(next.since);
   if (now - since < deps.config.leadReviveMin * 60_000) return out;
@@ -107,6 +111,13 @@ export const leadDownTick = async (deps: FlowDeps, env: Readonly<Record<string, 
     return out;
   }
   const [id = "", tmux = pane] = lead.split(" ");
+  if (isHerdrPane(tmux)) {
+    // the herdr server owns the agent it starts, so no unit of its own is needed (a restart of dori-lanes leaves it)
+    save({ ...next, revives: next.revives + 1, lastReviveAt: new Date(now).toISOString() });
+    const line = await reviveHerdr(deps.run, deps.clock, deps.config, tmux, revivedText(clock(deps, since), "herdr agent"), (p, t) => sendVerified(deps.run, deps.clock, deps.config, p, t));
+    out.push(line.startsWith("REVIVE_OK") ? `LEAD_REVIVE_STARTED ${pane} down since ${next.since}; ${line} (${next.revives + 1}/${REVIVE_MAX})` : `LEAD_REVIVE_WARN ${pane} ${line}`);
+    return out;
+  }
   const unit = `dori-lead-revive-${now}`;
   const started = await deps.run(reviveArgv(unit, id, tmux, revivedText(clock(deps, since)), env));
   save({ ...next, revives: next.revives + 1, lastReviveAt: new Date(now).toISOString() });

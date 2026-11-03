@@ -494,9 +494,9 @@ test("a pending lane whose done claim was rejected (not-done) is still read: thr
   expect((await watchWith("none", IDLE))[0]).toStartWith(`LANE_NO_GOAL smoke ${pendingPane}`);
 });
 
-// herdr has no lane death check of its own, and a herdr lane's background jobs are read from its exact session's transcript
-const herdrWatch = (sessions: string): FlowDeps => {
-  const base = depsFor(world, fakeClock(T0), state.dir, { sessionsDir: sessions });
+// a herdr agent that is no omo has no lane death check, and a herdr lane's background jobs are read from its exact session's transcript
+const herdrWatch = (sessions: string, agentCommand = ["claude", "{prompt}"]): FlowDeps => {
+  const base = depsFor(world, fakeClock(T0), state.dir, { sessionsDir: sessions, agentCommand });
   return { ...base, readGoal: async () => "none", run: async (argv, o) => (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "process-info" ? { code: 0, out: JSON.stringify({ result: { process_info: { shell_pid: 500 } } }), err: "" } : base.run(argv, o)) };
 };
 
@@ -514,6 +514,15 @@ test("a herdr pending lane waiting on a background job of its own is not told; o
   expect(gone[1]).toStartWith("LANE_NO_GOAL_");
   expect((await deps.registry.read("hp"))?.pendingGoal).toBeUndefined();
   expect((await watchTick(deps)).filter((l) => /^LANE_NO_GOAL/.test(l))).toEqual([]);
+});
+
+test("a herdr omo lane whose agent is gone before its goal is left to the lane death check, as on aoe: no LANE_NO_GOAL, the mark stays", async () => {
+  const sessions = join(state.dir, "sessions");
+  world.ps = "500 1 bash";
+  const deps = herdrWatch(sessions, ["omo", "--model", "{model}", "{prompt}"]);
+  await deps.registry.write({ key: "hp", title: "hp", thread: "none", brief: "/b", done: "file /x", openedAt: "2026-01-01T00:00:00Z", pane: "w:p9", session: ID, cwd: "/tmp/w", pendingGoal: { idle: 0 } });
+  expect((await watchTick(deps)).filter((l) => /^LANE_NO_GOAL/.test(l))).toEqual([]);
+  expect((await deps.registry.read("hp"))?.pendingGoal).toEqual({ idle: 0 });
 });
 
 test("a job record from before the agent's own start (a restarted session) keeps no first turn on: three idle reads say LANE_NO_GOAL", async () => {

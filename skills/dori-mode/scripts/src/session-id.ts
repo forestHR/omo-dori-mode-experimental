@@ -2,6 +2,7 @@ import { readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { tmuxPanePid } from "./aoe.ts";
+import { isHerdrPane } from "./herdr.ts";
 import type { Backend } from "./config.ts";
 import type { Runner } from "./run.ts";
 
@@ -58,7 +59,7 @@ export const hasSessionSelector = (argv: readonly string[]): boolean => argv.som
 export type SessionDeps = { readonly run: Runner; readonly sessionsDir: string; readonly backend?: Backend; readonly listDir?: (dir: string) => readonly string[] };
 
 export const shellPidOf = async (pane: string, deps: SessionDeps): Promise<number> => {
-  if (deps.backend === "aoe") return tmuxPanePid(deps.run, pane);
+  if (deps.backend === "aoe" || isHerdrPane(pane)) return tmuxPanePid(deps.run, pane);
   const info = await deps.run(["herdr", "pane", "process-info", "--pane", pane]);
   return info.code === 0 ? Number((JSON.parse(info.out) as { result?: { process_info?: { shell_pid?: number } } }).result?.process_info?.shell_pid ?? 0) : 0;
 };

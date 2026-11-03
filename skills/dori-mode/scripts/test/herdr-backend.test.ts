@@ -1,0 +1,108 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { closeAoeSession, envMismatch, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
+import { agentLine } from "../src/herdr.ts";
+import { readHerdrSessions, recordHerdrSession, reviveHerdr } from "../src/herdr-sessions.ts";
+import { findLead } from "../src/lead.ts";
+import { leadAlive } from "../src/lead-down.ts";
+import { submitToPane } from "../src/panes.ts";
+import type { Runner } from "../src/run.ts";
+import { depsFor, fakeClock, fakeRunner, newWorld, RUNNING, sent, type World } from "./fakes.ts";
+
+// The herdr side of the session primitives (herdr.ts): a pane id with ":" goes to herdr, a tmux name to tmux, so one Dori
+// can hold lanes of both while it moves.
+let world: World;
+let dir: string;
+beforeEach(() => {
+  world = newWorld();
+  dir = mkdtempSync(join(tmpdir(), "herdr-backend-"));
+});
+afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+const omo = (patch = {}) => depsFor(world, fakeClock(0), dir, { backend: "herdr", ...patch });
+
+test("a herdr pane is live while an agent runs in it, dead once only its shell is left, gone when herdr has no such pane", async () => {
+  const run = fakeRunner(world);
+  world.herdrDead = ["w1:p2"];
+  world.herdrGone = ["w1:p3"];
+  expect([await paneLife(run, "w1:p1"), await paneLife(run, "w1:p2"), await paneLife(run, "w1:p3")]).toEqual([{ live: true }, { live: false, how: "dead", status: -1 }, { live: false, how: "gone" }]);
+  expect(await leadAlive(run, "w1:p2")).toBe(false);
+  expect(world.calls.some((c) => c[0] === "tmux")).toBe(false);
+});
+
+test("text for a herdr omo pane gets the aoe checks: a gone or dead pane is named and nothing typed; a live one waits for the prompt, is typed in pieces and submitted", async () => {
+  const deps = omo();
+  world.herdrGone = ["w1:p3"];
+  world.herdrDead = ["w1:p2"];
+  expect(await submitToPane(deps.run, deps.clock, deps.config, "w1:p3", "[LEAD] hi")).toMatchObject({ status: "NOT_SUBMITTED", reason: "PANE_GONE: there is no herdr pane w1:p3 (it ended, or the name is wrong); nothing was typed" });
+  expect(await submitToPane(deps.run, deps.clock, deps.config, "w1:p2", "[LEAD] hi")).toMatchObject({ status: "NOT_SUBMITTED", reason: "PANE_DEAD: the program in w1:p2 exited (no agent runs in it); nothing was typed" });
+  expect(sent(world)).toEqual([]);
+  const long = "가".repeat(3000);
+  expect((await submitToPane(deps.run, deps.clock, deps.config, "w1:p1", long)).status).toBe("SUBMITTED");
+  expect(sent(world).length).toBeGreaterThan(1);
+  expect(sent(world).join("")).toBe(long);
+});
+
+test("a frozen herdr omo agent (state T) gets no text", async () => {
+  const deps = omo();
+  // the pane's agent 4001 under its shell 4000, stopped (ps state T) by a handover
+  const base = fakeRunner(world);
+  const run: Runner = async (argv, o) => (argv[0] === "ps" && argv[1] === "-A" ? { code: 0, out: "4000 1 S -bash\n4001 4000 T omo --model m", err: "" } : base(argv, o));
+  const r = await submitToPane(run, deps.clock, deps.config, "w1:p1", "[LEAD] hi");
+  expect(r).toMatchObject({ status: "NOT_SUBMITTED" });
+  expect((r as { reason: string }).reason).toStartWith("the agent in the pane is stopped (pid 4001, frozen)");
+});
+
+test("live sessions join aoe's and the herdr server's, and each pane name finds only its own backend's session", async () => {
+  world.aoe = [{ id: "8d4297370000", title: "lead", path: "/home/a" }];
+  world.tmux = ["aoe_lead_8d429737"];
+  world.panes = [{ pane_id: "w1:p4", workspace_id: "w1", cwd: "/home/h" }];
+  const sessions = await liveSessions(fakeRunner(world));
+  expect(sessionFor(sessions, "aoe_lead_8d429737")?.path).toBe("/home/a");
+  expect(sessionFor(sessions, "w1:p4")?.path).toBe("/home/h");
+  expect(sessionFor(sessions, "w1:p9")).toBeUndefined();
+});
+
+test("closing a herdr session closes its tab when the pane is all it holds, and the line reads as closed", async () => {
+  const line = await closeAoeSession(fakeRunner(world), "w1:p4");
+  expect(line).toBe("herdr tab w1:t-p4 (w1:p4) stopped and closed");
+  expect(isClosedLine(line)).toBe(true);
+  expect(world.calls.at(-1)).toEqual(["herdr", "tab", "close", "w1:t-p4"]);
+  world.herdrGone = ["w1:p5"];
+  expect(isClosedLine(await closeAoeSession(fakeRunner(world), "w1:p5"))).toBe(false);
+});
+
+test("a herdr pane's activity comes from its screen; a pane with no agent is left out", async () => {
+  world.herdrDead = ["w1:p2"];
+  world.screens = { "w1:p1": `${RUNNING}\n❯ `, "w1:p3": "❯ \n ◉ watching 1: ci" };
+  expect([...(await paneActivity(fakeRunner(world), ["w1:p1", "w1:p2", "w1:p3"]))]).toEqual([["w1:p1", "busy"], ["w1:p3", "running"]]);
+});
+
+test("the agent line sets and removes the session's variables with env(1) and quotes each word once", () => {
+  expect(agentLine(["omo", "--model", "a/b:high", "it's"], { CUDA_VISIBLE_DEVICES: "", GPU: undefined })).toBe("env -u GPU CUDA_VISIBLE_DEVICES= omo --model a/b:high 'it'\\''s'");
+  expect(agentLine(["omo"])).toBe("omo");
+});
+
+test("a herdr session's launchEnv is read from its agent's own environment", async () => {
+  const run: Runner = async (argv) => (argv[2] === "process-info" ? { code: 0, out: JSON.stringify({ result: { process_info: { shell_pid: 1, foreground_processes: [{ pid: process.pid, cmdline: "omo" }] } } }), err: "" } : { code: 0, out: "", err: "" });
+  expect(await envMismatch(run, "w1:p1", { PATH: process.env.PATH })).toEqual([]);
+  expect(await envMismatch(run, "w1:p1", { HERDR_TEST_NOT_SET: "1" })).toEqual(["HERDR_TEST_NOT_SET=1(unset)"]);
+});
+
+test("a herdr lead whose agent is gone is named stopped with the session recorded for its pane, and revived in that session", async () => {
+  const deps = omo({ leadPane: "w1:p1" });
+  recordHerdrSession(dir, "w1:p1", { session: "11111111-2222-4333-8444-555555555555", cwd: dir, model: "m/x", at: new Date(0).toISOString() });
+  world.herdrDead = ["w1:p1"];
+  world.panes = [{ pane_id: "w1:p1", workspace_id: "w1", cwd: dir }];
+  expect(await findLead(deps.run, deps.config)).toBe("11111111-2222-4333-8444-555555555555 w1:p1 stopped");
+  const typed: string[] = [];
+  const line = await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p1", "[DORI] back", async (_p, t) => (typed.push(t), true));
+  expect(line).toBe("REVIVE_OK w1:p1 session 11111111-2222-4333-8444-555555555555 (prompt submitted)");
+  expect(world.calls.find((c) => c[2] === "run")).toEqual(["herdr", "pane", "run", "w1:p1", "omo --session-id 11111111-2222-4333-8444-555555555555 --model m/x"]);
+  expect(typed).toEqual(["[DORI] back"]);
+  expect(await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p9", "", async () => true)).toStartWith("REVIVE_FAIL w1:p9: no omo session recorded");
+  expect(readHerdrSessions(dir)["w1:p1"]?.model).toBe("m/x");
+});

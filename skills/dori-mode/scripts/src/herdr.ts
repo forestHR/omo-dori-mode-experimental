@@ -1,0 +1,107 @@
+import { readFileSync } from "node:fs";
+
+import type { Clock, Runner } from "./run.ts";
+import { AGENT, descendants, ended, type Proc, procTable } from "./session-id.ts";
+
+// herdr's side of the session primitives in aoe.ts (dori-mode on herdr, as upstream runs it; ported here for the move of
+// every Dori off aoe/tmux, owner card Q462 2026-11-03). tmux refuses a ":" in a session name and every herdr pane id holds
+// one (w1:p2, measured on herdr 0.9.5), so each primitive there picks the backend from the pane it is given: a lane opened
+// under aoe keeps working after its Dori's config names herdr, and dori handover --lane can move it from one to the other.
+// herdr's own agent_status is not used for omo (herdr 0.9.5 has no omo rule and falls back to idle; upstream #62/#63): the
+// state comes from omo's screen, the same marks the aoe side reads.
+export const isHerdrPane = (pane: string): boolean => pane.includes(":");
+
+export type HerdrPane = { readonly pane_id: string; readonly tab_id?: string; readonly workspace_id?: string; readonly cwd?: string; readonly agent?: string };
+type HerdrTab = { readonly tab_id: string; readonly label?: string; readonly pane_count?: number };
+
+// the result object of a herdr call, or undefined when it failed or printed no JSON
+export const herdrResult = async (run: Runner, argv: readonly string[]): Promise<Record<string, unknown> | undefined> => {
+  const r = await run(["herdr", ...argv]);
+  if (r.code !== 0) return undefined;
+  try {
+    return (JSON.parse(r.out) as { result?: Record<string, unknown> }).result;
+  } catch {
+    return undefined;
+  }
+};
+
+// Every pane of the server as a session row (aoe.ts AoeSession): id and pane are the pane id, title its tab's label, path
+// its cwd. No server (or no herdr at all) is no session.
+export const herdrSessions = async (run: Runner): Promise<{ id: string; title: string; path: string; tool?: string; pane: string; tab?: string }[]> => {
+  const panes = ((await herdrResult(run, ["pane", "list"]))?.panes ?? []) as HerdrPane[];
+  if (!panes.length) return [];
+  const tabs = ((await herdrResult(run, ["tab", "list"]))?.tabs ?? []) as HerdrTab[];
+  return panes.map((p) => ({ id: p.pane_id, title: tabs.find((t) => t.tab_id === p.tab_id)?.label ?? p.pane_id, path: p.cwd ?? "", ...(p.agent ? { tool: p.agent } : {}), pane: p.pane_id, ...(p.tab_id ? { tab: p.tab_id } : {}) }));
+};
+
+type ProcessInfo = { readonly shell_pid?: number; readonly foreground_processes?: readonly { readonly pid?: number; readonly cmdline?: string }[] };
+const processInfo = async (run: Runner, pane: string): Promise<ProcessInfo | undefined> => (await herdrResult(run, ["pane", "process-info", "--pane", pane]))?.process_info as ProcessInfo | undefined;
+
+export const herdrShellPid = async (run: Runner, pane: string): Promise<number> => Number((await processInfo(run, pane))?.shell_pid ?? 0);
+
+// The pane's agent: the foreground process herdr names (an agent started with pane run is the shell's foreground job), else
+// the topmost agent process under its shell (a zombie is none). Its command line is not searched for "mcp": a herdr lane
+// carries its prompt there, so a lane keyed mcp-fix would read as an MCP server; an agent's MCP servers sit below it.
+export const herdrAgentPid = async (run: Runner, pane: string, table?: readonly Proc[]): Promise<number | undefined> => {
+  const info = await processInfo(run, pane);
+  if (!info) return undefined;
+  const fg = info.foreground_processes?.find((p) => p.pid && AGENT.test(p.cmdline ?? ""));
+  if (fg?.pid) return fg.pid;
+  const shell = Number(info.shell_pid ?? 0);
+  if (!shell) return undefined;
+  const rows = table ?? (await procTable(run));
+  return [...rows.filter((p) => p.pid === shell), ...descendants(rows, shell)].find((p) => AGENT.test(p.cmd) && !ended(p))?.pid;
+};
+
+// gone: herdr has no such pane (its shell exited, its tab closed, or no server runs); dead: the pane is there but no agent
+// runs in it any more (its shell stays after the agent exits; herdr keeps no exit status, so status is -1)
+export const herdrLife = async (run: Runner, pane: string): Promise<{ readonly live: true } | { readonly live: false; readonly how: "gone" } | { readonly live: false; readonly how: "dead"; readonly status: number }> => {
+  if (!(await herdrResult(run, ["pane", "get", pane]))) return { live: false, how: "gone" };
+  return (await herdrAgentPid(run, pane)) ? { live: true } : { live: false, how: "dead", status: -1 };
+};
+
+export const herdrRead = async (run: Runner, pane: string, lines?: number): Promise<string> =>
+  (await run(["herdr", "pane", "read", pane, "--source", lines ? "recent" : "visible", ...(lines ? ["--lines", String(lines)] : [])])).out;
+
+export const shellQuote = (arg: string): string => (/^[\w./:@=+,-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`);
+
+// The line a pane's shell runs to start the agent: env(1) sets and removes the session's variables (an undefined value
+// removes one, as laneEnv asks for a --use-gpu lane), so the agent starts as asked whatever the server's environment holds.
+export const agentLine = (argv: readonly string[], env: Readonly<Record<string, string | undefined>> = {}): string => {
+  const unset = Object.entries(env).flatMap(([k, v]) => (v === undefined ? ["-u", k] : []));
+  const set = Object.entries(env).flatMap(([k, v]) => (v === undefined ? [] : [`${k}=${v}`]));
+  return [...(unset.length || set.length ? ["env", ...unset, ...set] : []), ...argv].map(shellQuote).join(" ");
+};
+
+// A new tab labelled title in cwd (in workspace when given) whose root pane runs argv; the pane and tab ids.
+export const openHerdrSession = async (run: Runner, clock: Clock, opts: { readonly title: string; readonly cwd: string; readonly argv: readonly string[]; readonly env?: Readonly<Record<string, string | undefined>>; readonly workspace?: string }): Promise<{ readonly pane: string; readonly tab?: string }> => {
+  const created = await run(["herdr", "tab", "create", ...(opts.workspace ? ["--workspace", opts.workspace] : []), "--cwd", opts.cwd, "--label", opts.title, "--no-focus"]);
+  if (created.code !== 0) throw new Error(`herdr tab create failed: ${created.err || created.out}`);
+  const made = (JSON.parse(created.out) as { result: { root_pane: { pane_id: string; tab_id?: string }; tab?: { tab_id?: string } } }).result;
+  const pane = made.root_pane.pane_id;
+  const tab = made.root_pane.tab_id ?? made.tab?.tab_id;
+  // a fresh shell may drop what is typed before its prompt is drawn
+  for (let i = 0; i < 20 && !(await herdrRead(run, pane)).trim(); i++) await clock.sleep(250);
+  const ran = await run(["herdr", "pane", "run", pane, agentLine(opts.argv, opts.env)]);
+  if (ran.code !== 0) throw new Error(`herdr pane run failed in ${pane}: ${ran.err || ran.out}`);
+  return { pane, ...(tab ? { tab } : {}) };
+};
+
+// Closes the pane's tab when the pane is all it holds, else the pane only; the line says which (closedLine).
+export const closeHerdrSession = async (run: Runner, pane: string): Promise<string> => {
+  const got = (await herdrResult(run, ["pane", "get", pane]))?.pane as HerdrPane | undefined;
+  if (!got) return `herdr pane ${pane} not found`;
+  const tab = got.tab_id ? ((await herdrResult(run, ["tab", "get", got.tab_id]))?.tab as HerdrTab | undefined) : undefined;
+  const whole = tab?.tab_id && (tab.pane_count ?? 1) <= 1;
+  const r = await run(whole ? ["herdr", "tab", "close", tab.tab_id] : ["herdr", "pane", "close", pane]);
+  return r.code === 0 ? `herdr ${whole ? `tab ${tab.tab_id}` : "pane"} (${pane}) stopped and closed` : `herdr ${pane} not closed: ${(r.err || r.out).slice(0, 160)}`;
+};
+
+// the environment a process started with (/proc/<pid>/environ); empty when it cannot be read
+export const procEnv = (pid: number): Map<string, string> => {
+  try {
+    return new Map(readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean).map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)] as [string, string]));
+  } catch {
+    return new Map();
+  }
+};

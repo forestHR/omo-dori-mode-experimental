@@ -4,7 +4,7 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { aoeSessions, captureTmux, closeAoeSession, inputLine, laneEnv, openAoeSession, sessionFor } from "./aoe.ts";
+import { captureTmux, closeAoeSession, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, sessionFor } from "./aoe.ts";
 import { strayTasks, taskRecords } from "./background.ts";
 import { type HandoverWatcher } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
@@ -747,7 +747,7 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
   const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLead, key: "handover.autoRolloverLead" }, "lead", config.leadPane, readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox, deps.ownerIds ?? []));
   if (unapproved) return refuse(`the lead moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
-  const old = sessionFor(await aoeSessions(deps.run), config.leadPane);
+  const old = sessionFor(await liveSessions(deps.run), config.leadPane);
   if (!old) return refuse(`no live aoe session for leadPane ${config.leadPane}`);
   const bad = config.handover.watchers.find((w) => !w.name || !Array.isArray(w.check) || !w.check.length);
   if (bad) return refuse(`handover.watchers entry ${JSON.stringify(bad)} needs a name and a check argv`);
@@ -863,7 +863,7 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
     emit(`HANDOVER_FAIL the first message did not register in ${pane}; nothing moved, ${config.leadPane} stays the lead`);
     return { code: 3, note, to: pane };
   }
-  const to: Target = { pane, aoeId: sessionFor(await aoeSessions(deps.run), pane)?.id ?? "", session: "" };
+  const to: Target = { pane, aoeId: sessionFor(await liveSessions(deps.run), pane)?.id ?? "", session: "" };
   emit(`HANDOVER_STARTED ${config.leadPane} -> ${pane}`);
   const restartAll = async (): Promise<string[]> => {
     const failed: string[] = [];
@@ -928,7 +928,7 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
   emit(`HANDOVER_DONE ${config.leadPane} -> ${pane}; closing ${config.leadPane}`);
   record("done", []);
   const closed = await closeAoeSession(deps.run, config.leadPane);
-  const ok = closed.includes("stopped and trashed");
+  const ok = isClosedLine(closed);
   mark("close", ok);
   emit(ok ? `HANDOVER_CLOSED ${closed}` : `HANDOVER_CLOSE_FAIL ${closed}`);
   await tell(pane, `[LEAD] ${COMMITTED}: the handover is checked and the old session ${ok ? "is closed" : `${config.leadPane} did not close but stays idle`}; you are the lead now. Go on with step 5 of the note.`);

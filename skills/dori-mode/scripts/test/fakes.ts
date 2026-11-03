@@ -54,6 +54,9 @@ export type World = {
   // and ps -o lstart= (the agent's start) as the host would print them
   ps: string;
   agentStart: string;
+  // herdr panes the fake server does not have (pane get fails), and those where no agent runs any more (a bare shell)
+  herdrGone?: string[];
+  herdrDead?: string[];
 };
 
 export const RUNNING = " • Working (esc to interrupt)";
@@ -85,6 +88,14 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   if (cmd === "tmux" && a1 === "send-keys" && argv.at(-1) === "Enter") w.started.push((argv[argv.indexOf("-t") + 1] ?? "").replace(/^=|:$/g, ""));
   if (cmd === "herdr" && a1 === "pane" && a2 === "send-keys" && argv.at(-1) === "enter") w.started.push(argv[3] ?? "");
   if (cmd === "herdr" && a1 === "pane" && a2 === "list") return ok(JSON.stringify({ result: { panes: w.panes } }));
+  if (cmd === "herdr" && a1 === "pane" && (a2 === "get" || a2 === "process-info")) {
+    const pane = (a2 === "get" ? argv[3] : argv[argv.indexOf("--pane") + 1]) ?? "";
+    if (w.herdrGone?.includes(pane)) return { code: 1, out: JSON.stringify({ error: { code: "pane_not_found", message: `pane ${pane} not found` } }), err: "" };
+    if (a2 === "get") return ok(JSON.stringify({ result: { pane: { pane_id: pane, tab_id: `${pane.split(":")[0]}:t-${pane.split(":")[1] ?? ""}` } } }));
+    const fg = w.herdrDead?.includes(pane) ? [{ pid: 4000, cmdline: "-bash" }] : [{ pid: 4001, cmdline: "omo --model m" }];
+    return ok(JSON.stringify({ result: { process_info: { pane_id: pane, shell_pid: 4000, foreground_processes: fg } } }));
+  }
+  if (cmd === "herdr" && a1 === "tab" && a2 === "get") return ok(JSON.stringify({ result: { tab: { tab_id: argv[3], pane_count: 1 } } }));
   if (cmd === "herdr") return ok();
   if (cmd === "aoe" && a1 === "list") return ok(JSON.stringify(w.aoe));
   if (cmd === "aoe" && a1 === "ps") return ok(JSON.stringify(w.aoePs));

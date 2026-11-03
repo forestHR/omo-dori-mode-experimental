@@ -108,5 +108,5 @@ export const goalCommand = async (deps: FlowDeps, pane: string, act: GoalAct): P
 
 export const liveSession = async (deps: FlowDeps, pane: string): Promise<string | undefined> => {
   const life = await paneLife(deps.run, pane);
-  return life.live ? undefined : life.how === "gone" ? "no tmux session" : `its program exited (status ${life.status})`;
+  return life.live ? undefined : life.how === "gone" ? (pane.includes(":") ? "no herdr pane" : "no tmux session") : life.status < 0 ? "no agent runs in its pane" : `its program exited (status ${life.status})`;
 };
