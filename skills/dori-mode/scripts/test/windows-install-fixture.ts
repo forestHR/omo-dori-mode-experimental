@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { powershellLiteral as quote } from "../src/powershell.ts";
@@ -13,7 +13,8 @@ export const command = async (argv: readonly string[], cwd?: string, stdin?: str
 };
 
 export const installFixture = async (homeName = "home") => {
-  const root = mkdtempSync(join(tmpdir(), "dori-win-install-"));
+  // the long form of the temp path (not RUNNER~1), as the launcher sees its own folder
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "dori-win-install-")));
   const upstream = join(root, "upstream");
   const home = join(root, homeName);
   const skills = join(root, "configured-skills");
