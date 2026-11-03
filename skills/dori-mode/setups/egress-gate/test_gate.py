@@ -773,6 +773,17 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(json.loads(base64.b64decode(e["body"]))["emailAddress"] for e in self.service.pending()),
                          ["partner@example.net", "second@example.net"])
 
+    async def test_a_repeat_grant_replaces_every_undecided_card_for_the_same_person(self):
+        self.approval()
+        grant = {"type": "user", "role": "reader", "emailAddress": "partner@example.net"}
+        await self.request(path="/www.googleapis.com/drive/v3/files/f/permissions", data=grant)
+        first = self.service.pending()[0]
+        # a second undecided card for the same grant (one an owner reaction had kept from being replaced)
+        twin = {**first, "id": first["id"] + "-twin"}
+        gate.private_write(self.state / "pending" / (twin["id"] + ".json"), gate.json_bytes(twin))
+        await self.request(path="/www.googleapis.com/drive/v3/files/f/permissions", data=grant)
+        self.assertEqual(len(self.service.pending()), 1)
+
     async def test_calendar_acl_grants_to_two_people_in_one_thread_both_wait(self):
         self.approval()
         for who in ("partner@example.net", "second@example.net"):

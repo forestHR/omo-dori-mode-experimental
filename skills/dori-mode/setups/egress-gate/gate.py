@@ -1881,13 +1881,14 @@ class Gate:
 
         A sharing grant (Drive permission, Calendar ACL) is the same work only for the same grantee: two cards in one
         thread may share one file or calendar with two people, and the second must not replace the first."""
+        incoming = grantee(body)  # read once: the loop below reuses `body` for the Discord replies
         async with self.approval_lock:
             for entry in self.pending():
                 if (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
                         or entry.get("path") != path or entry.get("status") != "pending"
                         or method == "POST" and entry.get("title") != title
                         or method == "POST" and path.endswith(("/permissions", "/acl"))
-                        and grantee(base64.b64decode(entry.get("body") or "")) != grantee(body)):
+                        and grantee(base64.b64decode(entry.get("body") or "")) != incoming):
                     continue
                 base = f"/channels/{entry['channel']}/messages/{entry['message']}"
                 if await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅"):
