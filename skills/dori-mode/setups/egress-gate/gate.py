@@ -759,6 +759,7 @@ class Gate:
         self.write_lock = asyncio.Lock()
         self.vault_lock = asyncio.Lock()
         self.approval_lock = asyncio.Lock()
+        self.message_locks: dict[str, asyncio.Lock] = {}
         self.approval_task = None
         self.order_facts = {}
         self.todo_facts = {}
@@ -1598,7 +1599,7 @@ class Gate:
             raise Refused("batch-refused", extra={"reasons": reasons})
         identity = hashlib.sha256(json.dumps({"owner_message": proof, "title": title, "items": items},
                                              ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        async with self.approval_lock:
+        async with self.message_lock(proof), self.approval_lock:
             known = self.batch(identity)
             if known:
                 if known["status"] not in {"pending", "approved"}:
@@ -1807,37 +1808,40 @@ class Gate:
             name = " ".join(name.splitlines()) or f"파일 이름을 읽지 못함 · {shared[1][:40]}"
             role = DRIVE_ROLES.get(str({**fallback, **data}.get("role", "")), "")
             title = (f"{name} 공유({role})" if role else f"{name} 공유") if shared[2] == "permissions" else f"{name} 댓글"
-        thread = await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
-        await self.supersede(thread, api, op, path, method, title, body)
-        # Owner 2026-10-19 00:00 KST: the card shows who, what and the reactions; the reason,
-        # the owner-message link and the expiry stay in the pending record.
-        content = (f"승인 필요 · {CARD_KIND.get(api, api)}\n"
-                   f"받는 사람: {', '.join(sorted(set(destinations)))[:500] or path[:500]}\n"
-                   f"내용: {defang(title[:200])}\n✅ 실행 · ⛔ 취소")
-        channel = thread
-        status, _, response = await self.bot_call("POST", f"/channels/{channel}/messages",
-                                                 {"content": content, "allowed_mentions": {"parse": []}, "flags": 4})
-        if not 200 <= status < 300:
-            raise Refused("approval-post-failed", 502)
-        message = str(json_object(response)["id"])
-        identity = f"{time.time_ns():020d}-{secrets.token_hex(6)}"
-        link = f"https://discord.com/channels/{self.config['owner_guild']}/{channel}/{message}"
-        host, _, route = path[1:].partition("/")
-        entry = dict(id=identity, ts=utc(), uid=uid, method=method, path=path, query=query,
-                     upstream_url=self.base(host) + "/" + quote(route, safe="/:@") + ("?" + urlencode(query) if query else ""),
-                     headers={k: v for k, v in headers.items() if k.lower() in {"content-type", "accept"}},
-                     body=base64.b64encode(body).decode(), owner_message=proof,
-                     owner_order=self.order_facts.get(proof), owner_todo=self.todo_facts.get(proof),
-                     reason=",".join(sorted(set(reasons))), api=api, op=op,
-                     channel=channel, message=message, card=link, title=title, thread=thread,
-                     content_hash=hashlib.sha256(json_object(response).get("content", content).encode()).hexdigest(), status="pending",
-                     snapshot_hash=hashlib.sha256(json_bytes(snapshot)).hexdigest(),
-                     restoring=restoring,
-                     delete=op in {"events.delete", "tasks.delete"} or op == "files.update" and data.get("trashed") is True)
-        if api == "obsidian":
-            entry["vault_path"] = dict(query)["path"]
-            entry["vault_content"] = data["restore_content"] if restoring else body.decode("utf-8")
-        private_write(self.state / "pending" / (identity + ".json"), json_bytes(entry))
+        # Owner Q474 (2026-11-03): from choosing the thread until the card is on record, no other card of the same
+        # owner message chooses one, so cards asked at once still share the thread (lock order: message, then approval).
+        async with self.message_lock(proof):
+            thread = await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
+            await self.supersede(thread, api, op, path, method, title, body)
+            # Owner 2026-10-19 00:00 KST: the card shows who, what and the reactions; the reason,
+            # the owner-message link and the expiry stay in the pending record.
+            content = (f"승인 필요 · {CARD_KIND.get(api, api)}\n"
+                       f"받는 사람: {', '.join(sorted(set(destinations)))[:500] or path[:500]}\n"
+                       f"내용: {defang(title[:200])}\n✅ 실행 · ⛔ 취소")
+            channel = thread
+            status, _, response = await self.bot_call("POST", f"/channels/{channel}/messages",
+                                                     {"content": content, "allowed_mentions": {"parse": []}, "flags": 4})
+            if not 200 <= status < 300:
+                raise Refused("approval-post-failed", 502)
+            message = str(json_object(response)["id"])
+            identity = f"{time.time_ns():020d}-{secrets.token_hex(6)}"
+            link = f"https://discord.com/channels/{self.config['owner_guild']}/{channel}/{message}"
+            host, _, route = path[1:].partition("/")
+            entry = dict(id=identity, ts=utc(), uid=uid, method=method, path=path, query=query,
+                         upstream_url=self.base(host) + "/" + quote(route, safe="/:@") + ("?" + urlencode(query) if query else ""),
+                         headers={k: v for k, v in headers.items() if k.lower() in {"content-type", "accept"}},
+                         body=base64.b64encode(body).decode(), owner_message=proof,
+                         owner_order=self.order_facts.get(proof), owner_todo=self.todo_facts.get(proof),
+                         reason=",".join(sorted(set(reasons))), api=api, op=op,
+                         channel=channel, message=message, card=link, title=title, thread=thread,
+                         content_hash=hashlib.sha256(json_object(response).get("content", content).encode()).hexdigest(), status="pending",
+                         snapshot_hash=hashlib.sha256(json_bytes(snapshot)).hexdigest(),
+                         restoring=restoring,
+                         delete=op in {"events.delete", "tasks.delete"} or op == "files.update" and data.get("trashed") is True)
+            if api == "obsidian":
+                entry["vault_path"] = dict(query)["path"]
+                entry["vault_content"] = data["restore_content"] if restoring else body.decode("utf-8")
+            private_write(self.state / "pending" / (identity + ".json"), json_bytes(entry))
         for emoji in ("✅", "⛔"):
             status, _, _ = await self.bot_call("PUT", f"/channels/{channel}/messages/{message}/reactions/{quote(emoji)}/@me")
             if not 200 <= status < 300:
@@ -1850,7 +1854,15 @@ class Gate:
         A request written inside a thread keeps its card there; one written in the approval channel
         gets a thread on that message (Discord: thread id == message id); anything else opens a new
         thread in the approval channel. Any failure keeps the old place, the channel itself.
+
+        Owner Q474 (2026-11-03, "드라이브 공유는 묶음 한 스레드"): the cards one owner message asks for share one
+        thread, so a card or batch whose message already has an undecided card or batch goes into that thread
+        (2026-10-30 one request made eighteen Drive sharing threads in two minutes). Callers hold message_lock.
         """
+        for record in [*self.pending(), *self.batches()]:
+            if (proof and record.get("owner_message") == proof and record.get("status", "pending") == "pending"
+                    and record.get("thread") and str(record["thread"]) != channel):
+                return str(record["thread"])
         parts = proof.rsplit("/", 2) if proof.startswith("https://discord.com/channels/") else []
         origin, message = (parts[-2], parts[-1]) if len(parts) == 3 and parts[-1].isdigit() else ("", "")
         name = f"{WAITING_MARK} 🔐 {title}"[:100]
@@ -1875,6 +1887,10 @@ class Gate:
             pass
         print("GATE_CARD_THREAD_FALLBACK", file=sys.stderr, flush=True)
         return channel
+
+    def message_lock(self, proof) -> asyncio.Lock:
+        """The lock one owner message's cards take while they choose a thread and go on record."""
+        return self.message_locks.setdefault(str(proof), asyncio.Lock())
 
     async def supersede(self, thread, api, op, path, method, title, body=b"") -> None:
         """A newer card for the same work in the same thread replaces the older undecided one.

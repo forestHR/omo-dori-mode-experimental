@@ -216,7 +216,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 if route.endswith("/threads") and method == "POST":
                     self.created_threads.append(route)
                     self.thread_names.append(json.loads(body)["name"])
-                    data = {"id": parts[4] if "messages" in parts else "777"}
+                    data = {"id": parts[4] if "messages" in parts else str(776 + len(self.created_threads))}
                     self.thread_meta[data["id"]] = {"id": data["id"], "type": 11, "parent_id": parts[2],
                                                     "name": json.loads(body)["name"]}
                 elif route == "/guilds/10/threads/active":
@@ -514,6 +514,67 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         # Then: one new thread in the approval channel carries the card.
         self.assertEqual(self.created_threads, ["/channels/20/threads"])
         self.assertEqual(self.card_channels[self.service.pending()[0]["message"]], "777")
+
+    async def share(self, file, who="partner@example.net", origin="30/100"):
+        status, _ = await self.request(path=f"/www.googleapis.com/drive/v3/files/{file}/permissions", origin=origin,
+                                       data={"type": "user", "role": "reader", "emailAddress": who})
+        self.assertEqual(status, 202)
+
+    def card_threads(self):
+        """Where every undecided card and batch card of the run sits."""
+        return ([self.card_channels[e["message"]] for e in self.service.pending() if e["status"] == "pending"]
+                + [self.card_channels[b["message"]] for b in self.service.batches()])
+
+    async def test_the_cards_one_message_asks_for_share_one_thread_cards_first(self):
+        # Owner Q474: one request outside the approval channel made eighteen Drive sharing threads (2026-10-30).
+        self.approval()
+        await self.share("f")
+        await self.share("g")
+        self.assertEqual((await self.submit_batch(origin="30/100"))[0], 202)
+        self.assertEqual((await self.submit_batch(title="두째 정리", origin="30/100"))[0], 202)
+        self.assertEqual(self.created_threads, ["/channels/20/threads"])
+        self.assertEqual(self.card_threads(), ["777"] * 4)
+
+    async def test_the_cards_one_message_asks_for_share_one_thread_batch_first(self):
+        self.approval()
+        self.assertEqual((await self.submit_batch(origin="30/100"))[0], 202)
+        self.assertEqual((await self.submit_batch(title="두째 정리", origin="30/100"))[0], 202)
+        await self.share("f")
+        await self.share("g")
+        self.assertEqual(self.created_threads, ["/channels/20/threads"])
+        self.assertEqual(self.card_threads(), ["777"] * 4)
+
+    async def test_cards_one_message_asks_for_at_once_still_share_one_thread(self):
+        self.approval()
+        await asyncio.gather(*(self.share(f) for f in "fgh"), self.submit_batch(origin="30/100"))
+        self.assertEqual(self.created_threads, ["/channels/20/threads"])
+        self.assertEqual(self.card_threads(), ["777"] * 4)
+
+    async def test_another_owner_message_gets_its_own_thread_and_a_decided_thread_is_not_reused(self):
+        self.approval()
+        await self.share("f")
+        await self.share("g", origin="31/100")
+        self.assertEqual(self.created_threads, ["/channels/20/threads"] * 2)
+        self.assertEqual(sorted(self.card_threads()), ["777", "778"])
+        for entry in self.service.pending():
+            self.react(entry["message"], "⛔")
+        await self.service.poll_approvals()
+        # the first message's thread is decided and archived: a later card of that message opens a new one
+        await self.share("h")
+        self.assertEqual(self.card_threads(), ["779"])
+
+    async def test_the_same_share_asked_again_replaces_the_older_card_in_the_shared_thread(self):
+        self.approval()
+        await self.share("f")
+        first = self.service.pending()[0]
+        await self.share("f")
+        await self.share("f", who="second@example.net")
+        self.assertEqual(self.created_threads, ["/channels/20/threads"])
+        self.assertNotIn(first["id"], [e["id"] for e in self.service.pending()])
+        self.assertTrue(self.cards[first["message"]].startswith("🔁"))
+        self.assertEqual(sorted(json.loads(base64.b64decode(e["body"]))["emailAddress"] for e in self.service.pending()),
+                         ["partner@example.net", "second@example.net"])
+        self.assertEqual(self.card_threads(), ["777"] * 2)
 
     async def test_a_revised_request_replaces_the_older_card_which_then_never_runs(self):
         # Given: the same invite asked twice in one thread.
