@@ -110,16 +110,21 @@ export function startProxy(config: Config) {
   });
 }
 
+// The login passphrase: HERDR_WEB_PASSPHRASE from the web env file (an install that never ran aoe), else the account's
+// old aoe serve passphrase, so a Dori that moved from aoe keeps logging in with the same one.
+export const passphraseFrom = (env: Readonly<Record<string, string | undefined>>): string | undefined =>
+  env.HERDR_WEB_PASSPHRASE || env.AOE_SERVE_PASSPHRASE || undefined;
+
 if (import.meta.main) {
   const port = Number(process.env.HERDR_WEB_PORT);
   const upstreamPort = Number(process.env.HERDR_TTYD_PORT);
-  const passphrase = process.env.AOE_SERVE_PASSPHRASE;
+  const passphrase = passphraseFrom(process.env);
   const origin = process.env.HERDR_WEB_ORIGIN;
   if (!Number.isInteger(port) || port < 1 || port > 65535 ||
       !Number.isInteger(upstreamPort) || upstreamPort < 1 || upstreamPort > 65535 ||
       port === upstreamPort || !passphrase || !origin ||
       !["http:", "https:"].includes(new URL(origin).protocol) || new URL(origin).origin !== origin) {
-    throw new TypeError("Set valid HERDR_WEB_PORT, HERDR_TTYD_PORT, HERDR_WEB_ORIGIN and AOE_SERVE_PASSPHRASE");
+    throw new TypeError("Set valid HERDR_WEB_PORT, HERDR_TTYD_PORT, HERDR_WEB_ORIGIN and HERDR_WEB_PASSPHRASE (or AOE_SERVE_PASSPHRASE)");
   }
   startProxy({ port, upstreamPort, passphrase, origin });
 }
