@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import type { DoriConfig } from "./config.ts";
 import { agentPath, herdrAgentArgv } from "./aoe.ts";
-import { agentLine, herdrAgentPid, herdrSessions, herdrShellPid } from "./herdr.ts";
+import { agentLine, herdrAgentPid, herdrSessions, herdrShellPid, HerdrShellError, requireHerdrPwsh } from "./herdr.ts";
 import type { Clock, Runner } from "./run.ts";
 import { argvSessionId, hasSessionSelector, procTable, resolveSession } from "./session-id.ts";
 
@@ -68,12 +68,19 @@ export const reviveHerdr = async (run: Runner, clock: Clock, config: Pick<DoriCo
   const restored = await herdrAgentPid(run, pane);
   const read = async () => (await run(["herdr", "pane", "read", pane, "--source", "visible"])).out;
   if (!restored) {
+    try {
+      await requireHerdrPwsh(run, pane);
+    } catch (error) {
+      if (error instanceof HerdrShellError) return `REVIVE_FAIL ${pane}: ${error.message}`;
+      throw error;
+    }
     // the configured agentCommand with its own options (a --session-dir included), the recorded session and model
     if (hasSessionSelector(config.agentCommand.slice(1))) return `REVIVE_FAIL ${pane}: agentCommand picks its session itself (${config.agentCommand.join(" ")}); revive needs one without a session selector`;
     const tool = config.agentCommand[0] ?? "omo";
     const argv = herdrAgentArgv(config.agentCommand, rec.model || config.defaultModel, undefined, rec.session);
     // the screen is cleared first, so a ❯ the ended agent left there is gone before the new one draws
-    const ran = await run(["herdr", "pane", "run", pane, `clear && ${agentLine(argv, { PATH: agentPath(tool) })}`], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
+    const clear = process.platform === "win32" ? "Clear-Host; " : "clear && ";
+    const ran = await run(["herdr", "pane", "run", pane, `${clear}${agentLine(argv, { PATH: agentPath(tool) })}`], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
     if (ran.code !== 0) return `REVIVE_FAIL ${pane}: herdr pane run failed: ${(ran.err || ran.out).slice(0, 160)}`;
   }
   const how = restored ? ` (herdr had started it again, pid ${restored})` : "";

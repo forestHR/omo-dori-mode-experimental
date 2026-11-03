@@ -1,3 +1,4 @@
+// allow: SIZE_OK - existing launch state machine; native-name recognition is shared without adding another launch path.
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 
@@ -8,6 +9,7 @@ import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { agentGone, firstTurnRuns, GOAL_WAIT, goalReader, lastLines, noGoalWhy } from "./pending-goal.ts";
 import { AGENT, argvSessionId, descendants, ended, hasSessionSelector, procTable, sessionDirFor, shellPidOf } from "./session-id.ts";
+import { isOmoExecutable } from "./executable.ts";
 import { leadReplies } from "./lead-limit.ts";
 import { omoSession, readScreen, sendVerified } from "./panes.ts";
 import { hasThread, LANE_KEY, type Lane, NO_THREAD, threadRefProblem } from "./registry.ts";
@@ -609,7 +611,7 @@ type Opened = { readonly pane: string; readonly tab?: string; readonly failure?:
 // A herdr lane's agent picks its own session unless told: an omo agentCommand that names no session of its own gets
 // --session-id <a new id> after the program, so launch knows the lane's session exactly. Any other command is run as it is.
 export const withSessionId = (argv: readonly string[], id: string): string[] =>
-  basename(argv[0] ?? "") === "omo" && !hasSessionSelector(argv) ? [argv[0] ?? "omo", "--session-id", id, ...argv.slice(1)] : [...argv];
+  isOmoExecutable(argv[0] ?? "") && !hasSessionSelector(argv) ? [argv[0] ?? "omo", "--session-id", id, ...argv.slice(1)] : [...argv];
 
 // env: launchEnv for the lane (laneEnv), set on the agent's command line, since a herdr pane takes the server's environment
 const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string, env: Readonly<Record<string, string | undefined>> = {}): Promise<Opened> => {
@@ -619,7 +621,7 @@ const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string
   let opened: { readonly pane: string; readonly tab?: string };
   try {
     // omo needs node for its hooks (agentPath); another agent starts with the server's PATH as before
-    const path = basename(argv[0] ?? "") === "omo" ? { PATH: agentPath(argv[0] ?? "omo") } : {};
+    const path = isOmoExecutable(argv[0] ?? "") ? { PATH: agentPath(argv[0] ?? "omo") } : {};
     opened = await openHerdrSession(deps.run, deps.clock, { title: key, cwd, argv, env: { ...env, ...path }, ...(deps.config.laneWorkspace ? { workspace: deps.config.laneWorkspace } : {}) });
   } catch (e) {
     throw new LaunchFailed(e instanceof Error ? e.message : String(e));

@@ -234,7 +234,7 @@ The Discord iOS app can't be driven by Shortcuts, so a one-button voice request 
 
 ## Tests
 
-There's no CI. Run the tests locally:
+There are no automatic GitHub checks: the fork's review/merge gate requires PRs without CI. Run the full suite locally:
 
 ```sh
 cd skills/dori-mode/scripts
@@ -244,6 +244,14 @@ bunx tsc --noEmit  # typecheck
 ```
 
 The tests cover both backends, launch/report delivery, freshness, blocked lanes, done flow and Discord cards/status. External tools and Discord HTTP/gateway are faked; no real pane, repo, GitHub or Discord account is touched.
+
+The Windows subset in `.github/workflows/windows.yml` is run by hand, not on pushes or pull requests:
+
+```sh
+gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref feat/herdr-windows
+```
+
+Replace `feat/herdr-windows` with the branch to validate. The workflow runs the native Windows process, refusal, revive, session-discovery and PowerShell-literal tests, plus their herdr backend tests. Windows freeze, thaw and handover refuse without changing processes or records; that implementation is deferred to `feat/herdr-windows-freeze`. Suites built on POSIX shell, process-table and launch-world fixtures stay in the Linux suite. Native Windows installation and supervision are a separate dependent change.
 
 ## License
 

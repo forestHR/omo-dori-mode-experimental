@@ -1,3 +1,4 @@
+// allow: SIZE_OK - existing lane-handover state machine; the signal wrapper is per transaction.
 // dori handover --lane <key>: move a lane whose conversation grew long to a new agent session.
 // Order: refuse while work would die with the old session (a local chain, a background eval cell, a running turn, an
 // open question) unless the
@@ -14,7 +15,8 @@ import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./backgrou
 import { captureTmux, closeAoeSession, envMismatch, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, paneLife, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
 import { turnRunning } from "./submit.ts";
 import type { FlowDeps } from "./done-flow.ts";
-import { freezePane, writeFrozen } from "./frozen.ts";
+import { freezePane, freezeSignal, writeFrozen } from "./frozen.ts";
+import { windowsHandoverRefusal } from "./windows-handover.ts";
 import { endOldMonitors } from "./handover-monitors.ts";
 import { ackFile, endStrayTasks, type HandoverDeps, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
 import { awaitPrompt } from "./launch.ts";
@@ -647,7 +649,12 @@ const IDLE_POLL_MS = 3_000;
 // waitIdleMin minutes. Then a lane still busy is refused (blocked busy, and freshness asks it to reach a safe point).
 // Work that would die (a local chain, a background eval cell) or go on unreachable (a background task) refuses at once
 // (blocked work).
-export const laneHandover = async (deps: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions = {}): Promise<LaneHandoverResult> => {
+export const laneHandover = async (input: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions = {}): Promise<LaneHandoverResult> => {
+  if (process.platform === "win32") {
+    input.print(windowsHandoverRefusal(key));
+    return { code: 2 };
+  }
+  const deps = { ...input, signal: freezeSignal(input.signal) };
   if (!opts.waitIdleMin || opts.dryRun) return attempt(deps, key, here, opts);
   const emit = (line: string): void => {
     deps.print(line);

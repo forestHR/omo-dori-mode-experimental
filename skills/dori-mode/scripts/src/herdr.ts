@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import type { Clock, Runner } from "./run.ts";
+import { commandExecutable, executableName } from "./executable.ts";
 import { AGENT, type Proc, procTable, topAgent } from "./session-id.ts";
 
 // herdr's side of the session primitives in aoe.ts (dori-mode on herdr, as upstream runs it; ported here for the move of
@@ -39,6 +40,31 @@ const processInfo = async (run: Runner, pane: string): Promise<ProcessInfo | und
 
 export const herdrShellPid = async (run: Runner, pane: string): Promise<number> => Number((await processInfo(run, pane))?.shell_pid ?? 0);
 
+export class HerdrShellError extends Error {
+  readonly code = "HERDR_SHELL_UNSUPPORTED";
+  constructor(readonly pane: string, readonly executable: string, readonly version: string, need = "Windows herdr panes need pwsh 7.3+") {
+    super(`HERDR_SHELL_UNSUPPORTED ${pane}: ${executable || "unknown shell"} (${version}); ${need}`);
+    this.name = "HerdrShellError";
+  }
+}
+
+// emptyEnv: variables the launch sets to "". pwsh before 7.5 removes a variable assigned an empty string, which would turn
+// e.g. CUDA_VISIBLE_DEVICES="" (no GPU) into all GPUs, so such a launch needs 7.5+.
+export const requireHerdrPwsh = async (run: Runner, pane: string, platform: NodeJS.Platform = process.platform, emptyEnv: readonly string[] = []): Promise<void> => {
+  if (platform !== "win32") return;
+  const pid = await herdrShellPid(run, pane);
+  const shell = (await procTable(run, platform)).find((process) => process.pid === pid);
+  const executable = shell?.executable || commandExecutable(shell?.cmd ?? "");
+  if (!["pwsh", "pwsh.exe"].includes(executableName(executable, "win32"))) throw new HerdrShellError(pane, executable, "unsupported");
+  const result = await run([executable, "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"]);
+  const version = result.out.trim();
+  const parts = /^(\d+)\.(\d+)/.exec(version);
+  const major = Number(parts?.[1] ?? 0);
+  const minor = Number(parts?.[2] ?? 0);
+  if (result.code !== 0 || major < 7 || (major === 7 && minor < 3)) throw new HerdrShellError(pane, executable, version || "unknown version");
+  if (emptyEnv.length && major === 7 && minor < 5) throw new HerdrShellError(pane, executable, version, `keeping the empty value of ${emptyEnv.join(", ")} needs pwsh 7.5+ (older pwsh removes the variable); update pwsh or leave the value out of launchEnv`);
+};
+
 // The pane's agent: the foreground process herdr names (an agent started with pane run is the shell's foreground job), else
 // the topmost agent process under its shell (a zombie is none). Its command line is not searched for "mcp": a herdr lane
 // carries its prompt there, so a lane keyed mcp-fix would read as an MCP server; an agent's MCP servers sit below it.
@@ -67,7 +93,19 @@ export const shellQuote = (arg: string): string => (/^[\w./:@=+,-]+$/.test(arg) 
 
 // The line a pane's shell runs to start the agent: env(1) sets and removes the session's variables (an undefined value
 // removes one, as laneEnv asks for a --use-gpu lane), so the agent starts as asked whatever the server's environment holds.
-export const agentLine = (argv: readonly string[], env: Readonly<Record<string, string | undefined>> = {}): string => {
+// On Windows a herdr pane runs PowerShell (herdr 0.9.5): there a line starting with a quoted path is an expression, so the
+// command goes after the call operator &, words in single quotes ('' for a quote), and the variables are set before it.
+export const agentLine = (argv: readonly string[], env: Readonly<Record<string, string | undefined>> = {}, platform: string = process.platform): string => {
+  if (platform === "win32") {
+    // Names, values and arguments never become PowerShell text: each goes in as base64 (whose letters mean nothing inside
+    // single quotes) and is decoded in the shell, so empty values, names like ProgramFiles(x86), ; $ ` and curly quotes
+    // cannot change the command.
+    const data = (s: string) => `([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(s, "utf8").toString("base64")}')))`;
+    const vars = Object.entries(env).map(([k, v]) => (v === undefined
+      ? `Remove-Item -LiteralPath ('Env:' + ${data(k)}) -ErrorAction SilentlyContinue; `
+      : `Set-Item -LiteralPath ('Env:' + ${data(k)}) -Value ${data(v)}; `)).join("");
+    return `$PSNativeCommandArgumentPassing = 'Standard'; ${vars}$doriArgv = @(${argv.map(data).join(", ")}); $doriRest = @($doriArgv | Select-Object -Skip 1); & $doriArgv[0] @doriRest`;
+  }
   const unset = Object.entries(env).flatMap(([k, v]) => (v === undefined ? ["-u", k] : []));
   const set = Object.entries(env).flatMap(([k, v]) => (v === undefined ? [] : [`${k}=${v}`]));
   return [...(unset.length || set.length ? ["env", ...unset, ...set] : []), ...argv].map(shellQuote).join(" ");
@@ -88,6 +126,7 @@ export const openHerdrSession = async (run: Runner, clock: Clock, opts: { readon
   const tab = made.root_pane.tab_id ?? made.tab?.tab_id ?? made.tab_id;
   // a fresh shell may drop what is typed before its prompt is drawn
   for (let i = 0; i < 20 && !(await herdrRead(run, pane)).trim(); i++) await clock.sleep(250);
+  await requireHerdrPwsh(run, pane, process.platform, Object.entries(opts.env ?? {}).flatMap(([k, v]) => (v === "" ? [k] : [])));
   const ran = await run(["herdr", "pane", "run", pane, agentLine(opts.argv, opts.env)]);
   if (ran.code !== 0) throw new Error(`herdr pane run failed in ${pane}: ${ran.err || ran.out}`);
   return { pane, ...(tab ? { tab } : {}) };

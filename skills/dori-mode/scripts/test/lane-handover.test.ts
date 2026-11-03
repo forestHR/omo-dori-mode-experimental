@@ -1,3 +1,4 @@
+// allow: SIZE_OK - existing shared handover simulation; the new assertion checks one OS stop per agent.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { pauseLane } from "../src/done-flow.ts";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -1879,7 +1880,8 @@ test("e7-leap on 2026-10-24: work a monitor of the old session started keeps run
   expect(live.has(31) && live.has(32)).toBe(true);
   expect(sigs.filter((s) => / 3[0-3]$/.test(s))).toEqual([]);
   expect(sigs).toContain("SIGTERM -14");
-  expect(sigs.indexOf("SIGTERM -14")).toBeLessThan(sigs.lastIndexOf("SIGSTOP 11"));
+  expect(sigs.indexOf("SIGTERM -14")).toBeLessThan(sigs.indexOf("SIGSTOP 12"));
+  expect(sigs.filter((signal) => signal === "SIGSTOP 11")).toHaveLength(1);
   expect(readFrozen(state.dir)[0]?.pids).not.toContain(14);
   expect(sigs.filter((s) => s.endsWith(" 11")).at(-1)).toBe("SIGSTOP 11");
   const note = readFileSync(r.note ?? "", "utf8");
