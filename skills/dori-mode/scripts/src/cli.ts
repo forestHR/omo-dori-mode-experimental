@@ -1316,6 +1316,15 @@ try {
             const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", ...(who === "lane" ? ["--lane", k, "--wait-idle", String(config.handover.autoWaitMin)] : []), "--approved-by", `auto:handover.autoRollover${who === "lane" ? "Lanes" : "Lead"}`]);
             return r.code === 0 ? `started unit=${unit} log=${log}` : `could not start: ${(r.err || r.out).trim().slice(0, 160)}`;
           },
+          // a lead's lane handover refused while the lane was busy, started again once the lane marked ready: a detached run
+          // with the same approval that waits for the lane's idle moment like an automatic one
+          resume: async (k: string, approvedBy: string) => {
+            const unit = `dori-rollover-${k}-${Date.now()}`;
+            const log = join(config.stateDir, "handover", "run.log");
+            mkdirSync(join(config.stateDir, "handover"), { recursive: true });
+            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "--lane", k, "--wait-idle", String(config.handover.autoWaitMin), "--approved-by", approvedBy]);
+            return r.code === 0 ? { started: true, line: `unit=${unit} log=${log}` } : { started: false, line: `could not start: ${(r.err || r.out).trim().slice(0, 160)}` };
+          },
           // the audit after a committed handover: a detached run, so its supplement round does not hold up the sweep
           audit: async (c: Committed) => {
             const unit = `dori-handover-audit-${c.key}-${Date.now()}`;

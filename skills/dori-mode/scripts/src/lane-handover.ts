@@ -25,7 +25,7 @@ import { hasSessionSelector } from "./session-id.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
-import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, userLines } from "./rollover.ts";
+import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section, seedRestatement, wholeBullet } from "./restatement.ts";
 import { watchLog } from "./watch-log.ts";
@@ -302,6 +302,16 @@ const ancestors = (table: readonly Proc[], pid: number): Set<number> => {
 export const readyFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.ready.json`);
 export const pendingFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.pending.json`);
 
+// The handover a lead (or the owner) approved and that was refused because the lane was busy (a turn ran, or work would
+// die): the lane's last handover run, approved by anyone but the automation, refused with blocked work or busy, in the
+// lane's pane now. A ready mark the lane writes after it starts that same move again (freshness readyResume); an automatic
+// run comes back from freshness's rolloverDue instead, and a run that went ahead or failed later ends the request.
+export const waitingRequest = (entries: readonly RolloverEntry[], key: string, pane: string): Extract<RolloverEntry, { kind: "rollover" }> | undefined => {
+  const last = entries.findLast((e): e is Extract<RolloverEntry, { kind: "rollover" }> => e.kind === "rollover" && e.who === "lane" && e.key === key);
+  const by = last?.approvedBy?.trim() ?? "";
+  return last && last.result === "refused" && (last.blocked === "work" || last.blocked === "busy") && last.from === pane && by && decidedBy(by) !== "auto" ? last : undefined;
+};
+
 // The pids of the monitors omo runs for the session in a pane (they are re-armed, not lost).
 const monitorPidsOf = async (deps: LaneHandoverDeps, pane: string, cwd: string): Promise<{ readonly session: string; readonly entries: ReturnType<typeof readManifest>; readonly pids: number[] }> => {
   const session = await deps.sessionOf(pane, cwd).catch(() => "");
@@ -340,7 +350,8 @@ export const markReady = async (deps: LaneHandoverDeps, lane: Lane, here: string
   mkdirSync(join(deps.config.stateDir, "handover", "lanes"), { recursive: true });
   writeFileSync(readyFile(deps.config.stateDir, lane.key), JSON.stringify(mark, null, 1));
   const list = chains.map((c) => `${c.pid} ${c.cmd.slice(0, 80)}`).join("; ");
-  return { code: 0, line: `HANDOVER_READY ${lane.key} pane=${lane.pane} chains=${chains.length}${list ? ` (${list}; these end when the old session closes)` : ""}${runner.length ? ` runner=${runner.map((c) => c.pid).join(",")} (runs this command; covered too)` : ""} note=${noteFile ? "yes" : "no"}; valid ${deps.config.handover.readyMin} min. Tell the lead, then end your turn.` };
+  const asked = waitingRequest(readRollovers(deps.config.stateDir), lane.key, lane.pane);
+  return { code: 0, line: `HANDOVER_READY ${lane.key} pane=${lane.pane} chains=${chains.length}${list ? ` (${list}; these end when the old session closes)` : ""}${runner.length ? ` runner=${runner.map((c) => c.pid).join(",")} (runs this command; covered too)` : ""} note=${noteFile ? "yes" : "no"}; valid ${deps.config.handover.readyMin} min. ${asked ? `The handover the lead asked for at ${asked.at} starts again by itself within a few minutes, once your turn ends. Tell the lead, then end your turn.` : "Tell the lead, then end your turn."}` };
 };
 
 const job = (j: Job): string => `- ${j.pid}: \`${j.cmd.slice(0, 200).replace(/`/g, "'")}\``;
@@ -542,7 +553,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const blocked = blockers.length > 0 && !opts.force;
   // an automatic start that waits for the idle moment tries again once the turn ends; work that would die refuses at once
   if (blocked && !opts.dryRun && opts.idle && !opts.idle.final && !work.length) return { code: 2, retry: true };
-  const blockedWhy = `${opts.idle && !work.length ? `the lane stayed busy for ${opts.idle.waitedMin} min: ` : ""}${blockers.join("; ")}. Ask the lane to reach a safe point and write its conversation summary and run dori handover ready ${key} --note FILE in its own pane, or pass --force`;
+  const blockedWhy = `${opts.idle && !work.length ? `the lane stayed busy for ${opts.idle.waitedMin} min: ` : ""}${blockers.join("; ")}. Ask the lane to reach a safe point and write its conversation summary and run dori handover ready ${key} --note FILE in its own pane, or pass --force${opts.approvedBy?.trim() && decidedBy(opts.approvedBy.trim()) !== "auto" ? ` (once it marks ready within ${config.handover.readyMin} min, freshness starts this handover again by itself with the same approval)` : ""}`;
   // a dry run still writes the note, so a rollover proposal can show it with what blocks the move
   if (blocked && !opts.dryRun) return refuse(blockedWhy, { blocked: work.length ? "work" : "busy", pids: uncovered.flatMap((c) => c.pids ?? [c.pid]), tasks: tasks.map((t) => t.id) });
   if (blocked) emit(`HANDOVER_REFUSED ${key}: ${blockedWhy}`);
