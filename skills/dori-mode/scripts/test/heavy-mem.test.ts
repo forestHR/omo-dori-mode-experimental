@@ -15,6 +15,9 @@ const ownCgroup = (): string => readFileSync("/proc/self/cgroup", "utf8").trim()
 
 test("a heavy command over its MemoryMax is killed alone in its own scope and the process that started it keeps running", async () => {
   const no = await canScope();
+  // the caller may itself run in a dori-heavy scope (a lane runs big test bundles through dori heavy): what must hold
+  // is that the jobs never move it, so its cgroup is read now and compared at the end
+  const before = ownCgroup();
   const logs: string[] = [];
   const out = join(state.dir, "cgroup");
   // the job's cgroup is its own, not the caller's (2026-10-30: a lane's job shared the lane's aoe-session scope)
@@ -32,7 +35,7 @@ test("a heavy command over its MemoryMax is killed alone in its own scope and th
   expect(code).not.toBe(0);
   expect(logs[0]).toMatch(/^HEAVY_SCOPE oom dori-heavy-oom-\d+-\d+\.scope MemoryMax=200M \(its --mem\)$/);
   expect(logs[1]).toMatch(/^HEAVY_OOM oom: killed at MemoryMax=200M in dori-heavy-oom-\d+-\d+\.scope \(exit \d+\); only the job stopped/);
-  expect(ownCgroup()).not.toContain("dori-heavy-");
+  expect(ownCgroup()).toBe(before);
 });
 
 test("two jobs with one label in one process each get their own scope, while the first still runs", async () => {
