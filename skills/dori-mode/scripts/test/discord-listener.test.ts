@@ -576,7 +576,7 @@ test("while the listener records another owner message during a manual removal, 
   expect(JSON.parse(readFileSync(eyesPath, "utf8"))[PAIR]).toContain("6102");
 });
 
-test("another Dori's reply that comes while the owner's voice note is still being transcribed waits for it, then clears an uncalled message", async () => {
+test("another Dori's reply that comes while the owner's voice note is still being transcribed clears it once its row is written uncalled", async () => {
   let finish = (_: string): void => {};
   const text = new Promise<string>((r) => { finish = r; });
   const transcribe = () => text;
@@ -589,6 +589,36 @@ test("another Dori's reply that comes while the owner's voice note is still bein
   await Promise.all([owner, reply]);
   expect(unreacts(calls)).toEqual([`${PAIR}/messages/7001`]);
   expect(logs).toContain(`EYES_CLEARED_ANSWERED ${PAIR} by=7002 bot=${PAIR_BOT} 7001`);
+});
+
+test("another Dori's reply that comes before the owner's message is taken in (backfill brings it later) still clears it once it is uncalled, also across a restart", async () => {
+  const { listener, gw, calls, logs } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES });
+  listener.start();
+  ready(gw);
+  await listener.onMessage(pairBot("9002", { message_reference: { message_id: "9001" } }));
+  expect(unreacts(calls)).toEqual([]);
+  await listener.onMessage(msg("9001", { channel_id: PAIR, content: "수돌아 이거" }));
+  expect(unreacts(calls)).toEqual([`${PAIR}/messages/9001`]);
+  expect(logs).toContain(`EYES_CLEARED_ANSWERED ${PAIR} by=9002 bot=${PAIR_BOT} 9001`);
+  const rows = [{ id: "9102", ts: "x", channel_id: PAIR, scope: "pair-bot", author_id: PAIR_BOT, reply_to: "9101", content: "" }];
+  const later = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, inbox: rows.map((r) => `${JSON.stringify(r)}\n`).join("") });
+  later.listener.start();
+  ready(later.gw);
+  await later.listener.onMessage(msg("9101", { channel_id: PAIR, content: "무돌아" }));
+  expect(unreacts(later.calls)).toEqual([`${PAIR}/messages/9101`]);
+});
+
+test("an owner voice note in the pair channel whose words did not come through is not uncalled: no transcriber, a failed or an empty transcript", async () => {
+  const voice = { content: "", attachments: [{ url: "https://cdn/v.ogg", filename: "voice-message.ogg", content_type: "audio/ogg" }] };
+  for (const transcribe of [undefined, async () => { throw new Error("whisper down"); }, async () => "  "]) {
+    const { listener, gw, inbox, calls } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, ...(transcribe ? { transcribe } : {}) });
+    listener.start();
+    ready(gw);
+    await listener.onMessage(msg("9201", { channel_id: PAIR, ...voice }));
+    await listener.onMessage(pairBot("9202", { message_reference: { message_id: "9201" } }));
+    expect(inbox().find((r) => r.id === "9201")?.called).toBeUndefined();
+    expect(unreacts(calls)).toEqual([]);
+  }
 });
 
 test("an owner pair message mentioning one of this bot's roles is called once the roles are read; while they cannot be read it is not uncalled", async () => {

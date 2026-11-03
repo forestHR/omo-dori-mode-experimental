@@ -156,8 +156,8 @@ const MENTION_NOTE = "the owner called this Dori in a channel it does not own: a
 const MESSAGE_LINK = /discord(?:app)?\.com\/channels\/\d+\/(\d+)\/(\d+)/g;
 // the owner's message in the pair channel that did not call this Dori: it may be another Dori's (owner 2026-11-03 09:58 KST)
 // the owner messages a pair post answers: the one it replies to and those in the same channel it links to
-const answeredIds = (m: DiscordMessage): string[] =>
-  [...new Set([m.message_reference?.message_id ?? "", ...[...(m.content ?? "").matchAll(MESSAGE_LINK)].filter(([, ch]) => ch === m.channel_id).map(([, , id]) => id ?? "")])].filter(Boolean);
+const answeredIds = (channel: string, replyTo: string | null | undefined, content: string | undefined): string[] =>
+  [...new Set([replyTo ?? "", ...[...(content ?? "").matchAll(MESSAGE_LINK)].filter(([, ch]) => ch === channel).map(([, , id]) => id ?? "")])].filter(Boolean);
 const pairNote = (id: string): string => `the owner wrote in the pair channel without calling you: if it is another Dori's work, do not answer and take your eyes off at once with dori eyes off ${id}`;
 
 // dori eyes off <message id | link>: the lead read an owner message that is not its own and will not answer it, so this
@@ -191,8 +191,10 @@ export class DiscordListener {
   private eyes: Record<string, string[]> = {};
   // owner pair messages that did not call this Dori (rows with called false): another Dori's answer takes our eyes off them
   private readonly uncalled = new Set<string>();
-  // owner pair messages whose intake is still running: id -> settles when its row is written
-  private readonly intake = new Map<string, Promise<void>>();
+  // owner pair messages another Dori answered (its reply or link) -> that answer. The eyes come off once a message is both
+  // uncalled and answered, whichever of the two is known first (a reply can come before the owner's row is written: a
+  // voice note still being transcribed, or a missed message backfill brings later); rebuilt from the pair-bot rows
+  private readonly answered = new Map<string, { readonly by: string; readonly bot: string }>();
   private self = "";
   // role ids that call this Dori: discord.mentionRoleIds, plus its bot member's roles, read again at every READY
   private roles: Set<string>;
@@ -211,9 +213,11 @@ export class DiscordListener {
     if (existsSync(this.eyesFile)) this.eyes = JSON.parse(readFileSync(this.eyesFile, "utf8")) as Record<string, string[]>;
     for (const line of existsSync(d.inboxFile) ? readFileSync(d.inboxFile, "utf8").split("\n") : []) {
       if (!line.trim()) continue;
-      const row = JSON.parse(line) as { id: string; kind?: string; scope?: string; channel_id?: string; called?: boolean };
+      const row = JSON.parse(line) as { id: string; kind?: string; scope?: string; channel_id?: string; called?: boolean; author_id?: string; reply_to?: string | null; content?: string };
       this.seen.add(row.id);
       if (row.scope === "pair" && row.called === false) this.uncalled.add(row.id);
+      if (row.scope === "pair-bot" && row.channel_id)
+        for (const id of answeredIds(row.channel_id, row.reply_to, row.content)) this.answered.set(id, { by: row.id, bot: row.author_id ?? "" });
       if (!row.kind && OWN_SCOPES.has(row.scope ?? "")) {
         if (newer(row.id, this.cursor)) this.cursor = row.id;
         if (row.scope === "dm" && row.channel_id) this.dmChannel = row.channel_id;
@@ -277,10 +281,16 @@ export class DiscordListener {
 
   // another Dori answered the owner in the pair channel (a reply to his message, or a link to it): our eyes come off that
   // message when it did not call this Dori, since this Dori will not answer it; a message that called it keeps them
-  private async sweepAnswered(m: DiscordMessage): Promise<void> {
-    const targets = answeredIds(m).filter((id) => id && this.uncalled.has(id) && this.eyes[m.channel_id]?.includes(id)).map((id) => [m.channel_id, id] as const);
-    const cleared = await this.unEye(targets);
-    if (cleared.length) this.d.log(`EYES_CLEARED_ANSWERED ${m.channel_id} by=${m.id} bot=${m.author.id} ${cleared.join(",")}`);
+  private async sweepAnswered(channel: string, ids: readonly string[]): Promise<void> {
+    const targets = ids.filter((id) => this.answered.has(id) && this.uncalled.has(id) && this.eyes[channel]?.includes(id)).map((id) => [channel, id] as const);
+    for (const id of await this.unEye(targets)) {
+      const a = this.answered.get(id);
+      this.d.log(`EYES_CLEARED_ANSWERED ${channel} by=${a?.by ?? "-"} bot=${a?.bot ?? "-"} ${id}`);
+    }
+  }
+
+  private answersClear(): boolean {
+    return this.d.words.autoUnEye && !this.d.shadow && this.d.words.callNames.length > 0;
   }
 
   private async unEye(targets: readonly (readonly [string, string])[]): Promise<string[]> {
@@ -330,20 +340,6 @@ export class DiscordListener {
       scope = "mention";
     }
     this.seen.add(m.id);
-    if (scope !== "pair") return this.take(m, scope, viaWebhook, unknownRecording);
-    // an owner pair message is still being taken (eyes, transcript, role read) while another Dori may already answer it:
-    // that answer waits for this intake (sweepAnswered), set before the first await so a later message always sees it
-    let done = (): void => {};
-    this.intake.set(m.id, new Promise<void>((r) => { done = r; }));
-    try {
-      await this.take(m, scope, viaWebhook, unknownRecording);
-    } finally {
-      this.intake.delete(m.id);
-      done();
-    }
-  }
-
-  private async take(m: DiscordMessage, scope: InboxMessage["scope"], viaWebhook: boolean, unknownRecording: boolean): Promise<void> {
     // the other Dori's posts are information the Dori rarely answers, so eyes there would never come off
     if (!this.d.shadow && scope !== "pair-bot" && scope !== "watch")
       await this.d.dc.react(m.channel_id, m.id, EYES).then(
@@ -363,7 +359,9 @@ export class DiscordListener {
     const hints = this.d.hints && owners ? this.hintsFor(m.id, said) : {};
     // a role mention can only be judged once this bot's roles are read: while they are not, the message is not uncalled
     if (scope === "pair" && this.d.words.callNames.length) await this.readRoles();
-    const called = scope === "pair" && this.d.words.callNames.length ? (this.calledHere(m, said) ? true : this.rolesStale ? undefined : false) : undefined;
+    // so can a voice note whose words did not come through (no transcriber, a failed or empty transcript)
+    const unheard = !!audio && !transcript?.trim();
+    const called = scope === "pair" && this.d.words.callNames.length ? (this.calledHere(m, said) ? true : this.rolesStale || unheard ? undefined : false) : undefined;
     if (called === false) this.uncalled.add(m.id);
     const note = open.length ? `card ${open.join(", ")} still open, owner replied in text: resolve it with dori resolve ${open[0]} --answer "<the answer, short>" so the card folds` : "";
     this.append({
@@ -385,11 +383,12 @@ export class DiscordListener {
       ...(called !== undefined ? { called } : {}),
       ...hints,
     });
-    if (scope === "pair-bot" && this.d.words.autoUnEye && !this.d.shadow && this.d.words.callNames.length) {
-      // outside the channel's sweep queue, so a long transcription holds back only this answer, not our own sweeps
-      await Promise.all(answeredIds(m).map((id) => this.intake.get(id)));
-      await this.clearEyes(m, (x) => this.sweepAnswered(x));
+    if (scope === "pair-bot") {
+      const ids = answeredIds(m.channel_id, m.message_reference?.message_id, m.content);
+      for (const id of ids) this.answered.set(id, { by: m.id, bot: m.author.id });
+      if (ids.length && this.answersClear()) await this.clearEyes(m, () => this.sweepAnswered(m.channel_id, ids));
     }
+    if (called === false && this.answered.has(m.id) && this.answersClear()) await this.clearEyes(m, () => this.sweepAnswered(m.channel_id, [m.id]));
     if (newer(m.id, this.cursor)) this.cursor = m.id;
     this.d.log(`INBOUND discord-${scope} ${m.channel_id} ${m.id} ${viaWebhook ? `${this.d.owner} via=owner-webhook` : m.author.id} ${JSON.stringify((transcript ?? m.content).slice(0, 200))}`);
     if (open.length) this.d.log(`CARD_STILL_OPEN ${open.join(",")} thread=${m.channel_id} ${note}`);
