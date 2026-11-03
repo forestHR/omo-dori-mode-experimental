@@ -354,9 +354,14 @@ export const headingAt = (text: string, heading: string): number => {
   return m ? m.index + (m[0].startsWith("\n") ? 1 : 0) : -1;
 };
 
-// The lead's text of a brief: what dori launch appended (past signals, tree, footer) and the ledger block it put in are cut.
+// The sections dori launch writes after the lead's text (the repo's lessons, past signals, the tree, the footer): none of it
+// is the owner's or the lead's words, and a brief launched again gets them fresh, not a second copy of the old ones.
+export const GENERATED_SECTION = /\n## (?:Lessons for this repo|Past signals|Hypothesis tree|Lane footer) \(written by dori launch\)/;
+export const beforeGenerated = (brief: string): string => brief.split(GENERATED_SECTION)[0] ?? brief;
+
+// The lead's text of a brief: what dori launch appended (lessons, past signals, tree, footer) and the ledger block it put in are cut.
 export const leadText = (brief: string): string => {
-  let own = brief.split(/\n## (?:Past signals|Hypothesis tree|Lane footer) \(written by dori launch\)/)[0] ?? brief;
+  let own = beforeGenerated(brief);
   for (const heading of [DIRECTIVES_HEADING, APPLIED_HEADING]) {
     const at = headingAt(own, heading);
     if (at < 0) continue;

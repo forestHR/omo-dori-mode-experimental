@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { laneSessionFiles, readLeadRelays, type ReportLine } from "./auto-signals.ts";
 import { checkReviewers, ChallengeError, reviewers } from "./challenge.ts";
 import { fill } from "./config.ts";
-import { APPLIED_HEADING, appliesWhy, briefGaps, checkedLedger, coveredBy, type Directive, type DirectiveBlock, DirectiveError, directiveText, duplicated, type Gap, headingAt, type Ledger, leadGaps, LINK_SOURCE, loadLedger, scopeContext, unledgered } from "./directives.ts";
+import { APPLIED_HEADING, appliesWhy, briefGaps, checkedLedger, coveredBy, type Directive, type DirectiveBlock, DirectiveError, directiveText, duplicated, type Gap, GENERATED_SECTION, headingAt, type Ledger, leadGaps, LINK_SOURCE, loadLedger, scopeContext, unledgered } from "./directives.ts";
 import type { DoriConfig } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { eightSteps, laneRepo, launchLedger, uiSteps } from "./launch.ts";
@@ -134,7 +134,7 @@ export const laneDirectiveWords = async (deps: Pick<FlowDeps, "run" | "config">,
 
 // --- dori directives apply: a lane launched before a directive was in the ledger gets it now ---
 
-const FOOTER = /\n## (?:Past signals|Hypothesis tree|Lane footer) \(written by dori launch\)/;
+const FOOTER = GENERATED_SECTION;
 
 // The brief with the texts at the end of the lead's part, under APPLIED_HEADING (added to the heading already there),
 // before what dori launch appended (past signals, tree, footer). Nothing above is changed.

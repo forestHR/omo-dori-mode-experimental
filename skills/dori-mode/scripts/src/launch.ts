@@ -20,7 +20,7 @@ import { laneArea, loadTree, treeSection } from "./explore.ts";
 import { watchLog } from "./watch-log.ts";
 import { StartRefused } from "./backlog.ts";
 import { relatedLines, relatedThreads, type RelatedThread } from "./related-thread.ts";
-import { addedLine, checkedLedger, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
+import { addedLine, beforeGenerated, checkedLedger, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
 import { join } from "node:path";
 import type { BudgetLimits } from "./supervision.ts";
 import { Lessons } from "./lessons.ts";
@@ -481,7 +481,8 @@ export type Rendered = {
 export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<Rendered> => {
   const briefFile = Bun.file(input.brief);
   if (!(await briefFile.exists())) throw new LaunchError(`brief not found: ${input.brief}`);
-  const raw = (await briefFile.text()).replace(/\s*$/, "");
+  // a brief launched before carries the sections that launch wrote then (a lesson since retired, old signals): cut, made anew
+  const raw = beforeGenerated(await briefFile.text()).replace(/\s*$/, "");
   const cwd = input.cwd ?? deps.config.defaultCwd;
   const ledger = launchLedger(deps);
   const ctx = scopeContext(raw, ledger, { ui: input.ui, repo: ledger.entries.length ? await laneRepo(deps, cwd) : "" });

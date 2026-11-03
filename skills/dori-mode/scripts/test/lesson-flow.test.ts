@@ -3,6 +3,8 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 
 import { closeLane } from "../src/done-flow.ts";
+import { leadText } from "../src/directives.ts";
+import { briefForCheck } from "../src/intent-check.ts";
 import { renderBrief } from "../src/launch.ts";
 import { Lessons } from "../src/lessons.ts";
 import type { Lane } from "../src/registry.ts";
@@ -70,6 +72,34 @@ test("the brief carries the repo's current lessons before Past signals and the f
   expect(r.text).not.toContain("Other repo rule");
   expect(r.text.split("Run the big tests through dori heavy").length).toBe(2);
   expect(r.lines.some((l) => l.startsWith(`LESSON_WARNING ${lessons.path}:`))).toBe(true);
+});
+
+test("a brief launched again drops a lesson retired since, and carries one lessons section and one footer", async () => {
+  const deps = depsFor(newWorld(), fakeClock(T0), state.dir);
+  const lessons = new Lessons(state.dir);
+  const old = lessons.add({ ...lesson, lane: "earlier", cwd: "/repo" }, T0);
+  lessons.add({ rule: "Keep this one", evidence: "/e", lane: "earlier", cwd: "/repo" }, T0 + 1);
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# Port it\n");
+  const input = { key: "lesson-again", title: "again", brief, done: "merged acme/app#2", cwd: "/repo" };
+  await Bun.write(brief, (await renderBrief(deps, input)).text);
+  lessons.mark(old.id, "harmful");
+  const again = (await renderBrief(deps, input)).text;
+  expect(again).not.toContain(lesson.rule);
+  expect(again).toContain("Keep this one");
+  expect(again.split("## Lessons for this repo").length).toBe(2);
+  expect(again.split("## Lane footer").length).toBe(2);
+});
+
+test("the lessons section is not the lead's or the owner's words for the directive audit and intent-check", async () => {
+  const deps = depsFor(newWorld(), fakeClock(T0), state.dir);
+  new Lessons(state.dir).add({ rule: "Screenshot the dashboard UI at phone width", evidence: "/e", lane: "earlier", cwd: "/repo" }, T0);
+  const brief = join(state.dir, "brief.md");
+  await Bun.write(brief, "# Port it\n");
+  const { text } = await renderBrief(deps, { key: "lesson-scope", title: "scope", brief, done: "merged acme/app#2", cwd: "/repo" });
+  expect(text).toContain("Screenshot the dashboard UI at phone width");
+  expect(leadText(text)).not.toContain("dashboard UI");
+  expect(briefForCheck(text)).not.toContain("dashboard UI");
 });
 
 test("a repo with no lessons gets no lessons section", async () => {
