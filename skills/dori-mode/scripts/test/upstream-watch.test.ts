@@ -179,28 +179,33 @@ test("lists longer than one page are read in full, and a commit of a PR the watc
   ];
   writeFileSync(join(root, "prs.json"), JSON.stringify(prs));
   writeFileSync(join(root, "commits.jsonl"), commits.map((c) => JSON.stringify(c)).join("\n"));
-  // gh stand-in: lists stop at --limit like gh does, and the commits feed needs --paginate.
-  writeFileSync(join(bin, "gh"), `#!/usr/bin/python3
-import json, sys
+  // gh stand-in: lists stop at --limit like gh does, and the commits feed needs --paginate. The watch calls it once per
+  // PR (about 155 times here), so it is /bin/sh, not Python: a Python start per call made this test miss its 5 s limit
+  // on a busy PC. Only the one pr list call, which has to cut the JSON list at --limit, starts Python.
+  writeFileSync(join(root, "pr-list.py"), `import json, sys
 a = sys.argv[1:]
-if a[:2] == ["pr", "list"]:
-    print(json.dumps(json.load(open("${join(root, "prs.json")}"))[: int(a[a.index("--limit") + 1])]))
-elif a[:2] == ["issue", "list"]:
-    print("[]")
-elif a[0] == "api" and a[1] == "--paginate" and "/pulls/" in a[2]:
-    print(json.dumps({"filename": "skills/dori-mode/scripts/src/cli.ts", "patch": "+x"}))
-elif a[0] == "api" and a[1] == "--paginate" and "/commits/" in a[2]:
-    # a commit's files come 300 per page; the skills/ change is on the second page
-    print(json.dumps({"filename": "docs/a.md", "patch": "+a"}))
-    print(json.dumps({"filename": "skills/dori-mode/scripts/src/sweeps.ts", "patch": "+x"}))
-elif a[0] == "api" and a[1] == "--paginate":
-    print(open("${join(root, "commits.jsonl")}").read())
-elif a[0] == "api" and a[1].endswith("/pulls"):
-    print(json.dumps([{"number": 999 if "${"f".repeat(40)}" in a[1] else 5, "merged_at": "2026-11-02T00:00:00Z"}]))
-elif a[0] == "api" and "/commits/" in a[1]:
-    print(json.dumps({"filename": "docs/a.md", "patch": "+a"}))
-else:
-    sys.exit(f"unexpected gh {a}")
+print(json.dumps(json.load(open("${join(root, "prs.json")}"))[: int(a[a.index("--limit") + 1])]))
+`);
+  writeFileSync(join(bin, "gh"), `#!/bin/sh
+case "$1 $2" in
+"pr list") exec /usr/bin/python3 -I "${join(root, "pr-list.py")}" "$@" ;;
+"issue list") echo '[]' ;;
+"api --paginate")
+  case "$3" in
+  */pulls/*) echo '{"filename": "skills/dori-mode/scripts/src/cli.ts", "patch": "+x"}' ;;
+  # a commit's files come 300 per page; the skills/ change is on the second page
+  */commits/*) echo '{"filename": "docs/a.md", "patch": "+a"}'; echo '{"filename": "skills/dori-mode/scripts/src/sweeps.ts", "patch": "+x"}' ;;
+  *) cat "${join(root, "commits.jsonl")}" ;;
+  esac ;;
+"api "*)
+  case "$2" in
+  *${"f".repeat(40)}*/pulls) echo '[{"number": 999, "merged_at": "2026-11-02T00:00:00Z"}]' ;;
+  */pulls) echo '[{"number": 5, "merged_at": "2026-11-02T00:00:00Z"}]' ;;
+  */commits/*) echo '{"filename": "docs/a.md", "patch": "+a"}' ;;
+  *) echo "unexpected gh $*" >&2; exit 1 ;;
+  esac ;;
+*) echo "unexpected gh $*" >&2; exit 1 ;;
+esac
 `);
   chmodSync(join(bin, "gh"), 0o755);
   const r = await run([], { UPSTREAM_WATCH_GH_DIR: "", PATH: `${bin}:/usr/bin:/bin` });
