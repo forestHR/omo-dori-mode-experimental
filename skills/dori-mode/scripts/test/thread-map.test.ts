@@ -261,6 +261,15 @@ test("thread done --force ends a standing thread the same way", async () => {
   expect({ name: http().name, archived: http().archived, entry: map()[ID] }).toEqual({ name: "✅ fix login", archived: true, entry: undefined });
 });
 
+test("a forced thread done whose post fails leaves the thread standing, and the retry still ends it with no 📌", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  await cli("set", REF, "standing");
+  const failed = await cli("done", REF, "📌", "--force");
+  expect({ failed: failed.code !== 0, name: http().name, standing: map()[ID]?.standing }).toEqual({ failed: true, name: "📌 fix login", standing: true });
+  await cli("done", REF, "finished", "--force");
+  expect({ name: http().name, archived: http().archived, entry: map()[ID] }).toEqual({ name: "✅ fix login", archived: true, entry: undefined });
+});
+
 test("a 📌 in the title of a thread that was never standing stays through status changes", async () => {
   await cli("open", "📌 notices", "--first", "Start");
   await cli("set", REF, "waiting");

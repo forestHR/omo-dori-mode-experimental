@@ -1914,8 +1914,8 @@ try {
         if (holders) console.log(`THREAD_DONE_FORCED ${thread}: ${holders}; marking it done anyway`);
       }
       const statuses = threadStatuses(dc);
-      const released = verb === "done" && unstandThread(cardDir(), discordThreadId(ref ?? ""));
-      const mark = (t: string, s: ThreadStatus) => statuses.request(t, s, released);
+      // runs after the post: a post that fails leaves a standing thread standing
+      const mark = (t: string, s: ThreadStatus) => statuses.request(t, s, verb === "done" && unstandThread(cardDir(), t));
       // a repeat is not posted, but the status still goes through: a done after a reply with the same words still closes
       const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark));
       if (r.duplicate) await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);
