@@ -7,6 +7,7 @@ import type { FlowDeps } from "./done-flow.ts";
 import { stuckContext } from "./explore.ts";
 import { sendVerified } from "./panes.ts";
 import type { Lane } from "./registry.ts";
+import { exitNote, keepReviewerOutput } from "./reviewer-output.ts";
 import { iso } from "./run.ts";
 import { watchLog } from "./watch-log.ts";
 import { blockTexts, laneDirectiveWords } from "./directive-audit.ts";
@@ -354,7 +355,7 @@ export const runIntentCheck = async (deps: FlowDeps, lane: Lane, opts: { readonl
     const r = await deps.run(fill(rev.command, { model: c.call, prompt, system: OWNER_SYSTEM }), { timeoutMs: rev.minutes * 60_000 });
     const answer = r.code === 0 ? parseOwnerReply(r.out, `${ownerSource}\n${brief}`, reportSource)?.map((f) => claimCheck(f, lane)) : undefined;
     if (!answer) {
-      failures.push(`${c.call}: ${r.code !== 0 ? `exit ${r.code} ${r.err.split("\n").find((l) => l.trim())?.slice(0, 120) ?? ""}` : `no VERDICT line in "${r.out.trim().slice(0, 80)}"`}`);
+      failures.push(`${c.call}: ${r.code !== 0 ? exitNote(r) : "no VERDICT line"}; ${keepReviewerOutput(deps.config.stateDir, `intent-check-${lane.key}`, r.out)}`);
       continue;
     }
     const { kept: findings, dropped } = groundFindings(answer, ground);
