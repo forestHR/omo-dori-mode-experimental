@@ -1472,6 +1472,7 @@ test("a run that finds the lane's lock held hands its approval to the holder and
   // Given
   const base = await setup();
   let claim = false;
+  let logs = true;
   const deps: LaneHandoverDeps = {
     ...base,
     reportOwner: async () => "msg-1",
@@ -1479,7 +1480,8 @@ test("a run that finds the lane's lock held hands its approval to the holder and
       if (claim && existsSync(takeoverFile())) {
         writeFileSync(`${takeoverFile()}.claimed`, readFileSync(takeoverFile()));
         rmSync(takeoverFile());
-        appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-10-11T16:40:00.000Z", key: "demo", from: OLD, to: NEW, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "done", reasons: [] });
+        if (logs) appendRollover(state.dir, { kind: "rollover", who: "lane", at: "2026-10-11T16:40:00.000Z", key: "demo", from: OLD, to: NEW, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "done", reasons: [] });
+        else await base.registry.patch("demo", { pane: NEW });
         live.delete(77);
       }
       simulate();
@@ -1504,6 +1506,14 @@ test("a run that finds the lane's lock held hands its approval to the holder and
   expect(printed.at(-1)).toStartWith("HANDOVER_TAKEN_OVER_RESULT demo: done");
   expect(opened()).toBe(false);
   expect(JSON.parse(readFileSync(`${takeoverFile()}.claimed`, "utf8"))).toMatchObject({ approvedBy: LEAD_STUCK, force: true });
+  // a holder that moved the lane and ended before its record (QA: its owner report failed hard): the registry tells
+  lock();
+  live.add(77);
+  logs = false;
+  rmSync(join(state.dir, "rollover-log.jsonl"), { force: true });
+  const unlogged = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  expect(unlogged.code).toBe(0);
+  expect(printed.at(-1)).toStartWith(`HANDOVER_TAKEN_OVER_RESULT demo: moved -> ${NEW}`);
 });
 
 // omo's input box sits between two ─ borders; the status lines under it can quote "esc to interrupt" (here the cwd and a
