@@ -1745,6 +1745,12 @@ test("e7-leap on 2026-10-24: work a monitor of the old session started keeps run
   const deps: LaneHandoverDeps = { ...base, run: async (argv, opts) => {
     if (argv[0] === "aoe" && argv[1] === "session" && argv[2] === "stop" && argv[3] === OLD_ID) for (const pid of [30, 31, 32, 33]) live.delete(pid);
     return base.run(argv, opts);
+  }, signal: (pid, sig) => {
+    if (pid === -14 && sig === "SIGTERM") {
+      live.delete(14);
+      table = table.filter((p) => p.pid !== 14);
+    }
+    return base.signal(pid, sig);
   } };
   // When
   const r = await laneHandover(deps, "demo", "aoe_lead_x", { ...OK, verifyMin: 1 });
@@ -1753,6 +1759,9 @@ test("e7-leap on 2026-10-24: work a monitor of the old session started keeps run
   expect(stoppedIds()).toEqual([]);
   expect(live.has(31) && live.has(32)).toBe(true);
   expect(sigs.filter((s) => / 3[0-3]$/.test(s))).toEqual([]);
+  expect(sigs).toContain("SIGTERM -14");
+  expect(sigs.indexOf("SIGTERM -14")).toBeLessThan(sigs.lastIndexOf("SIGSTOP 11"));
+  expect(readFrozen(state.dir)[0]?.pids).not.toContain(14);
   expect(sigs.filter((s) => s.endsWith(" 11")).at(-1)).toBe("SIGSTOP 11");
   const note = readFileSync(r.note ?? "", "utf8");
   expect(note).toContain("## Work the old session's monitors started (1)");

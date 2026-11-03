@@ -15,7 +15,8 @@ import { captureTmux, closeAoeSession, envMismatch, inputLine, isClosedLine, lan
 import { turnRunning } from "./submit.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { freezePane, writeFrozen } from "./frozen.ts";
-import { ackFile, endStrayTasks, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
+import { endOldMonitors } from "./handover-monitors.ts";
+import { ackFile, endStrayTasks, type HandoverDeps, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
 import { awaitPrompt } from "./launch.ts";
 import { QuestionStore } from "./messenger/discord-cards.ts";
 import { herdrResult, isHerdrPane } from "./herdr.ts";
@@ -38,8 +39,8 @@ export type LaneHandoverDeps = FlowDeps & {
   // a process's environment as NAME=value lines ("" when it cannot be read)
   readonly envOf: (pid: number) => string;
   readonly alive: (pid: number) => boolean;
-  // stops or resumes a process (the old agent is frozen while it is replaced); false when the signal could not be sent
-  readonly signal: (pid: number, sig: "SIGSTOP" | "SIGCONT") => boolean;
+  // stops, resumes or ends a process group; false when the signal could not be sent
+  readonly signal: HandoverDeps["signal"];
   // the path with symlinks resolved (the path itself when it cannot be resolved)
   readonly realpath: (path: string) => string;
   readonly nonce: () => string;
@@ -939,6 +940,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   const kept = (facts.work ?? []).filter((c) => running(deps, c));
   if (kept.length) {
     // the local chains are left running too: the new session is told they run on, as with --keep-old
+    for (const line of await endOldMonitors(deps, facts, [...kept, ...facts.chains].map((c) => c.pid))) emit(line);
     const ice = await freezePane(deps, from.pane, process.pid, [...kept, ...facts.chains].map((c) => c.pid)).catch((e: unknown) => ({ pids: [] as number[], agentPid: undefined, why: e instanceof Error ? e.message : String(e) }));
     mark("freeze", !!ice.agentPid);
     if (!ice.agentPid) thaw();

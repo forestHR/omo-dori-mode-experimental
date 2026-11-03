@@ -621,7 +621,7 @@ const reportOwner = discordToken && process.env.DORI_DISCORD_CHANNEL?.trim()
   ? { reportOwner: async (thread: string | null, text: string): Promise<string> => discordClient().send(thread ?? env("DORI_DISCORD_CHANNEL"), text) }
   : {};
 const sessionOfPane = async (pane: string, cwd: string): Promise<string> => (await resolveSession(pane, cwd, await procTable(run), { run, sessionsDir: config.sessionsDir, backend: config.backend })).id;
-const sendSignal = (pid: number, sig: "SIGSTOP" | "SIGCONT"): boolean => {
+const sendSignal: HandoverDeps["signal"] = (pid, sig) => {
   try {
     process.kill(pid, sig);
     return true;
