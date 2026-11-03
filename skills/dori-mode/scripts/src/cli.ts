@@ -450,7 +450,10 @@ const USAGE = `dori <command> [options]
                                        Qn or message link, kept in the note and log: refuses while a local chain of the
                                        lane's agent or eval kernel (not the session's own launcher shell or idle kernel), a
                                        background eval cell, a running turn or an open question would die, unless the lane
-                                       ran handover ready (or --force); an automatic start (auto:) never moves a lane that
+                                       ran handover ready (or --force); a lead's or owner's request refused that way waits
+                                       (HANDOVER_PENDING): the lane is asked for its safe point and freshness starts it again
+                                       by itself; a run that finds a waiting run of the lane hands it its request (and
+                                       --force) instead of refusing (HANDOVER_TAKEN_OVER); an automatic start (auto:) never moves a lane that
                                        runs or watches a training or eval chain (handover.trainingTags, trainingWatch);
                                        --wait-idle MIN (freshness's automatic start): waits up to MIN minutes for a running
                                        turn to end and freezes the old agent at that idle moment, before the new session opens;
