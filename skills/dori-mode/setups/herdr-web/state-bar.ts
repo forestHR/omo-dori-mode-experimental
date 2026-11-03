@@ -1,3 +1,5 @@
+import { clipboardBody, clipboardHead } from "./clipboard.ts";
+
 // ttyd owns #terminal-container. Reserve the bar's height before asking xterm to refit.
 const head = `<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
@@ -59,4 +61,4 @@ const bar = `<nav id="dori-state" aria-label="Pane states">Loading pane states..
 </script>`;
 
 export const injectStateBar = (html: string): string =>
-  html.replace("<head>", `<head>${head}`).replace("</body>", `${bar}</body>`);
+  html.replace("<head>", `<head>${head}${clipboardHead}`).replace("</body>", `${bar}${clipboardBody}</body>`);

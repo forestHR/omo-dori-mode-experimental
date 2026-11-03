@@ -19,6 +19,13 @@ its result for two seconds after collection completes. It reuses `herdrSessions`
 through `herdrLife`/`herdrRead`, mapping busy/running to working, questions/waiting/errors to waiting, idle to idle,
 and panes without an agent to none. Herdr's own agent status is not used to judge omo.
 
+Copy and paste: herdr copies a mouse selection (drag, or double-click a word) with OSC 52, and ttyd 1.7.7's xterm.js has
+no OSC 52 handler, so the page adds one (`clipboard.ts`) that writes the text to the browser's clipboard; Ctrl+V,
+Ctrl+Shift+V and Cmd+V paste the clipboard into the terminal. Two buttons at the bottom right serve a phone, where a
+finger cannot drag a selection in herdr: Copy shows the screen's text, selectable with the phone's own long press, with
+buttons that copy herdr's last selection or the whole screen; Paste reads the clipboard (the phone asks once) and types
+it. A program's request to read the clipboard (OSC 52 `?`) is never answered. The clipboard needs the https page.
+
 The proxy takes the passphrase from `HERDR_WEB_PASSPHRASE` in its env file below; when that is unset it reuses
 `AOE_SERVE_PASSPHRASE` from `~/.config/agent-of-empires/serve.env` (optional, so an account that never ran aoe needs no
 aoe file), so a Dori that moved from aoe logs in with its old passphrase. It does not copy or log the passphrase. It binds loopback only. On login it sets a random token, valid for the life of the proxy process, in a
