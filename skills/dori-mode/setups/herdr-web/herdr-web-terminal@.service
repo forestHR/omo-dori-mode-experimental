@@ -1,0 +1,13 @@
+[Unit]
+Description=Loopback herdr browser terminal for port %i
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/herdr/web-%i.env
+UnsetEnvironment=HERDR_PANE_ID HERDR_SOCKET HERDR_SESSION TMUX TMUX_PANE
+ExecStart=/bin/sh -ec 'exec "$HOME/.local/bin/ttyd" --interface 127.0.0.1 --port "$HERDR_TTYD_PORT" --writable --terminal-type xterm-256color "$HOME/.local/bin/herdr"'
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+UMask=0077
