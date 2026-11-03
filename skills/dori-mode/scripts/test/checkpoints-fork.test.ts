@@ -135,3 +135,16 @@ describe("checkpoints (fork changes)", () => {
     } finally { state.done(); }
   });
 });
+
+test("on native Windows a checkpoint is refused before anything is written (its fsyncs need handles Windows cannot flush)", () => {
+  const state = withState();
+  try {
+    // Given a journal on a Windows host.
+    const journal = new Checkpoints(state.dir, "win32");
+    // When a step is written.
+    // Then it is refused, and no journal or lane-state directory exists.
+    expect(() => journal.write("demo-lane", input, Date.parse("2026-01-01T00:00:00Z"))).toThrow(CheckpointError);
+    expect(() => journal.write("demo-lane", input, Date.parse("2026-01-01T00:00:00Z"))).toThrow("not supported on native Windows");
+    expect(fs.existsSync(join(state.dir, "lane-state"))).toBe(false);
+  } finally { state.done(); }
+});

@@ -27,6 +27,23 @@ afterEach(() => state.done());
 
 const working: Lane = { key: "quiet-lane", title: "quiet", thread: "chat:team/9", pane: "w:p7", brief: "/b.md", done: "merged acme/app#1", openedAt: new Date(T0).toISOString(), lastReplyAt: T0 };
 
+test("a thread reply hook that fails is recorded as failed, not posted, and the lane stays due", async () => {
+  // Given a reply hook whose command cannot run (as a bare dori on native Windows could not before #306).
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["no-such-hook", "{thread}", "{text}"] } });
+  await deps(T0).registry.write(working);
+  world.screen = "noise\n[REPORT] quiet-lane | milestone | tests green, PR open\n❯ ";
+  expect(await freshnessTick(deps(T0), "/home/test")).toEqual([]);
+  expect((await freshnessTick(deps(T0 + 16 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["nudged"]);
+  // When the sweep tries to post, and again on the next sweep.
+  const first = await freshnessTick(deps(T0 + 21 * MIN), "/home/test");
+  const again = await freshnessTick(deps(T0 + 23 * MIN), "/home/test");
+  // Then each says the post failed, and nothing claims the thread got its line.
+  expect(first.map((a) => a.kind)).toEqual(["post-failed"]);
+  expect(first[0]?.detail).toContain("exit 1");
+  expect(again.map((a) => a.kind)).toEqual(["post-failed"]);
+  expect((await deps(T0).registry.read("quiet-lane"))?.lastAutoReplyAt).toBeUndefined();
+});
+
 test("a lane silent past the nudge time is nudged once, then its last report is posted for it", async () => {
   const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
   await deps(T0).registry.write(working);

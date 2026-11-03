@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 
 import type { Clock, Runner } from "./run.ts";
 import { commandExecutable, executableName } from "./executable.ts";
+import { powershellData } from "./powershell.ts";
 import { AGENT, type Proc, procTable, topAgent } from "./session-id.ts";
 
 // herdr's side of the session primitives in aoe.ts (dori-mode on herdr, as upstream runs it; ported here for the move of
@@ -97,10 +98,8 @@ export const shellQuote = (arg: string): string => (/^[\w./:@=+,-]+$/.test(arg) 
 // command goes after the call operator &, words in single quotes ('' for a quote), and the variables are set before it.
 export const agentLine = (argv: readonly string[], env: Readonly<Record<string, string | undefined>> = {}, platform: string = process.platform): string => {
   if (platform === "win32") {
-    // Names, values and arguments never become PowerShell text: each goes in as base64 (whose letters mean nothing inside
-    // single quotes) and is decoded in the shell, so empty values, names like ProgramFiles(x86), ; $ ` and curly quotes
-    // cannot change the command.
-    const data = (s: string) => `([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(s, "utf8").toString("base64")}')))`;
+    // Names, values and arguments never become PowerShell text: each goes in as data (powershellData).
+    const data = powershellData;
     const vars = Object.entries(env).map(([k, v]) => (v === undefined
       ? `Remove-Item -LiteralPath ('Env:' + ${data(k)}) -ErrorAction SilentlyContinue; `
       : `Set-Item -LiteralPath ('Env:' + ${data(k)}) -Value ${data(v)}; `)).join("");
