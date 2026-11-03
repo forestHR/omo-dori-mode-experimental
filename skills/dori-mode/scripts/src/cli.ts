@@ -34,7 +34,7 @@ import { retryLaneTells } from "./lane-tells.ts";
 import { applyUpdate } from "./update.ts";
 import { announceChange } from "./update-announce.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
-import { claimDone, closeLane, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
+import { claimDone, closeLane, closeLessons, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
 import { ownerSpeechProblem, plainSummaryProblem } from "./close-summary.ts";
 import { literalNewlineProblem } from "./messenger/literal-newline.ts";
 import { autoReadyLine, freshnessTick, resumeArgs } from "./freshness.ts";
@@ -296,7 +296,7 @@ const USAGE = `dori <command> [options]
   lesson list [--cwd DIR]              current lessons, newest first; a damaged journal line is a LESSON_WARNING
   lesson mark <id> --outcome pending|helped|no-effect|harmful|encoded
                                        only pending and helped ones reach new briefs
-  close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK] [--lesson TEXT [--evidence PATH]]
+  close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK] [--lesson TEXT [--evidence PATH]]...
                                        close now (Done signals must read back live); a lane with a work thread first posts
                                        its summary for the owner there (--summary, the claim's, else one a model writes from
                                        its last report and REPORT.md): none is CLOSE_SUMMARY_MISSING, a post that failed is
@@ -564,7 +564,7 @@ const flags = parseArgs({
   strict: false,
   options: {
     title: { type: "string" }, brief: { type: "string" }, done: { type: "string" }, thread: { type: "string" },
-    model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string" },
+    model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string", multiple: true },
     reason: { type: "string", multiple: true }, note: { type: "string" }, write: { type: "boolean" }, loop: { type: "string" },
     to: { type: "string" }, text: { type: "string" }, edit: { type: "string" }, status: { type: "string" }, "no-typing": { type: "boolean" }, ping: { type: "string" },
     option: { type: "string", multiple: true }, session: { type: "string" }, tmux: { type: "string" }, open: { type: "boolean" },
@@ -580,7 +580,7 @@ const flags = parseArgs({
     answer: { type: "string" }, repo: { type: "string", multiple: true }, since: { type: "string" }, until: { type: "string" }, backtest: { type: "boolean" },
     static: { type: "boolean" }, dir: { type: "string", multiple: true }, "no-thread": { type: "string" }, "why-new": { type: "string" },
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
-    rule: { type: "string" }, outcome: { type: "string" }, lesson: { type: "string" },
+    rule: { type: "string" }, outcome: { type: "string" }, lesson: { type: "string", multiple: true },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" }, "rollover-outcome": { type: "string" }, "rollover-unresolved": { type: "boolean" }, stuck: { type: "boolean" },
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
@@ -620,6 +620,10 @@ const onlyOptions = (what: string, allowed: readonly string[], positionals: numb
 };
 const tags = (): string[] => ((flags.values.tag as string[] | undefined) ?? []).map((t) => t.trim()).filter(Boolean);
 const many = (name: string): string[] => ((flags.values[name] as string[] | undefined) ?? []).map((t) => t.trim()).filter(Boolean);
+// every --evidence, trimmed, an empty one kept (close pairs them with --lesson by place); the other commands take the
+// last one, as they did when --evidence was a single option
+const evidences = (): string[] => ((flags.values.evidence as string[] | undefined) ?? []).map((t) => t.trim());
+const evidence = (): string => evidences().at(-1) || die("--evidence is required");
 
 // `dori <command> --help`: that command's lines of USAGE
 const helpFor = (cmd: string): string => {
@@ -1094,7 +1098,7 @@ try {
       if (bad) die(`SUMMARY_REFUSED ${l.key}: ${bad}; write it for the owner in plain words`, 2);
       const outcome = opt("rollover-outcome");
       if (flags.values["rollover-unresolved"] && outcome === undefined) die("--rollover-unresolved goes with --rollover-outcome \"<one line>\"", 2);
-      const claimed = await claimDone(deps, l, need("evidence"), summary, { posted: postedId(), postSummary: Boolean(flags.values["post-summary"]), ...(outcome !== undefined ? { rolloverOutcome: { line: outcome, resolved: !flags.values["rollover-unresolved"] } } : {}) });
+      const claimed = await claimDone(deps, l, evidence(), summary, { posted: postedId(), postSummary: Boolean(flags.values["post-summary"]), ...(outcome !== undefined ? { rolloverOutcome: { line: outcome, resolved: !flags.values["rollover-unresolved"] } } : {}) });
       if (claimed.startsWith("ROLLOVER_OUTCOME_MISSING ")) die(claimed, 2);
       console.log(claimed);
       break;
@@ -1319,10 +1323,12 @@ try {
       const bad = summary === undefined ? undefined : plainSummaryProblem(summary, config.discord.locale, config.discord.ownerSpeech);
       if (bad) die(`SUMMARY_REFUSED ${key ?? ""}: ${bad}; write it for the owner in plain words`, 2);
       const target = await lane(key ?? die("close needs a lane key"));
-      // --lesson: kept after a successful close, its evidence the Done line unless --evidence names one; never blocks the close
-      const rule = opt("lesson");
+      // --lesson, any number of times: kept after a successful close, each with the --evidence in its place, one --evidence
+      // for all, or the Done line; never blocks the close. Evidence that pairs with no lesson is refused before anything.
+      const paired = closeLessons(((flags.values.lesson as string[] | undefined) ?? []).map((t) => t.trim()), evidences(), target.done);
+      const lessons = typeof paired === "string" ? die(`LESSON_EVIDENCE_MISMATCH ${target.key}: ${paired}; nothing was closed`, 2) : paired;
       const note = opt("note") ?? "closed by the lead";
-      const r = await closeLane(deps, target, note, summary, postedId(), rule === undefined ? undefined : { rule, evidence: opt("evidence") ?? target.done });
+      const r = await closeLane(deps, target, note, summary, postedId(), lessons);
       for (const line of r.lines) console.log(line);
       // a lane moved for being stuck that closes without its outcome line: the lead's note stands in, counted unknown (the
       // owner may have dropped or changed the work), so rollover-stats still lists it
@@ -2303,7 +2309,7 @@ try {
           const laneKey = flags.positionals[1] ?? die("usage: dori lesson add <key> --rule TEXT --evidence PATH [--cwd DIR]");
           // a closed lane may still add what it learned, so the registry is read directly, not through lane()
           const target = (await deps.registry.read(laneKey)) ?? die(`no registered lane "${laneKey}"`);
-          console.log(JSON.stringify(lessons.add({ lane: laneKey, cwd: opt("cwd") ?? target.cwd ?? config.defaultCwd, rule: need("rule"), evidence: need("evidence") }, realClock.now())));
+          console.log(JSON.stringify(lessons.add({ lane: laneKey, cwd: opt("cwd") ?? target.cwd ?? config.defaultCwd, rule: need("rule"), evidence: evidence() }, realClock.now())));
           break;
         }
         case "list": {
@@ -2330,7 +2336,7 @@ try {
       const stray = flags.positionals.slice(1);
       if (stray.length) die(`checkpoint: unexpected argument ${stray[0]}; give each receipt its own --remote-effect`);
       const result = new Checkpoints(config.stateDir).write(target.key, {
-        step: need("step"), result: need("result"), evidence: [need("evidence")], remoteEffects: many("remote-effect"),
+        step: need("step"), result: need("result"), evidence: [evidence()], remoteEffects: many("remote-effect"),
       }, realClock.now());
       console.log(JSON.stringify(result));
       break;
