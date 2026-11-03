@@ -551,18 +551,75 @@ test("after a restart another Dori's answer still clears an uncalled message, wh
   expect(unreacts(calls)).toEqual([`${PAIR}/messages/5002`]);
 });
 
-test("dori eyes off takes only this bot's eyes off one message, by link or by an id eyes.json tracks, and refuses anything else", async () => {
+test("dori eyes off takes only this bot's eyes off one message, by link or by an id eyes.json tracks, never writes eyes.json, and refuses anything else", async () => {
   const { listener, dc, calls, eyesPath, eyesFile } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT] });
   await listener.onMessage(msg("6001", { channel_id: PAIR }));
-  await listener.onMessage(msg("6002", { channel_id: PAIR }));
   expect(await eyesOff(dc, eyesPath, "600000000000009", "").catch((e: Error) => e.message)).toContain("is not in");
   expect(await eyesOff(dc, eyesPath, `https://discord.com/channels/${GUILD}/${PAIR}/6001`, "")).toBe(`EYES_OFF ${PAIR} 6001`);
-  expect(eyesFile()).toEqual({ [PAIR]: ["6002"] });
   writeFileSync(eyesPath, JSON.stringify({ [PAIR]: ["600200000000000002"] }));
   expect(await eyesOff(dc, eyesPath, "600200000000000002", "")).toBe(`EYES_OFF ${PAIR} 600200000000000002`);
-  expect(eyesFile()).toEqual({});
   expect(await eyesOff(dc, eyesPath, "not-an-id", PAIR).catch((e: Error) => e.message)).toContain("needs a message id");
   expect(unreacts(calls)).toEqual([`${PAIR}/messages/6001`, `${PAIR}/messages/600200000000000002`]);
+  expect(eyesFile()).toEqual({ [PAIR]: ["600200000000000002"] });
+});
+
+test("while the listener records another owner message during a manual removal, that message stays tracked after a restart", async () => {
+  let release = (): void => {};
+  const gate = (req: HttpRequest) => (req.method === "DELETE" ? new Promise<void>((r) => { release = r; }) : undefined);
+  const { listener, restart, dc, eyesPath } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], gate });
+  await listener.onMessage(msg("6101", { channel_id: PAIR }));
+  const off = eyesOff(dc, eyesPath, `https://discord.com/channels/${GUILD}/${PAIR}/6101`, "");
+  await listener.onMessage(msg("6102", { channel_id: PAIR }));
+  release();
+  await off;
+  restart();
+  expect(JSON.parse(readFileSync(eyesPath, "utf8"))[PAIR]).toContain("6102");
+});
+
+test("another Dori's reply that comes while the owner's voice note is still being transcribed waits for it, then clears an uncalled message", async () => {
+  let finish = (_: string): void => {};
+  const text = new Promise<string>((r) => { finish = r; });
+  const transcribe = () => text;
+  const { listener, gw, calls, logs } = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, transcribe });
+  listener.start();
+  ready(gw);
+  const owner = listener.onMessage(msg("7001", { channel_id: PAIR, content: "", attachments: [{ url: "https://cdn/v.ogg", filename: "voice-message.ogg", content_type: "audio/ogg" }] }));
+  const reply = listener.onMessage(pairBot("7002", { message_reference: { message_id: "7001" } }));
+  finish("수돌아 이거 봐");
+  await Promise.all([owner, reply]);
+  expect(unreacts(calls)).toEqual([`${PAIR}/messages/7001`]);
+  expect(logs).toContain(`EYES_CLEARED_ANSWERED ${PAIR} by=7002 bot=${PAIR_BOT} 7001`);
+});
+
+test("an owner pair message mentioning one of this bot's roles is called once the roles are read; while they cannot be read it is not uncalled", async () => {
+  const ROLE = "130000000000000013";
+  const members = (req: HttpRequest) => (req.url.endsWith(`/guilds/${GUILD}/members/${SELF}`) ? { roles: [ROLE] } : {});
+  const ok = setup(members, { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES });
+  ok.listener.start();
+  ready(ok.gw);
+  await ok.listener.onMessage(msg("8001", { channel_id: PAIR, content: "이거 봐", mention_roles: [ROLE] }));
+  await ok.listener.onMessage(pairBot("8002", { message_reference: { message_id: "8001" } }));
+  expect(ok.inbox().find((r) => r.id === "8001")?.called).toBe(true);
+  expect(unreacts(ok.calls)).toEqual([]);
+  const respond = (req: HttpRequest): HttpResponse | undefined => (req.url.includes("/members/") ? { status: 500, headers: {}, body: "{}" } : undefined);
+  const failed = setup(() => ({}), { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, respond });
+  failed.listener.start();
+  ready(failed.gw);
+  await failed.listener.onMessage(msg("8003", { channel_id: PAIR, content: "이거 봐", mention_roles: [ROLE] }));
+  await failed.listener.onMessage(pairBot("8004", { message_reference: { message_id: "8003" } }));
+  expect(failed.inbox().find((r) => r.id === "8003")?.called).toBeUndefined();
+  expect(unreacts(failed.calls)).toEqual([]);
+  // a message that comes while READY's role read is still on its way waits for it
+  let release = (): void => {};
+  const held = new Promise<void>((r) => { release = r; });
+  const gate = (req: HttpRequest) => (req.url.includes("/members/") ? held : undefined);
+  // the read is let go only when the owner's message is about to be judged (its ledger hints are read just before)
+  const hints = () => (release(), []);
+  const pending = setup(members, { pairChannel: PAIR, pairBots: [PAIR_BOT], callNames: NAMES, gate, hints });
+  pending.listener.start();
+  ready(pending.gw);
+  await pending.listener.onMessage(msg("8005", { channel_id: PAIR, content: "이거 봐", mention_roles: [ROLE] }));
+  expect(pending.inbox().find((r) => r.id === "8005")?.called).toBe(true);
 });
 
 test("backfill reads the pair channel too, after the newest pair row", async () => {
