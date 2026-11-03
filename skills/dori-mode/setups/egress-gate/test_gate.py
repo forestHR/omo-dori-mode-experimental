@@ -490,7 +490,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         entry = self.service.pending()[0]
         # Then: the card sits in the thread on his message (thread id == message id).
         self.assertEqual(self.created_threads, ["/channels/20/messages/100/threads"])
-        self.assertEqual(self.thread_names, ["🔐 일정 초대 · Invite"])
+        self.assertEqual(self.thread_names, ["🔔 🔐 일정 초대 · Invite"])
         self.assertEqual((entry["channel"], self.card_channels[entry["message"]]), ("100", "100"))
 
     async def test_a_card_for_a_request_inside_a_thread_stays_in_that_thread(self):
@@ -566,7 +566,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cards[entry["message"]].splitlines(),
                          ["승인 필요 · Drive 공유", "받는 사람: partner@example.net", "내용: Before 공유(보기)",
                           "✅ 실행 · ⛔ 취소"])
-        self.assertEqual(self.thread_names[-1], "🔐 Drive 공유 · Before 공유(보기)")
+        self.assertEqual(self.thread_names[-1], "🔔 🔐 Drive 공유 · Before 공유(보기)")
 
     async def test_owner_approval_executes_once_and_notifies(self):
         self.approval()
@@ -655,7 +655,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_decided_card_titles_and_archives_its_own_thread(self):
         # Owner 2026-10-19 16:44 KST: the approval result shows in the thread title.
-        for emoji, status, title in (("⛔", 200, "⛔ 취소"), ("✅", 200, "✅ 완료"), ("✅", 500, "❗ 실패")):
+        for emoji, status, title in (("⛔", 200, "⛔"), ("✅", 200, "✅"), ("✅", 500, "❗")):
             self.thread_meta.clear()
             self.thread_patches.clear()
             self.response_status = status
@@ -663,8 +663,28 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]})
             entry = self.approve(emoji=emoji)
             await self.service.poll_approvals()
-            self.assertEqual(self.thread_patches, [(entry["thread"], {"name": f"{title} · 🔐 일정 초대 · Invite",
+            self.assertEqual(self.thread_patches, [(entry["thread"], {"name": f"{title} 🔐 일정 초대 · Invite",
                                                                      "archived": True})], emoji + str(status))
+
+    async def test_cards_one_owner_message_asks_for_share_one_thread(self):
+        # Owner Q474 (2026-11-03): one request made eighteen "Drive 공유" threads in two minutes (2026-10-30).
+        self.approval()
+        await self.request(data={"summary": "First", "attendees": [{"email": "outside@example.net"}]}, origin="30/100")
+        await self.request(data={"summary": "Second", "attendees": [{"email": "other@example.net"}]}, origin="30/100")
+        first, second = self.service.pending()
+        self.assertEqual(len(self.thread_names), 1)
+        self.assertEqual(first["thread"], second["thread"])
+        # a request from another owner message still gets its own thread
+        status, _ = await self.request(data={"summary": "Third", "attendees": [{"email": "third@example.net"}]}, origin="31/100")
+        self.assertEqual((status, len(self.thread_names)), (202, 2))
+
+    def test_a_name_keeps_exactly_one_leading_mark(self):
+        # Owner 2026-11-03: "메일 스레드에 완료 표시랑 다른 표시랑 중복되는 현상도 같이 고쳐줘".
+        for name in ("✅ ❗ 실패 · 🔐 묶음 승인 · x", "⛔ 취소 · 🔄 🔐 x", "✅ ⛔ 취소 · 🔐 x", "🔄 완료 · 🔐 x", "🔔 🔐 x", "❗ 🔐 x"):
+            self.assertTrue(gate.bare_thread_name(name).startswith("🔐 "), name)
+            self.assertEqual(gate.bare_thread_name(name).count("🔐"), 1, name)
+        self.assertTrue(gate.decided_name("💤 🔐 x") and gate.decided_name("⛔ 취소 · ✉️ x"))
+        self.assertFalse(gate.decided_name("🔔 🔐 x") or gate.decided_name("형의 요청"))
 
     async def test_an_expired_card_titles_its_thread_expired(self):
         self.approval()
@@ -673,7 +693,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         entry["ts"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
         gate.private_write(self.state / "pending" / (entry["id"] + ".json"), gate.json_bytes(entry))
         await self.service.poll_approvals()
-        self.assertEqual(self.thread_patches[-1][1]["name"], "⌛ 만료 · 🔐 일정 초대 · Invite")
+        self.assertEqual(self.thread_patches[-1][1]["name"], "💤 🔐 일정 초대 · Invite")
 
     async def test_the_owners_own_thread_and_a_thread_with_an_open_card_keep_their_title(self):
         self.approval()
@@ -742,7 +762,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                            origin="30/100")
         self.assertEqual(self.thread_patches, [])
         await self.service.close_decided_threads()
-        self.assertEqual(self.thread_patches, [("100", {"name": "⛔ 취소 · 🔐 일정 초대 · Old",
+        self.assertEqual(self.thread_patches, [("100", {"name": "⛔ 🔐 일정 초대 · Old",
                                                          "archived": True})])
 
     async def test_tampered_card_never_executes_or_edits(self):
