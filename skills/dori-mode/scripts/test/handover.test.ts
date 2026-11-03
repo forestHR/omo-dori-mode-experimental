@@ -621,6 +621,24 @@ test("refuses without the owner's approval before opening anything; an approval 
   expect(readRollovers(state.dir).map((e) => (e.kind === "rollover" ? e.result : e.kind))).toEqual(["refused", "proposal", "refused"]);
 });
 
+test("the lead's own approval without a signal gets the one freshness measured for its pane (lead-due.json), or the last proposal; none measured, refused as before", async () => {
+  // Given
+  const deps = { ...(await setup()), reportOwner: async () => "msg-1" };
+  const reason = "lead:moving myself to a fresh session";
+  // When
+  const bare = await handover(deps, { title: "lead2", approvedBy: reason, dryRun: true });
+  mkdirSync(join(state.dir, "handover"), { recursive: true });
+  writeFileSync(join(state.dir, "handover", "lead-due.json"), JSON.stringify({ pane: deps.config.leadPane, at: "2026-10-11T00:00:00Z", crossed: ["context after compaction 320k >= 300k"] }));
+  const due = await handover(deps, { title: "lead2", approvedBy: reason, dryRun: true });
+  // Then
+  expect(bare.code).toBe(2);
+  expect(printed.some((l) => l.includes("does not say the reason and the signal behind it"))).toBe(true);
+  const filled = `${reason}, context after compaction 320k >= 300k (measured)`;
+  expect(printed).toContain(`HANDOVER_APPROVAL_FILLED lead: ${JSON.stringify(filled)} (the signal read from the records)`);
+  expect(printed).toContain(`HANDOVER_APPROVAL_OK ${JSON.stringify(filled)}`);
+  expect(due.code).not.toBe(2);
+});
+
 test("the old lead is quiet from the moment the new lead takes over until the checks end, then the log has the rollover", async () => {
   // Given
   const deps = await setup();

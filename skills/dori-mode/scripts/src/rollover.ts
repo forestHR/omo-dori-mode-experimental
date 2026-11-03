@@ -430,6 +430,26 @@ export const approvalProblem = (ref: string | undefined, card: (id: string) => Q
   return problem ? `${JSON.stringify(r)} is a link, but ${problem}` : undefined;
 };
 
+// A lead's approval names the signal behind the decision; the signal is measured, so it is read from the records instead of
+// typed (owner Q475: 17 of 81 refused handovers were the approval's wording, each typed again within a minute): the
+// lane's top stuck rung, the threshold freshness saw crossed in this session (ROLLOVER_DUE), or the last rollover
+// proposal for this session. The lead still decides and gives the reason; nothing measured, nothing filled.
+export const measuredSignal = (o: { readonly pane: string; readonly stuck?: { readonly metric: string; readonly n: number; readonly rung: number }; readonly due?: { readonly pane: string; readonly crossed: readonly string[] }; readonly proposal?: Extract<RolloverEntry, { kind: "proposal" }> }): string | undefined => {
+  if (o.stuck && o.stuck.rung >= 1) return `STUCK rung ${o.stuck.rung} on ${o.stuck.metric} (${o.stuck.n} failed attempts)`;
+  if (o.due?.pane === o.pane && o.due.crossed.length) return o.due.crossed.join(", ");
+  if (o.proposal?.pane === o.pane && o.proposal.crossed.length) return o.proposal.crossed.join(", ");
+  return undefined;
+};
+
+// The lead's approval with the measured signal added, when it gives a reason and names neither a signal nor the owner;
+// anything else (auto:, a card, a link, a typed signal) is left for approvalProblem as it was given.
+export const filledApproval = (ref: string | undefined, signal: string | undefined): string | undefined => {
+  const r = ref?.trim() ?? "";
+  if (!signal || !r.startsWith(LEAD_PREFIX)) return undefined;
+  const why = r.slice(LEAD_PREFIX.length).trim();
+  return why.length < 3 || SIGNAL_WORD.test(why) || OWNER_REF.test(why) ? undefined : `${r}, ${signal} (measured)`;
+};
+
 // While a session is being replaced it must not talk to the owner: the new one may already answer. dori send, ask and
 // thread refuse from a pane with a live quiet mark; the mark expires on its own, so a crashed handover cannot gag a pane.
 export const quietFile = (stateDir: string, pane: string): string => join(stateDir, "handover", "quiet", `${pane.replace(/[^\w.-]/g, "_")}.json`);
