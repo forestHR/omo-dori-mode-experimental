@@ -388,9 +388,9 @@ const USAGE = `dori <command> [options]
                                        type text into an agent pane and confirm it was submitted: Enter, an empty input
                                        box (one more Enter if not), a running turn. Prints SUBMITTED, or NOT_SUBMITTED
                                        <reason> (also in the watch log) and exits 1. Use it for every [LEAD] relay.
-                                       A /word omo refuses as an unknown command gets no second Enter (that would
-                                       send it as a message): NOT_SUBMITTED <pane> SLASH_UNKNOWN; a space before the
-                                       / sends it as a message
+                                       A /word omo would not run as typed (not its own command in that form, nor a
+                                       skill or prompt template it has) gets no key: NOT_SUBMITTED <pane>
+                                       SLASH_UNKNOWN; a space before the / sends it as a message
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
   inbound slack [--loop MIN]           print INBOUND lines: unread thread replies (threads view), replies in threads

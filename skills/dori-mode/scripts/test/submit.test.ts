@@ -4,6 +4,8 @@ import { defaultConfig } from "../src/config.ts";
 import { writeFrozen } from "../src/frozen.ts";
 import { SEND_CHUNK_BYTES, sendVerified, submitToPane, transcriptHas } from "../src/panes.ts";
 import { editorText, type PaneKeys, SUBMIT_TIMING, submitText } from "../src/submit.ts";
+import { promptCommandNames } from "../src/omo-commands.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { announceChange } from "../src/update-announce.ts";
 import { fakeClock, fakeRunner, newWorld, withState } from "./fakes.ts";
 
@@ -104,164 +106,58 @@ test("a skill, a template or an unknown /text is no command omo runs: an emptied
   }
 });
 
-// omo refuses a /word it has no command for: the text goes back into the box under "Unknown command /x." and "Enter again
-// sends it as a message", so dori type's second Enter sent it to the agent (lane type-slash-submitted, 2026-11-03). The fake
-// keeps omo's state: the refusal stays armed until Esc or any submit (an empty one too), an empty Enter opens a pending
-// question, and a raw text that starts with whitespace goes as a message (submitsCommandAsText). omo draws the borders across the pane and wraps a warning at that width, inside words too.
-const omoPane = (unknown: string, width = 200, cols = 120) => {
-  const s = { box: "", armed: undefined as string | undefined, busy: false, question: false as boolean | string, transcript: [] as string[], opened: 0, warning: [] as string[], sent: [] as string[], enters: 0, empties: 0, clears: 0, typed: 0 };
-  const border = "─".repeat(cols);
-  const wrap = (line: string): string[] => { const out: string[] = []; for (let i = 0; i < Math.max(1, line.length); i += cols) out.push(line.slice(i, i + cols)); return out; };
-  const rows = (): string[] => { const out: string[] = []; for (let i = 0; i < Math.max(1, s.box.length); i += width) out.push(s.box.slice(i, i + width)); return out; };
+// omo refuses a /word none of its commands resolves and keeps "Enter again sends it as a message" armed in memory only
+// (lane type-slash-submitted, 2026-11-03: dori type's second Enter sent it to the agent). So such a text gets no key.
+const counted = (known: ReadonlySet<string>) => {
+  const s = { typed: [] as string[], enters: 0, clears: 0 };
   const keys: PaneKeys = {
-    type: async (text) => { s.typed++; s.box += text; return undefined; },
-    enter: async () => {
-      s.enters++;
-      const raw = s.box;
-      const text = raw.trim();
-      const armed = s.armed;
-      s.armed = undefined; // every submit, an empty one too, takes the armed refusal back
-      if (!text) { s.empties++; if (s.question) s.opened++; return; }
-      if (armed !== text && !/^\s/.test(raw) && text.split(" ")[0] === unknown) {
-        s.armed = text;
-        s.warning = [` Warning: Unknown command ${unknown}.`, "", "", ` Enter again sends it as a message${s.busy ? "." : "; Esc keeps editing."}`, "", ""];
-        return;
-      }
-      s.sent.push(text);
-      s.box = "";
-    },
-    read: async () => [" Update Available", ...s.transcript, ...s.warning.flatMap(wrap), ...(s.question ? [s.question === true ? " ? Question pending (1 unanswered)" : s.question] : []).map((l) => l.slice(0, cols)), s.busy ? `── • Working (2s • esc to interrupt) ${border}`.slice(0, cols) : border, ...rows().map((r, i) => (i === 0 ? `❯ ${r}` : `  ${r}`)), border, " ~/qa • effort low"].join("\n"),
-    clear: async () => { s.clears++; s.box = ""; },
-    delivered: async () => s.sent.length > 0,
-    ready: async () => undefined,
+    type: async (text) => { s.typed.push(text); return undefined; },
+    enter: async () => { s.enters++; },
+    read: async () => "── • Working (1s • esc to interrupt) ──\n❯ \n──────",
+    clear: async () => { s.clears++; },
+    omoCommands: known,
     runsOmoCommands: true,
   };
   return { keys, s };
 };
+const KNOWN = new Set(["skill:dori-mode", "review"]);
 
-test("a /text omo refuses as an unknown command gets no confirming Enter, is cleared, the refusal taken back, and a retry is refused again", async () => {
-  for (const busy of [false, true])
-    for (const text of ["/notacommand", "/thinkingx low"]) {
-      const pane = omoPane(text.split(" ")[0] ?? "");
-      pane.s.busy = busy;
-      for (let run = 1; run <= 2; run++) {
-        const r = await submitText(pane.keys, fakeClock(0), text);
-        expect(r.status).toBe("NOT_SUBMITTED");
-        expect(r.reason).toStartWith("SLASH_UNKNOWN:");
-        expect(r.reason).toContain("cleared from the box; an empty Enter took omo's refusal back");
-        expect(r.reason).toContain('put a space before the / (--text " ' + text + '")');
-        expect(pane.s.box).toBe("");
-        expect(pane.s.armed).toBeUndefined();
-      }
-      expect([pane.s.enters, pane.s.empties]).toEqual([6, 4]); // per run: an empty Enter, the text's Enter, one empty Enter
-      expect(pane.s.sent).toEqual([]);
-    }
-});
-
-test("no empty Enter while a pending question shows (it would open it) or while the box still holds text (it would be sent): the reason says omo stays armed", async () => {
-  const asked = omoPane("/notacommand");
-  // the question comes up while the text is typed (a running turn asks one)
-  const r1 = await submitText({ ...asked.keys, type: async (text) => { asked.s.question = true; return asked.keys.type(text); } }, fakeClock(0), "/notacommand");
-  expect(r1.reason).toContain("omo still holds the refusal armed");
-  expect(r1.reason).toContain("a pending question is open");
-  expect([asked.s.empties, asked.s.opened]).toEqual([1, 0]); // only the empty Enter before the text, none after
-  const stuck = omoPane("/notacommand");
-  const r2 = await submitText({ ...stuck.keys, clear: async () => {} }, fakeClock(0), "/notacommand");
-  expect(r2.reason).toStartWith("SLASH_UNKNOWN:");
-  expect(r2.reason).toContain("could not be cleared from the box");
-  expect(r2.reason).toContain("the box is not empty");
-  expect([stuck.s.empties, stuck.s.sent]).toEqual([1, []]); // only the empty Enter before the text, none over it
-});
-
-// dori challenge 2026-11-03T13:49Z: the cleanup Enter can be lost like any key, leaving omo armed with the box empty
-test("a lost cleanup Enter does not let a retry through: the retry's own empty Enter takes the refusal back first", async () => {
-  const pane = omoPane("/notacommand");
-  let enters = 0;
-  // press 3 (the cleanup Enter after the refusal: empty Enter, text's Enter, cleanup) never reaches omo
-  const keys: PaneKeys = { ...pane.keys, enter: async () => { if (++enters !== 3) await pane.keys.enter(); } };
-  expect((await submitText(keys, fakeClock(0), "/notacommand")).reason).toStartWith("SLASH_UNKNOWN:");
-  expect(pane.s.armed).toBe("/notacommand");
-  const retry = await submitText(keys, fakeClock(0), "/notacommand");
-  expect(retry.reason).toStartWith("SLASH_UNKNOWN:");
-  expect(pane.s.sent).toEqual([]);
-});
-
-test("with a pending question on screen a /word omo may refuse is not typed at all (fail closed); a plain text still is", async () => {
-  const pane = omoPane("/notacommand");
-  pane.s.question = true;
-  const r = await submitText(pane.keys, fakeClock(0), "/notacommand");
-  expect(r.reason).toStartWith("SLASH_QUESTION_PENDING:");
-  expect([pane.s.typed, pane.s.enters, pane.s.opened]).toEqual([0, 0, 0]);
-  expect((await submitText(pane.keys, fakeClock(0), "[LEAD] carry on")).status).toBe("SUBMITTED");
-});
-
-test("a refused text that wraps over several rows of the box is still recognized: no confirming Enter", async () => {
-  const pane = omoPane("/notacommand", 60);
-  const r = await submitText(pane.keys, fakeClock(0), `/notacommand ${"x".repeat(150)}`);
-  expect(r.reason).toStartWith("SLASH_UNKNOWN:");
-  expect(pane.s.sent).toEqual([]);
-});
-
-test("a refusal omo wraps on a narrow pane, inside the command name too, is still recognized", async () => {
-  const pane = omoPane("/notacommand", 18, 20);
-  const r = await submitText(pane.keys, fakeClock(0), "/notacommand");
-  expect(r.reason).toStartWith("SLASH_UNKNOWN:");
-  expect(pane.s.sent).toEqual([]);
-  expect(pane.s.armed).toBeUndefined();
-});
-
-test("the empty Enter before a /word comes only after the pane checks: a dead, frozen or blocked pane gets no key at all", async () => {
-  for (const why of ["PANE_DEAD: the program in p exited (status 143); nothing was typed", "PANE_BLOCKED: a question is open in p (Ask user); the text would answer it, so nothing was typed", "the agent in the pane is stopped (pid 7, frozen): nothing would read the text, so it was not typed"]) {
-    const pane = omoPane("/notacommand");
-    const r = await submitText({ ...pane.keys, ready: async () => why }, fakeClock(0), "/notacommand");
-    expect(r.reason).toBe(why);
-    expect([pane.s.typed, pane.s.enters]).toEqual([0, 0]);
+test("a /word omo has no command for gets no key at all: NOT_SUBMITTED SLASH_UNKNOWN with the leading-space hint", async () => {
+  for (const text of ["/notacommand", "/thinkingx low", "/settings now", "/quit please", "/skill:not-installed do it", `/notacommand${"z".repeat(160)}`]) {
+    const { keys, s } = counted(KNOWN);
+    const r = await submitText(keys, fakeClock(0), text);
+    expect(r.status).toBe("NOT_SUBMITTED");
+    expect(r.reason).toStartWith(`SLASH_UNKNOWN: omo runs no command ${text.split(" ")[0]} as typed`);
+    expect(r.reason).toEndWith(`put a space before the / (--text " ${text}")`);
+    expect([s.typed, s.enters, s.clears]).toEqual([[], 0, 0]);
   }
-  // keys without the pane checks never get the empty Enter before the text (only the cleanup one after type() ran)
-  const bare = omoPane("/notacommand");
-  let before = -1;
-  await submitText({ ...bare.keys, ready: undefined, type: async (text) => { before = bare.s.enters; return bare.keys.type(text); } }, fakeClock(0), "/notacommand");
-  expect(before).toBe(0);
 });
 
-test("whether omo may refuse is judged on the whole text: /settings now after a lost cleanup Enter is refused again, not sent", async () => {
-  const pane = omoPane("/settings");
-  let enters = 0;
-  // press 3 (the cleanup Enter after the refusal: empty Enter, text's Enter, cleanup) never reaches omo
-  const keys: PaneKeys = { ...pane.keys, enter: async () => { if (++enters !== 3) await pane.keys.enter(); } };
-  expect((await submitText(keys, fakeClock(0), "/settings now")).reason).toStartWith("SLASH_UNKNOWN: omo refused /settings as a command");
-  expect(pane.s.armed).toBe("/settings now");
-  expect((await submitText(keys, fakeClock(0), "/settings now")).reason).toStartWith("SLASH_UNKNOWN:");
-  expect(pane.s.sent).toEqual([]);
+test("a /word omo runs, a path and a text with a space before the / are typed as before", async () => {
+  for (const text of ["/thinking low", "/goal pause", "/settings", "/skill:dori-mode go", "/review", "/usr/bin/ls -la", " /notacommand", "[LEAD] /notacommand is a typo"]) {
+    const { keys, s } = counted(KNOWN);
+    await submitText(keys, fakeClock(0), text);
+    expect(s.typed).toEqual([text]);
+  }
 });
 
-test("a transcript line about pending questions does not block a /word; omo's question row cut short on a narrow pane does", async () => {
-  const quoted = omoPane("/notacommand");
-  quoted.s.transcript = [" No questions pending, all answered.", " ? why not"];
-  expect((await submitText(quoted.keys, fakeClock(0), "/notacommand")).reason).toStartWith("SLASH_UNKNOWN:");
-  const narrow = omoPane("/notacommand", 10, 12);
-  narrow.s.question = " ? 2 questions pending";
-  const r = await submitText(narrow.keys, fakeClock(0), "/notacommand");
-  expect(r.reason).toStartWith("SLASH_QUESTION_PENDING:");
-  expect([narrow.s.typed, narrow.s.enters]).toEqual([0, 0]);
-});
-
-test("a space before the / sends the text as a message on its first Enter, with no empty Enter before it", async () => {
-  const pane = omoPane("/notacommand");
-  const r = await submitText(pane.keys, fakeClock(0), " /notacommand");
-  expect(r.status).toBe("SUBMITTED");
-  expect([pane.s.enters, pane.s.sent]).toEqual([1, ["/notacommand"]]);
-});
-
-test("another command's refusal still on screen does not stop the second Enter for a text the first Enter left in the box", async () => {
-  const pane = omoPane("/other");
-  pane.s.warning = [" Warning: Unknown command /other.", " Enter again sends it as a message; Esc keeps editing."];
-  let enters = 0;
-  // autocomplete ate the first Enter: the box still holds the text
-  const keys: PaneKeys = { ...pane.keys, enter: async () => { if (++enters > 1) await pane.keys.enter(); } };
-  const r = await submitText(keys, fakeClock(0), "/thinking medium");
-  expect(enters).toBe(2);
-  expect(r.status).toBe("SUBMITTED");
+test("omo's prompt templates and skills are read off disk; a folder without SKILL.md and a non-.md file are none", () => {
+  const state = withState();
+  try {
+    const home = join(state.dir, "home");
+    const agentDir = join(home, ".omo", "agent");
+    for (const d of [join(agentDir, "prompts"), join(agentDir, "skills", "deploy"), join(agentDir, "skills", "empty"), join(home, ".agents", "skills", "shared")]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(agentDir, "prompts", "review.md"), "Review this");
+    writeFileSync(join(agentDir, "prompts", "notes.txt"), "not a template");
+    writeFileSync(join(agentDir, "skills", "deploy", "SKILL.md"), "---\nname: deploy\n---");
+    writeFileSync(join(agentDir, "skills", "solo.md"), "---\nname: solo\n---");
+    writeFileSync(join(home, ".agents", "skills", "shared", "SKILL.md"), "---\nname: shared\n---");
+    const known = promptCommandNames(agentDir, home);
+    for (const name of ["review", "skill:deploy", "skill:solo", "skill:shared"]) expect(known.has(name)).toBe(true);
+    for (const name of ["notes", "skill:empty", "notacommand", "settings"]) expect(known.has(name)).toBe(false);
+  } finally {
+    state.done();
+  }
 });
 
 test("a screen that shows no input box (the pane went away, a read failed) does not count as an emptied box for a command", async () => {

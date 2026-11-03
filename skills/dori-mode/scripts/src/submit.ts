@@ -19,9 +19,9 @@ export type PaneKeys = {
   // deletes the input box's text before the cursor, one line per call (omo's ctrl+u; at a line start it joins the line
   // above), so a text that was not submitted is not left behind for the next one to be typed after
   readonly clear?: () => Promise<void>;
-  // the pane checks type() runs before it sends anything (gone, dead, frozen, a question open, no ❯ prompt), on their own:
-  // the empty Enter before a /word omo may refuse is pressed only once they pass, and never without them
-  readonly ready?: () => Promise<string | undefined>;
+  // the prompt templates and skill:<name> omo runs in this pane (omo-commands.ts, without the /): a /word that is neither
+  // one of them nor, as a whole, a command omo runs itself (isOmoCommand) gets no key at all
+  readonly omoCommands?: ReadonlySet<string>;
   // the pane runs omo, so a command omo runs itself counts as taken once omo empties the box (isOmoCommand); another
   // agent may take the same /text as an ordinary prompt
   readonly runsOmoCommands?: boolean;
@@ -90,39 +90,22 @@ export const steeringQueued = (screen: string, text: string): boolean => {
 const OMO_COMMANDS = new Set(["/settings", "/favorite-models", "/scoped-models", "/model", "/thinking", "/export", "/import", "/share", "/copy", "/rename", "/name", "/session", "/changelog", "/keybindings", "/answer", "/hotkeys", "/fork", "/clone", "/tree", "/trust", "/login", "/logout", "/new", "/compact", "/reload", "/debug", "/resume", "/sessions", "/quit", "/exit", "/goal"]);
 // the ones omo also runs with an argument after a space; the rest only as the whole text
 const WITH_ARGS = new Set(["/model", "/thinking", "/export", "/import", "/rename", "/name", "/answer", "/login", "/compact", "/goal"]);
+// omo refuses a /word no command of it resolves (a typo, a skill that is not there, senpi core/unknown-command.js
+// findUnknownCommand): it puts the text back under "Unknown command /x." and "Enter again sends it as a message", and
+// keeps that armed in memory only, so a second Enter, or a later retry, sends it to the agent. dori type therefore
+// types such a text nowhere: decided before any key, from the names omo runs, never from the screen. The token is
+// omo's own command shape; a path (/usr/bin/ls) is none and goes as a message, and so does a text that starts with
+// whitespace (unknown-command-feedback.js submitsCommandAsText). A refusal a person left armed in that pane beforehand is
+// out of reach here.
+const COMMAND_TOKEN = /^\/[A-Za-z][A-Za-z0-9:_-]*$/;
 export const isOmoCommand = (text: string): boolean => {
   if (text.includes("\n")) return false;
   const name = text.split(" ")[0] ?? "";
   return OMO_COMMANDS.has(name) && (name === text || WITH_ARGS.has(name));
 };
-
-// omo refuses a /word it has no command for (a typo, a skill that is not there): it puts the text back into the box and
-// shows "Unknown command /x." with "Enter again sends it as a message" (senpi interactive-mode.js
-// reportUnknownCommandRejection, unknown-command-feedback.js), so a second Enter would send the text to the agent. Only a
-// refusal that names this text's command counts, with that text back in the box; the warning can sit lines above the box,
-// and omo wraps it on a narrow pane (even inside the name), so the rows above the box are read as one run with every
-// whitespace taken out. A path (/usr/bin/ls) is no command to omo and goes as a message on the first Enter, and so does a
-// text typed with whitespace before the / (unknown-command-feedback.js submitsCommandAsText reads the raw text).
-const COMMAND_TOKEN = /^\/[A-Za-z][A-Za-z0-9:_-]*$/;
-const slashName = (text: string): string => text.split(/\s/, 1)[0] ?? "";
-type Refusal = { readonly name: string };
-// omo's pending async question widget sits above the box: "? Question pending (1 unanswered)" or "? 2 questions pending"
-// (components/ask-user-async-widget.js renderStatusLine), cut short on a narrow pane. Read as any row above the box,
-// within the box's width, that starts with "? " and a capital Q or a count; a transcript line that merely mentions
-// pending questions does not start that way. A false match only means nothing is typed (fail closed).
-const questionShown = (screen: string): boolean => {
-  const box = inputBox(screen);
-  return screen.split("\n").slice(0, box.top).some((line) => /^\s*\?\s+(?:Q|\d)/.test(cutAt(line, box.width)));
-};
-const refusedUnknown = (screen: string, text: string): Refusal | undefined => {
-  const name = slashName(text);
-  // the box shows the text again, or the part of it a wrapped or scrolled box shows (wrapped rows read as spaces)
-  const shown = editorText(screen).replace(/\s/g, "");
-  if (!COMMAND_TOKEN.test(name) || !shown || !text.replace(/\s/g, "").includes(shown)) return undefined;
-  const box = inputBox(screen);
-  const run = screen.split("\n").slice(0, box.top).map((line) => cutAt(line, box.width)).join("").replace(/\s/g, "");
-  if (!run.includes(`Unknowncommand${name}.`) && !run.includes(`${name}isaninteractivecommand`)) return undefined;
-  return run.includes("againsendsitasamessage") ? { name } : undefined;
+export const unknownToOmo = (text: string, prompts: ReadonlySet<string>): string | undefined => {
+  const token = text.split(/\s/, 1)[0] ?? "";
+  return COMMAND_TOKEN.test(token) && !isOmoCommand(text) && !prompts.has(token.slice(1)) ? token : undefined;
 };
 
 // The box is on screen with its ❯ line: an empty box read off a screen that shows none (the pane went away, a read
@@ -162,25 +145,12 @@ const clearOwn = async (keys: PaneKeys, clock: Clock, timing: SubmitTiming, text
 
 export const submitText = async (keys: PaneKeys, clock: Clock, text: string, timing: SubmitTiming = SUBMIT_TIMING): Promise<Submitted> => {
   const failed = (reason: string): Submitted => ({ status: "NOT_SUBMITTED", reason });
+  const unknown = keys.omoCommands && unknownToOmo(text, keys.omoCommands);
+  if (unknown)
+    return failed(`SLASH_UNKNOWN: omo runs no command ${unknown} as typed (not one of its own in that form, nor a skill or prompt template it has), and would hold the text for one more Enter that sends it as a message; nothing was typed. To send it as a message, put a space before the / (--text " ${text}")`);
   const command = !!keys.runsOmoCommands && isOmoCommand(text);
-  // a text omo may refuse (a /word, judged on the whole text: /settings alone runs, /settings now is refused): any refusal
-  // still armed in omo (a cleanup Enter that was lost, a person's own refusal) would send this text on its first Enter, so
-  // once the pane checks pass, one empty Enter on the empty box takes it back first. With a pending question shown that
-  // Enter would open the question instead, so nothing is typed then (fail closed).
-  const name = slashName(text);
-  const mayBeRefused = !!keys.runsOmoCommands && COMMAND_TOKEN.test(name) && !isOmoCommand(text);
-  if (mayBeRefused && keys.ready) {
-    const unsafe = await keys.ready();
-    if (unsafe) return failed(unsafe);
-  }
-  const first = keys.clear || command || mayBeRefused ? await keys.read() : "";
+  const first = keys.clear || command ? await keys.read() : "";
   const emptyBefore = keys.clear ? !editorText(first) : false;
-  if (mayBeRefused && questionShown(first))
-    return failed(`SLASH_QUESTION_PENDING: omo shows a pending question, so dori cannot take back a refusal of ${name} with an empty Enter (it would open the question); nothing was typed. Answer or dismiss the question first`);
-  if (mayBeRefused && keys.ready && promptShown(first) && !editorText(first)) {
-    await keys.enter();
-    await clock.sleep(timing.pollMs);
-  }
   // only into a box seen empty is the typed text all that omo gets (after a draft it is one ordinary message)
   const commandAlone = command && promptShown(first) && !editorText(first);
   const typed = await keys.type(text);
@@ -188,37 +158,15 @@ export const submitText = async (keys: PaneKeys, clock: Clock, text: string, tim
   await clock.sleep(timing.settleMs); // let the agent take the whole text (a long one arrives as a paste) before Enter
   let screen = "";
   let left = "";
-  let refused: Refusal | undefined;
-  const waitEmpty = async (): Promise<void> => {
+  for (let enter = 1; enter <= 2; enter++) {
+    await keys.enter();
     for (let poll = 0; poll < timing.clearPolls; poll++) {
       await clock.sleep(timing.pollMs);
       screen = await keys.read();
       left = editorText(screen);
-      if (!left) return;
-      refused = keys.runsOmoCommands ? refusedUnknown(screen, text) : undefined;
-      if (refused) return;
+      if (!left) break;
     }
-  };
-  for (let enter = 1; enter <= 2 && !refused; enter++) {
-    await keys.enter();
-    await waitEmpty();
     if (!left) break;
-  }
-  if (refused) {
-    // an unconfirmed refusal stays armed in omo (its next Enter sends this text as a message) until Esc or any submit: once
-    // the box is empty, one empty Enter takes it back (onSubmit clears it before anything else, interactive-mode.js 542/3916),
-    // idle or mid-turn, where Esc would stop the turn. Not while a pending question shows (an empty Enter opens it), nor
-    // over text that is not ours (it would be sent): then omo stays armed and the reason says so.
-    const cleared = await clearOwn(keys, clock, timing, text, emptyBefore);
-    const now = await keys.read();
-    const question = questionShown(now);
-    let armed = `omo still holds the refusal armed: its next Enter sends this text as a message (${question ? "a pending question is open, which an empty Enter would open" : "the box is not empty"}; Esc in that pane takes it back)`;
-    if (!question && promptShown(now) && !editorText(now)) {
-      await keys.enter();
-      await clock.sleep(timing.pollMs);
-      armed = "an empty Enter took omo's refusal back, so the same text is refused again rather than sent";
-    }
-    return failed(`SLASH_UNKNOWN: omo refused ${refused.name} as a command (it has none by that name, or will not run it from a prompt) and asked for one more Enter to send the text to the agent as a message; dori type did not press it, so nothing was sent; ${cleared}; ${armed}. To send it as a message, put a space before the / (--text " ${text}")`);
   }
   if (left) return failed(`text still in the input box after 2 Enters: ${left.slice(0, 60)}; ${await clearOwn(keys, clock, timing, text, emptyBefore)}`);
   if (commandAlone && promptShown(screen)) return { status: "SUBMITTED", reason: "input box empty: omo took the command from it to run it" };
