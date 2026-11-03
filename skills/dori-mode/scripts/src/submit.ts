@@ -77,11 +77,22 @@ export const steeringQueued = (screen: string, text: string): boolean => {
 // A slash command (/thinking low, /goal pause) runs in omo itself and never becomes a user message of the transcript (/goal
 // pause writes nothing there at all), and its notice above the box is no proof either: omo rewrites the last status line in
 // place, so a repeated /thinking low changes nothing on screen. What omo does is empty the box as it dispatches the command:
-// senpi's onSubmit runs every built-in and extension command before the compaction queue and the streaming steer that hold
-// a plain text, a command it does not know goes back into the box, and so does any text during startup (senpi
-// interactive-mode.js, omo 5.1.5x). So for one line of text that starts with / and a word, an emptied box is the evidence
+// senpi's onSubmit runs these built-ins, and omo's /goal extension command, before the compaction queue and the streaming
+// steer that can hold a plain text (senpi dist/modes/interactive/interactive-mode.js, omo 5.1.5x). Any other /text (a
+// skill, a prompt template, a command omo does not know) is ordinary input omo can hold, so it keeps the plain-text checks
 // (test pane w1:p17 on 2026-11-03: /thinking low applied, yet read NOT_SUBMITTED for want of a transcript message).
-export const isSlashCommand = (text: string): boolean => !text.includes("\n") && /^\/[A-Za-z][\w:-]*(?:\s|$)/.test(text);
+const OMO_COMMANDS = new Set(["/settings", "/favorite-models", "/scoped-models", "/model", "/thinking", "/export", "/import", "/share", "/copy", "/rename", "/name", "/session", "/changelog", "/keybindings", "/answer", "/hotkeys", "/fork", "/clone", "/tree", "/trust", "/login", "/logout", "/new", "/compact", "/reload", "/debug", "/resume", "/sessions", "/quit", "/exit", "/goal"]);
+// the ones omo also runs with an argument after a space; the rest only as the whole text
+const WITH_ARGS = new Set(["/model", "/thinking", "/export", "/import", "/rename", "/name", "/answer", "/login", "/compact", "/goal"]);
+export const isOmoCommand = (text: string): boolean => {
+  if (text.includes("\n")) return false;
+  const name = text.split(" ")[0] ?? "";
+  return OMO_COMMANDS.has(name) && (name === text || WITH_ARGS.has(name));
+};
+
+// The box is on screen with its ❯ line: an empty box read off a screen that shows none (the pane went away, a read
+// that failed) proves nothing
+const promptShown = (screen: string): boolean => inputBox(screen).lines.some((line) => line.trimStart().startsWith("❯"));
 
 // What is still unsent in the input box, the ❯ and whitespace folded away; "" when the box is empty
 export const editorText = (screen: string): string =>
@@ -116,7 +127,11 @@ const clearOwn = async (keys: PaneKeys, clock: Clock, timing: SubmitTiming, text
 
 export const submitText = async (keys: PaneKeys, clock: Clock, text: string, timing: SubmitTiming = SUBMIT_TIMING): Promise<Submitted> => {
   const failed = (reason: string): Submitted => ({ status: "NOT_SUBMITTED", reason });
-  const emptyBefore = keys.clear ? !editorText(await keys.read()) : false;
+  const command = isOmoCommand(text);
+  const first = keys.clear || command ? await keys.read() : "";
+  const emptyBefore = keys.clear ? !editorText(first) : false;
+  // only into a box seen empty is the typed text all that omo gets (after a draft it is one ordinary message)
+  const commandAlone = command && promptShown(first) && !editorText(first);
   const typed = await keys.type(text);
   if (typed) return failed(typed);
   await clock.sleep(timing.settleMs); // let the agent take the whole text (a long one arrives as a paste) before Enter
@@ -133,7 +148,7 @@ export const submitText = async (keys: PaneKeys, clock: Clock, text: string, tim
     if (!left) break;
   }
   if (left) return failed(`text still in the input box after 2 Enters: ${left.slice(0, 60)}; ${await clearOwn(keys, clock, timing, text, emptyBefore)}`);
-  if (isSlashCommand(text)) return { status: "SUBMITTED", reason: "input box empty: omo took the slash command (it runs one it knows; one it does not know it sends as a message on the second Enter)" };
+  if (commandAlone && promptShown(screen)) return { status: "SUBMITTED", reason: "input box empty: omo took the command from it to run it" };
   for (let poll = 0; poll < timing.busyPolls; poll++) {
     if (turnRunning(screen)) return { status: "SUBMITTED", reason: "input box empty and the turn runs" };
     if (steeringQueued(screen, text)) return { status: "SUBMITTED", reason: "input box empty and the text waits in the Steering queue" };
