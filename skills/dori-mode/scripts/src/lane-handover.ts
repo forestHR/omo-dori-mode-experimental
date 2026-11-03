@@ -18,7 +18,8 @@ import { freezePane, writeFrozen } from "./frozen.ts";
 import { ackFile, endStrayTasks, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
 import { awaitPrompt } from "./launch.ts";
 import { QuestionStore } from "./messenger/discord-cards.ts";
-import { sendVerified } from "./panes.ts";
+import { herdrResult, isHerdrPane } from "./herdr.ts";
+import { omoSession, sendVerified } from "./panes.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
@@ -438,7 +439,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}) } : {}) });
     return { code: 2 };
   };
-  if (config.backend !== "aoe") return refuse("dori handover --lane needs backend aoe");
+  if (!omoSession(config)) return refuse("dori handover --lane needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
   const lane = await deps.registry.read(key);
   if (!lane) return refuse("no such lane");
   if (statusOf(lane) === "closed") return refuse("the lane is closed");
@@ -459,7 +460,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   if (unapproved) return refuse(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
-  if (!old) return refuse(`no live aoe session for pane ${lane.pane}`);
+  if (!old) return refuse(`no live session for pane ${lane.pane}`);
   const real = deps.realpath(old.path);
   // omo may keep the session under the path aoe shows or under the real one (a symlinked cwd): use whichever names the session
   let base = old.path;
@@ -566,7 +567,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const title = titleFor(old.title, stamp);
   if (opts.dryRun) {
     if (blocked) return { code: 2, note };
-    deps.print(`HANDOVER_DRY_RUN ${key} would open aoe session "${title}" in ${real} (--model ${facts.model}${thinking ? ` --thinking ${thinking}` : ""}), point the lane at it, check the status line, ${monitors.length} monitors (${monitors.map((m) => m.description || m.command || m.path).join(", ") || "none"}) and a probe within ${opts.verifyMin ?? config.handover.verifyMin} min, then ${opts.keepOld ? "keep" : "close"} ${lane.pane}; detached jobs left alone: ${detached.map((d) => d.pid).join(",") || "none"}`);
+    deps.print(`HANDOVER_DRY_RUN ${key} would open ${config.backend} session "${title}" in ${real} (--model ${facts.model}${thinking ? ` --thinking ${thinking}` : ""}), point the lane at it, check the status line, ${monitors.length} monitors (${monitors.map((m) => m.description || m.command || m.path).join(", ") || "none"}) and a probe within ${opts.verifyMin ?? config.handover.verifyMin} min, then ${opts.keepOld ? "keep" : "close"} ${lane.pane}; detached jobs left alone: ${detached.map((d) => d.pid).join(",") || "none"}`);
     return { code: 0, note };
   }
   const lockFile = join(dir, `${key}.lock`);
@@ -768,7 +769,9 @@ const forwardLate = async (deps: LaneHandoverDeps, facts: LaneFacts, ctx: MoveCo
 // The registry entry and the open question cards of the lane follow its pane.
 const pointLane = async (deps: LaneHandoverDeps, key: string, from: string, to: string, why: string, emit: (line: string) => void): Promise<void> => {
   const fresh = await deps.registry.read(key);
-  if (fresh && fresh.pane !== to) await deps.registry.write({ ...fresh, pane: to, history: [...(fresh.history ?? []), { at: iso(deps.clock), status: statusOf(fresh), note: why }] });
+  // a herdr lane's tab is the new pane's (dori close closes it); the old tab goes with the old session
+  const tab = isHerdrPane(to) ? ((await herdrResult(deps.run, ["pane", "get", to]))?.pane as { tab_id?: string } | undefined)?.tab_id : undefined;
+  if (fresh && fresh.pane !== to) await deps.registry.write({ ...fresh, pane: to, tab, history: [...(fresh.history ?? []), { at: iso(deps.clock), status: statusOf(fresh), note: why }] });
   const cards = new QuestionStore(deps.cardDir).retarget({ tmux: from }, { tmux: to });
   emit(`HANDOVER_LANE ${key} pane -> ${to}; cards ${cards.length ? cards.join(",") : "none"}`);
 };
@@ -803,7 +806,9 @@ const moveLane = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, facts
   const { lane, from } = facts;
   let pane: string;
   try {
-    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", model: facts.model, ...(facts.thinking ? { thinking: facts.thinking } : {}), env: laneEnv(config.launchEnv, lane.useGpu) });
+    // the new session opens in this Dori's backend, so a lane moves from aoe to herdr at its next handover
+    const workspace = config.backend === "herdr" ? config.laneWorkspace || (isHerdrPane(from.pane) ? sessionFor(await liveSessions(deps.run), from.pane)?.profile : undefined) : undefined;
+    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", model: facts.model, ...(facts.thinking ? { thinking: facts.thinking } : {}), env: laneEnv(config.launchEnv, lane.useGpu), backend: config.backend, ...(workspace ? { workspace } : {}) });
     ctx.mark("open", true);
   } catch (e) {
     ctx.mark("open", false);

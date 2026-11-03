@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { closeAoeSession, envMismatch, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
-import { agentLine } from "../src/herdr.ts";
+import { agentLine, openHerdrSession } from "../src/herdr.ts";
 import { readHerdrSessions, recordHerdrSession, reviveHerdr } from "../src/herdr-sessions.ts";
 import { findLead } from "../src/lead.ts";
 import { leadAlive } from "../src/lead-down.ts";
@@ -105,4 +105,18 @@ test("a herdr lead whose agent is gone is named stopped with the session recorde
   expect(typed).toEqual(["[DORI] back"]);
   expect(await reviveHerdr(deps.run, deps.clock, deps.config, "w1:p9", "", async () => true)).toStartWith("REVIVE_FAIL w1:p9: no omo session recorded");
   expect(readHerdrSessions(dir)["w1:p1"]?.model).toBe("m/x");
+});
+
+test("a session opened on a fresh herdr server, which has no workspace yet, gets one first", async () => {
+  const calls: string[][] = [];
+  let made = false;
+  const run: Runner = async (argv) => {
+    calls.push([...argv]);
+    if (argv[1] === "tab" && argv[2] === "create") return made ? { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w1:p2", tab_id: "w1:t2" } } }), err: "" } : { code: 1, out: JSON.stringify({ error: { code: "workspace_not_found", message: "no active workspace" } }), err: "" };
+    if (argv[1] === "workspace" && argv[2] === "create") return (made = true), { code: 0, out: JSON.stringify({ result: { workspace: { workspace_id: "w1" } } }), err: "" };
+    if (argv[2] === "read") return { code: 0, out: "$ ", err: "" };
+    return { code: 0, out: "", err: "" };
+  };
+  expect(await openHerdrSession(run, fakeClock(0), { title: "lane", cwd: "/tmp", argv: ["omo"] })).toEqual({ pane: "w1:p2", tab: "w1:t2" });
+  expect(calls.filter((c) => c[2] === "create").map((c) => c.slice(1, 5))).toEqual([["tab", "create", "--cwd", "/tmp"], ["workspace", "create", "--label", "dori"], ["tab", "create", "--workspace", "w1"]]);
 });
