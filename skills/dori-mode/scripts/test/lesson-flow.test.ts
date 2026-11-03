@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 
 import { closeLane } from "../src/done-flow.ts";
+import { READ_ONLY_RULE } from "../src/backlog.ts";
 import { leadText } from "../src/directives.ts";
 import { briefForCheck } from "../src/intent-check.ts";
 import { renderBrief } from "../src/launch.ts";
@@ -74,7 +75,7 @@ test("the brief carries the repo's current lessons before Past signals and the f
   expect(r.lines.some((l) => l.startsWith(`LESSON_WARNING ${lessons.path}:`))).toBe(true);
 });
 
-test("a brief launched again drops a lesson retired since, and carries one lessons section and one footer", async () => {
+test("a brief launched again drops a lesson retired since and keeps what was added after its footer", async () => {
   const deps = depsFor(newWorld(), fakeClock(T0), state.dir);
   const lessons = new Lessons(state.dir);
   const old = lessons.add({ ...lesson, lane: "earlier", cwd: "/repo" }, T0);
@@ -82,13 +83,15 @@ test("a brief launched again drops a lesson retired since, and carries one lesso
   const brief = join(state.dir, "brief.md");
   await Bun.write(brief, "# Port it\n");
   const input = { key: "lesson-again", title: "again", brief, done: "merged acme/app#2", cwd: "/repo" };
-  await Bun.write(brief, (await renderBrief(deps, input)).text);
+  // as backlog does: a launched brief copied, its read-only rule and an owner's answer appended after the footer
+  await Bun.write(brief, `${(await renderBrief(deps, input)).text}\n\n## 형 결정 (11-03 19:00)\n형 답: 그대로 가\n\n${READ_ONLY_RULE}\n`);
   lessons.mark(old.id, "harmful");
   const again = (await renderBrief(deps, input)).text;
   expect(again).not.toContain(lesson.rule);
   expect(again).toContain("Keep this one");
   expect(again.split("## Lessons for this repo").length).toBe(2);
-  expect(again.split("## Lane footer").length).toBe(2);
+  expect(again).toContain("## 형 결정 (11-03 19:00)\n형 답: 그대로 가");
+  expect(again).toContain(READ_ONLY_RULE);
 });
 
 test("the lessons section is not the lead's or the owner's words for the directive audit and intent-check", async () => {

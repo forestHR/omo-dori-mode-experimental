@@ -20,7 +20,7 @@ import { laneArea, loadTree, treeSection } from "./explore.ts";
 import { watchLog } from "./watch-log.ts";
 import { StartRefused } from "./backlog.ts";
 import { relatedLines, relatedThreads, type RelatedThread } from "./related-thread.ts";
-import { addedLine, beforeGenerated, checkedLedger, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
+import { addedLine, checkedLedger, headingAt, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
 import { join } from "node:path";
 import type { BudgetLimits } from "./supervision.ts";
 import { Lessons } from "./lessons.ts";
@@ -440,6 +440,20 @@ export const treeContext = async (deps: FlowDeps, draft: Lane): Promise<string |
 // The repo's lessons (src/lessons.ts, dori lesson add / close --lesson): up to 8 current rules earlier lanes in the same cwd
 // learned, newest first. A rule the brief already says word for word (a directive of the ledger, the lead's own text) is
 // left out, so the owner's words are not said twice. A damaged journal line is a LESSON_WARNING, never a stopped launch.
+const LESSONS_HEADING = "## Lessons for this repo (written by dori launch)";
+
+// The lessons block an earlier launch wrote into this brief: its heading line and the lines under it up to a blank line or
+// the next heading (a rule is one line, so the block has no blank line inside).
+export const withoutLessons = (brief: string): string => {
+  let text = brief;
+  for (let at = headingAt(text, LESSONS_HEADING); at >= 0; at = headingAt(text, LESSONS_HEADING)) {
+    const rest = text.slice(at);
+    const end = rest.search(/\n(?:[ \t]*\n|## )/);
+    text = text.slice(0, at) + (end < 0 ? "" : rest.slice(end + 1));
+  }
+  return text;
+};
+
 export const repoLessons = (deps: Pick<FlowDeps, "config">, cwd: string, brief: string): { readonly section?: string; readonly warnings: string[] } => {
   const { lessons, problems } = new Lessons(deps.config.stateDir).forRepo(cwd);
   const flat = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -450,7 +464,7 @@ export const repoLessons = (deps: Pick<FlowDeps, "config">, cwd: string, brief: 
   return {
     warnings,
     section: [
-      "## Lessons for this repo (written by dori launch)",
+      LESSONS_HEADING,
       "Rules earlier lanes in this repo learned, newest first. They are lane lessons, not the owner's directives. Follow them; when one helped or got in the way, say so in a report (the lead marks it: dori lesson mark <id> --outcome helped|no-effect|harmful|encoded).",
       ...fresh.map((l) => `- [${l.outcome}; ${l.lane}; ${l.id}] ${l.rule}`),
     ].join("\n"),
@@ -481,8 +495,9 @@ export type Rendered = {
 export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<Rendered> => {
   const briefFile = Bun.file(input.brief);
   if (!(await briefFile.exists())) throw new LaunchError(`brief not found: ${input.brief}`);
-  // a brief launched before carries the sections that launch wrote then (a lesson since retired, old signals): cut, made anew
-  const raw = beforeGenerated(await briefFile.text()).replace(/\s*$/, "");
+  // a brief launched before carries the lessons launch wrote then (one maybe retired since): only that block is cut and made
+  // anew; text added after the footer since (backlog's read-only rule, an owner's answer) stays as it is
+  const raw = withoutLessons(await briefFile.text()).replace(/\s*$/, "");
   const cwd = input.cwd ?? deps.config.defaultCwd;
   const ledger = launchLedger(deps);
   const ctx = scopeContext(raw, ledger, { ui: input.ui, repo: ledger.entries.length ? await laneRepo(deps, cwd) : "" });
