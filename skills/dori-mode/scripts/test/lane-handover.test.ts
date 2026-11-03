@@ -1507,6 +1507,129 @@ test("a job an earlier handover listed (detached, or a chain that outlived its s
   expect(note).not.toContain("- 77:");
 });
 
+// ZzangDori herdr-switch, refused 2026-11-03 09:11:36Z: "2 local chain(s) would die: 726639 .../omo-ai; 727236 .../chrome-headless-"
+const SUPERVISOR = { pid: 726639, ppid: 11, cmd: "/home/oriclaw/.bun/bin/bun /home/oriclaw/.bun/install/global/node_modules/omo-ai/plugin/extensions/memory-run-supervisor.mjs /home/oriclaw/.omo/memory/agents/src-72da2fba/runtime/reflection/runs/reflect-1" };
+const LSP = { pid: 726700, ppid: 11, cmd: "/home/oriclaw/.bun/bin/bun /home/oriclaw/.bun/install/global/node_modules/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js daemon" };
+const BROWSER = { pid: 727236, ppid: 11, cmd: "/home/oriclaw/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell --disable-field-trial-config --headless --remote-debugging-pipe --user-data-dir=/tmp/playwright_chromiumdev_profile-x" };
+// every process of the pane's terminal session (sid 10, the pane's shell) as herdr ends them all when it closes the tab
+const inSession = (t: Proc[]): Proc[] => t.map((p) => ({ ...p, sid: p.pid === 40 ? 40 : p.pid === 41 ? 41 : 10 }));
+
+test("omo-ai's own daemons are no local chains, and a headless browser the agent left is one the ready mark covers: nothing tells an idle browser from a working one", async () => {
+  // Given: ZzangDori herdr-switch 09:11:36Z, refused for the memory run supervisor and a headless chrome
+  const deps = await setup();
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), SUPERVISOR, LSP, BROWSER];
+  // When
+  const refused = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  ready(deps, [BROWSER.pid]);
+  const covered = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
+  // Then: only the browser holds the move (a driver can still be downloading after its cell returned: review 318 challenge)
+  expect(refused.code).toBe(2);
+  expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 727236 /home/oriclaw/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-");
+  expect(covered.code).toBe(0);
+  const note = readFileSync(covered.note ?? "", "utf8");
+  expect(note).toContain("## Local chains of the old session (1)");
+  expect(note).not.toContain("memory-run-supervisor");
+  expect(note).not.toContain("lsp-daemon");
+});
+
+test("a headless browser a chain started is part of that chain, and a real chain beside the daemons still refuses for itself only", async () => {
+  // Given
+  const deps = await setup();
+  table = [...baseTable(), SUPERVISOR, { ...BROWSER, ppid: 15 }];
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // a shell whose command names the browser and then more steps is a chain: the executable decides (review 318)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 70, ppid: 11, cmd: "bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh" }];
+  const wrapped = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // so is a shell that names omo-ai's daemon path, and a browser doing a batch job itself, with no driver (review 318 round 2)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 71, ppid: 11, cmd: "bash -c cat /g/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js; ./long-job.sh" }];
+  const named = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 72, ppid: 11, cmd: "firefox --headless --screenshot /tmp/shot.png https://x" }];
+  const batch = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // a driver flag beside a batch job does not make it idle (review 318 round 3)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 74, ppid: 11, cmd: "firefox --headless --marionette --screenshot /tmp/shot.png https://x" }];
+  const mixed = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // Then
+  expect([r.code, wrapped.code, named.code, batch.code, mixed.code]).toEqual([2, 2, 2, 2, 2]);
+  const refused = printed.filter((l) => l.startsWith("HANDOVER_REFUSED"));
+  expect(refused[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 15 bash -c sleep 7200; echo chain-done. ");
+  expect(refused[1]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 70 bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh. ");
+  expect(refused[2]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 71 bash -c cat /g/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js; ./long-job.sh. ");
+  expect(refused[3]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 72 firefox --headless --screenshot /tmp/shot.png https://x. ");
+  expect(refused[4]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 74 firefox --headless --marionette --screenshot /tmp/shot.png https://x. ");
+});
+
+test("a job that left the pane's process tree but stays in its terminal session dies with it: it is a local chain the ready mark covers, not a detached job", async () => {
+  // Given: pingpong-analytics 2026-11-03 05:55Z, bun desk/worker.js listed as detached and dead after the close (0/1)
+  const deps = await setup();
+  const WORKER = { pid: 1530711, ppid: 1, cmd: "bun desk/worker.js" };
+  table = inSession([...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), WORKER]);
+  live.add(WORKER.pid);
+  const env = deps.envOf;
+  const sessionDeps: LaneHandoverDeps = { ...deps, envOf: (pid) => (pid === WORKER.pid ? "PI_SESSION_ID=old-sid" : env(pid)) };
+  // When
+  const refused = await laneHandover(sessionDeps, "demo", "aoe_lead_x", OK);
+  ready(deps, [WORKER.pid]);
+  const covered = await laneHandover(sessionDeps, "demo", "aoe_lead_x", { dryRun: true });
+  // Then
+  expect(refused.code).toBe(2);
+  expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 1530711 bun desk/worker.js. ");
+  expect(covered.code).toBe(0);
+  const note = readFileSync(covered.note ?? "", "utf8");
+  expect(note).toContain("## Local chains of the old session (1)");
+  expect(note).toContain("- 1530711: `bun desk/worker.js`");
+  // the job in a session of its own (setsid) survives the close and stays listed as detached
+  expect(note).toContain("## Detached jobs (1)");
+  expect(note).toContain("- 40: `sleep 7201`");
+  expect(printed.at(-1)).toEndWith("detached jobs left alone: 40");
+});
+
+test("an orphan the eval kernel left is in the kernel's own session, which ends with the old session: a local chain too", async () => {
+  // Given: QA lane qa-hsa 2026-11-03 13:12Z, the py kernel 982058 in a session of its own; its orphan sleep 6100 (ppid 1,
+  // sid 982058) died at the close, a nohup job of omo's bash tool (sid of a session whose leader had ended) survived
+  const deps = await setup();
+  const ORPHAN = { pid: 60, ppid: 1, cmd: "sleep 6100", sid: 30 };
+  const NOHUP = { pid: 61, ppid: 1, cmd: "sleep 6150", sid: 59 };
+  table = [...inSession(aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16)).map((p) => (p.pid === 30 ? { ...p, sid: 30 } : p)), ORPHAN, NOHUP];
+  live.add(60).add(61);
+  const env = deps.envOf;
+  const marked: LaneHandoverDeps = { ...deps, envOf: (pid) => (pid === 60 || pid === 61 ? "PI_SESSION_ID=old-sid" : env(pid)) };
+  // When
+  const r = await laneHandover(marked, "demo", "aoe_lead_x", OK);
+  // Then
+  expect(r.code).toBe(2);
+  expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 60 sleep 6100. ");
+  ready(deps, [60]);
+  const covered = await laneHandover(marked, "demo", "aoe_lead_x", { dryRun: true });
+  expect(printed.at(-1)).toEndWith("detached jobs left alone: 40,61");
+  expect(covered.code).toBe(0);
+});
+
+test("what carries the lane's session in its environment but belongs to other sessions is no detached job of the lane: the herdr server it started and that server's panes", async () => {
+  // Given: ZzangDori herdr-switch 2026-11-03 09:10Z listed 8 such processes (herdr server, its pane shells, other agents)
+  const deps = await setup();
+  const foreign = [
+    { pid: 50, ppid: 1, cmd: "/home/oriclaw/.local/lib/herdr/herdr server" },
+    { pid: 51, ppid: 50, cmd: "/bin/bash" },
+    { pid: 52, ppid: 51, cmd: "bun /g/senpi/dist/bundle/cli.js --extension /g/omo-ai/plugin --session /x" },
+  ];
+  table = [...baseTable(), ...foreign];
+  const env = deps.envOf;
+  const marked: LaneHandoverDeps = { ...deps, envOf: (pid) => ([50, 51, 52].includes(pid) ? "PI_SESSION_ID=old-sid" : env(pid)) };
+  // an earlier note already took them for the lane's (review 318): they are not carried on either
+  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
+  writeFileSync(join(state.dir, "handover", "lanes", "demo-20261010-120000.json"), JSON.stringify({ detached: foreign.map((p) => ({ pid: p.pid, cmd: p.cmd })), chains: [] }));
+  for (const p of foreign) live.add(p.pid);
+  ready(deps, [15]);
+  // When
+  const r = await laneHandover(marked, "demo", "aoe_lead_x", { dryRun: true });
+  // Then
+  expect(r.code).toBe(0);
+  const note = readFileSync(r.note ?? "", "utf8");
+  expect(note).toContain("## Detached jobs (1)");
+  for (const pid of [50, 51, 52]) expect(note).not.toContain(`- ${pid}: `);
+});
+
 test("a lane whose omo session lives under the real path of a symlinked cwd is still found: monitors, todos and log", async () => {
   // Given
   const deps = await setup();

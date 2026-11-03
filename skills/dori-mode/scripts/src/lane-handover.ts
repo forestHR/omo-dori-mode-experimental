@@ -26,6 +26,7 @@ import { hasSessionSelector } from "./session-id.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
+import { commandExecutable } from "./executable.ts";
 import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section, seedRestatement, wholeBullet } from "./restatement.ts";
@@ -194,8 +195,30 @@ export type Pending = { readonly key: string; readonly pid: number; readonly at:
 
 const POLL_MS = 5_000;
 const THINKING = /^(.*):(off|minimal|low|medium|high|xhigh|max)$/;
-// processes every omo session runs besides the work: MCP servers, the subagent RPC host, the provider's own CLI
+// processes every omo session runs besides the work: MCP servers, the subagent RPC host, the provider's own CLI, and the
+// omo-ai plugin's own daemons (its memory run supervisor under plugin/extensions, its LSP daemon under plugin/runtime),
+// which refused ZzangDori's herdr-switch move twice on 2026-11-03 as "local chains"
 const INFRA = /\bmcp\b|--internal-rpc-host-supervisor|--mode rpc|claude-agent-sdk/;
+// a command line's first words, quotes kept together (a quoted Windows path is one word)
+const words = (cmd: string, n: number): string[] => {
+  const out: string[] = [];
+  for (let rest = cmd; out.length < n; ) {
+    const w = commandExecutable(rest);
+    if (!w) break;
+    out.push(w);
+    rest = rest.slice(rest.indexOf(w) + w.length + 1);
+  }
+  return out;
+};
+// the omo-ai daemon itself: bun or node running a script of the plugin, never a command line that only names that path
+const omoDaemon = (cmd: string): boolean => {
+  const [exe = "", script = ""] = words(cmd, 2);
+  return /^(?:bun|node)(?:\.exe)?$/i.test(exe.split(/[\\/]/).pop() ?? "") && /omo-ai[\\/]plugin[\\/](?:extensions|runtime)[\\/]/.test(script);
+};
+const infra = (cmd: string): boolean => INFRA.test(cmd) || omoDaemon(cmd);
+// another session's processes: an agent, the herdr server (started from a lane, it carries that lane's environment) and
+// everything under them
+const HERDR_SERVER = /(?:^|[\\/\s])herdr(?:\.exe)?\s+server\b/;
 // omo's eval kernel (python3 -u .../senpi-codemode/src/kernels/py/prelude.py): the session's own interpreter, alive once
 // the lane used it. Not work itself; what a cell started under it is, and a cell running in it is read from the log.
 // either path separator: a native Windows command line names the kernel with backslashes
@@ -250,6 +273,13 @@ export const compactionStuckOn = (screen: string): number => {
 export const agentStartOf = async (run: Runner, agent: Proc, platform: string = process.platform): Promise<number> =>
   Date.parse(platform === "win32" ? agent.startedAt ?? "" : (await run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out.trim());
 
+// A job that left the pane's process tree (its parent ended, or nohup ... &) but not a terminal session of a process still
+// in that tree dies with the pane all the same: herdr ends every process of the pane's session when it closes the tab, and
+// omo ends its eval kernel's, which runs in a session of its own (measured 2026-11-03 on herdr 0.9.5: sleep & disown,
+// nohup sleep & and an orphaned bash -c 'sleep &' of the pane's shell ended, and so did an orphan the py kernel left;
+// setsid sleep, and a nohup job of omo's bash tool, whose session leader had already ended, survived). Those jobs count as
+// local chains too: 27 of 27 "detached jobs" the notes said would keep running were dead after the close. Only a job in
+// another session survives and stays a detached job. The session is known only where the process table has it (Linux).
 export const localChains = (table: readonly Proc[], shellPid: number, monitorPids: readonly number[], exclude: ReadonlySet<number> = new Set()): { readonly agent?: Proc; readonly chains: Job[]; readonly tree: Set<number> } => {
   const tree = descendants(table, shellPid);
   const agent = tree.find((p) => AGENT.test(p.cmd) && !ended(p));
@@ -257,11 +287,14 @@ export const localChains = (table: readonly Proc[], shellPid: number, monitorPid
   if (!agent) return { chains: [], tree: ids };
   const session = new Set([...ancestors(table, agent.pid)].filter((pid) => ids.has(pid)));
   const kernels = new Set(table.filter((p) => p.ppid === agent.pid && KERNEL.test(p.cmd)).map((p) => p.pid));
-  // the children of the agent, of its kernel and of the shells that launched it (jobs started from the pane die with it too)
-  const chains = table
-    .filter((p) => (session.has(p.ppid) || kernels.has(p.ppid)) && !session.has(p.pid) && !kernels.has(p.pid) && !ended(p) && !INFRA.test(p.cmd) && !monitorPids.includes(p.pid) && !exclude.has(p.pid))
+  const sids = new Set(table.filter((p) => ids.has(p.pid) && (p.sid ?? 0) > 0).map((p) => p.sid));
+  const stray = new Set(table.filter((p) => sids.has(p.sid) && !ids.has(p.pid) && p.pid !== process.pid).map((p) => p.pid));
+  // the children of the agent, of its kernel and of the shells that launched it (jobs started from the pane die with it too),
+  // and the topmost of the jobs that left the tree but not the pane's session
+  const roots = table.filter((p) => ((session.has(p.ppid) || kernels.has(p.ppid)) && !session.has(p.pid) && !kernels.has(p.pid)) || (stray.has(p.pid) && !stray.has(p.ppid)))
+    .filter((p) => !ended(p) && !infra(p.cmd) && !monitorPids.includes(p.pid) && !exclude.has(p.pid))
     .map((p) => ({ pid: p.pid, cmd: p.cmd, pids: [p.pid, ...descendants(table, p.pid).filter((d) => !ended(d)).map((d) => d.pid)] }));
-  return { agent, chains, tree: ids };
+  return { agent, chains: roots, tree: new Set([...ids, ...stray]) };
 };
 
 // Why an automatic rollover leaves a lane to the lead: a tag in handover.trainingTags, or a live monitor watching a training
@@ -281,10 +314,16 @@ export const trainingMark = (lane: Lane, monitors: readonly MonitorSpec[], h: { 
 export const detachedJobs = (table: readonly Proc[], tree: ReadonlySet<number>, session: string, aoeId: string, envOf: (pid: number) => string): Job[] => {
   const marks = [...(session ? [`PI_SESSION_ID=${session}`] : []), ...(aoeId ? [`/${aoeId}/session_id`] : [])];
   if (!marks.length) return [];
-  return table.filter((p) => !tree.has(p.pid) && p.pid !== process.pid).flatMap((p) => {
+  const foreign = foreignPids(table, tree);
+  return table.filter((p) => !tree.has(p.pid) && !foreign.has(p.pid) && p.pid !== process.pid).flatMap((p) => {
     const env = envOf(p.pid);
     return env && marks.some((m) => env.split("\n").some((line) => line === m || line.endsWith(m))) ? [{ pid: p.pid, cmd: p.cmd }] : [];
   });
+};
+
+export const foreignPids = (table: readonly Proc[], tree: ReadonlySet<number>): Set<number> => {
+  const others = table.filter((p) => !tree.has(p.pid) && (AGENT.test(p.cmd) || HERDR_SERVER.test(p.cmd)));
+  return new Set([...others.map((p) => p.pid), ...others.flatMap((p) => descendants(table, p.pid).map((d) => d.pid))]);
 };
 
 // Jobs an earlier handover of the lane listed (detached, or chains that outlived their session) that still run: their
@@ -399,7 +438,7 @@ export const renderLaneNote = (f: LaneFacts, at: string, stateDir: string): stri
     ? [`## Work the old session's monitors started (${f.work.length})`, "It runs under a monitor of the old session (marked LAUNCHES_WORK under Monitors), so the handover keeps that session frozen instead of closing it, its monitors left running, and closes it once this work ended. Do not start it again; follow it with the watch-only monitors of step 1.", ...f.work.map((j) => `- monitor ${j.pid} "${j.cmd.slice(0, 120)}": ${(j.pids ?? []).join(", ")}`), ""]
     : []),
   `## Detached jobs (${f.detached.length})`,
-  ...(f.detached.length ? ["They run outside the old session and keep running; the handover does not touch them. Check on them, do not start them twice.", ...f.detached.map(job)] : ["none"]),
+  ...(f.detached.length ? ["They run in a terminal session of their own, outside the old pane, so closing it does not end them; the handover does not touch them. Check on them, do not start them twice.", ...f.detached.map(job)] : ["none"]),
   "",
   `## Background tasks of the old session (${f.tasks?.length ?? 0})`,
   ...(f.tasks?.length
@@ -520,7 +559,8 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const marked = detachedJobs(table, tree, session, old.id, deps.envOf);
   // a pid in the pane's own tree is no detached job, even when an earlier note listed it (as a chain, before the session's
   // own launcher shell and eval kernel stopped counting as chains)
-  const detached = [...marked, ...carried(dir, key, deps.alive, new Set([...marked.map((d) => d.pid), ...chains.flatMap((c) => c.pids ?? [c.pid]), ...monitorPids, ...tree]))];
+  // nor is another session's process an earlier note took for one (a herdr server the lane started, its panes' agents)
+  const detached = [...marked, ...carried(dir, key, deps.alive, new Set([...marked.map((d) => d.pid), ...chains.flatMap((c) => c.pids ?? [c.pid]), ...monitorPids, ...tree, ...foreignPids(table, tree)]))];
   const model = opts.model || lane.model || config.defaultModel;
   const screen = await captureTmux(deps.run, lane.pane);
   const shown = statusLine(screen, model);
