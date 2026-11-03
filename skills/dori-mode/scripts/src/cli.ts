@@ -66,7 +66,7 @@ import { openCardIds, QuestionCards, QuestionError, QuestionStore } from "./mess
 import { DiscordListener, eyesOff } from "./messenger/discord-listener.ts";
 import { bareThreadName, discordThreadId, postInThread, postLaneStart, progressText, threadHook, threadName, ThreadRefError, type ThreadStatus, type ThreadVerb, VERB_STATUS } from "./messenger/discord-thread.ts";
 import { duplicateLine, sendKey, sendOnce } from "./send-dedupe.ts";
-import { mapThread, standThread, threads } from "./messenger/thread-map.ts";
+import { mapThread, standThread, threads, unstandThread } from "./messenger/thread-map.ts";
 import { archiveDoneThreads } from "./messenger/thread-archive.ts";
 import { ThreadStatusQueue } from "./messenger/thread-status-queue.ts";
 import { realTimers } from "./messenger/typing.ts";
@@ -425,7 +425,7 @@ const USAGE = `dori <command> [options]
   thread map discord:<id> <session|none>
                                        set the mapped session, preserving the title
   thread list                          print mapped thread ids, sessions and titles
-  thread set discord:<id> working|waiting|done|standing [--open-card]
+  thread set discord:<id> working|waiting|done|standing|unstanding [--open-card]
                                        queue its status; done archives it and removes its mapping
   thread <reply|wait|done> discord:<id> <text> | --text-file FILE
                                        post in a work thread and set its status (working, waiting, done); done archives it
@@ -1861,15 +1861,26 @@ try {
         const closing = opt("lane") ?? process.env.DORI_CLOSING_LANE ?? "";
         const sharing = (await deps.registry.open()).filter((l) => l.key !== closing && l.thread === thread).map((l) => l.key);
         const cards = deps.openCards?.(thread) ?? [];
-        return [...(sharing.length ? [`open lane ${sharing.join(", ")} uses it`] : []), ...(cards.length ? [`open card ${cards.join(", ")}`] : [])].join("; ");
+        const standing = threads(cardDir())[discordThreadId(thread)]?.standing === true;
+        return [...(sharing.length ? [`open lane ${sharing.join(", ")} uses it`] : []), ...(cards.length ? [`open card ${cards.join(", ")}`] : []), ...(standing ? ["standing thread"] : [])].join("; ");
       };
       if (verb === "set") {
-        if (!ref || (text !== "working" && text !== "waiting" && text !== "done" && text !== "standing")) die("usage: dori thread set discord:<id> working|waiting|done|standing [--open-card] [--force]");
+        if (!ref || (text !== "working" && text !== "waiting" && text !== "done" && text !== "standing" && text !== "unstanding")) die("usage: dori thread set discord:<id> working|waiting|done|standing|unstanding [--open-card] [--force]");
         if (text === "standing") {
           const id = discordThreadId(ref ?? "");
           standThread(cardDir(), id);
-          // waiting unless a lane works there (the queue keeps working then); a later close leaves it waiting too
+          // the queue shows it standing from here on, whatever status is asked
           console.log(`THREAD_STANDING discord:${id} ${await threadStatuses(discordClient()).request(id, "waiting")}`);
+          break;
+        }
+        if (text === "unstanding") {
+          const id = discordThreadId(ref ?? "");
+          if (!unstandThread(cardDir(), id)) {
+            console.log(`THREAD_NOT_STANDING discord:${id}`);
+            break;
+          }
+          // back to the normal rules: waiting unless a lane works there or a card is open
+          console.log(`THREAD_UNSTANDING discord:${id} ${await threadStatuses(discordClient()).request(id, "waiting", true)}`);
           break;
         }
         const status = text === "done" ? "done" : flags.values["open-card"] ? "waiting" : text === "waiting" ? "waiting" : "working";
@@ -1880,7 +1891,7 @@ try {
           break;
         }
         if (holders) console.log(`THREAD_DONE_FORCED discord:${id}: ${holders}; marking it done anyway`);
-        await threadStatuses(discordClient()).request(id, status);
+        await threadStatuses(discordClient()).request(id, status, status === "done" && unstandThread(cardDir(), id));
         break;
       }
       if ((verb !== "reply" && verb !== "wait" && verb !== "done") || !ref) die("usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE");
@@ -1903,7 +1914,8 @@ try {
         if (holders) console.log(`THREAD_DONE_FORCED ${thread}: ${holders}; marking it done anyway`);
       }
       const statuses = threadStatuses(dc);
-      const mark = (t: string, s: ThreadStatus) => statuses.request(t, s);
+      const released = verb === "done" && unstandThread(cardDir(), discordThreadId(ref ?? ""));
+      const mark = (t: string, s: ThreadStatus) => statuses.request(t, s, released);
       // a repeat is not posted, but the status still goes through: a done after a reply with the same words still closes
       const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark));
       if (r.duplicate) await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);

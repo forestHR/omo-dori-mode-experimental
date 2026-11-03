@@ -199,15 +199,72 @@ test("closing the last working lane of a thread with an open card turns it waiti
 });
 
 // lead 2026-11-02 23:15 KST: the upstream-port thread stays open between ports
-test("a thread set standing turns waiting, is listed as standing, and closing its last lane leaves it waiting and unarchived", async () => {
+test("a thread set standing wears 📌, is listed as standing, and closing its last lane leaves it 📌 and unarchived", async () => {
   await cli("open", "fix login", "--first", "Start");
   const set = await cli("set", REF, "standing");
-  expect({ out: set.out, name: http().name, standing: map()[ID]?.standing }).toEqual({ out: `THREAD_STANDING ${REF} applied`, name: "⏸️ fix login", standing: true });
+  expect({ out: set.out, name: http().name, standing: map()[ID]?.standing }).toEqual({ out: `THREAD_STANDING ${REF} applied`, name: "📌 fix login", standing: true });
   expect((await cli("list")).out).toBe(`${ID} none fix login [standing]`);
   closable("lane-a");
   const closed = await dori("close", "lane-a", "--summary", SUMMARY);
-  expect({ code: closed.code, name: http().name, archived: http().archived, standing: map()[ID]?.standing }).toEqual({ code: 0, name: "⏸️ fix login", archived: false, standing: true });
+  expect({ code: closed.code, name: http().name, archived: http().archived, standing: map()[ID]?.standing }).toEqual({ code: 0, name: "📌 fix login", archived: false, standing: true });
   expect(closed.out).toContain("thread left open: standing thread; summary posted");
+});
+
+// owner 2026-11-03 11:10 KST: a thread kept open on purpose looked like it was waiting (⏸️)
+test("a standing thread keeps 📌 past working, waiting, an open card and a plain done, with no rename", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  openLane("lane-b");
+  await cli("set", REF, "standing");
+  const before = renamed();
+  await cli("set", REF, "working");
+  await cli("set", REF, "waiting");
+  await cli("set", REF, "waiting", "--open-card");
+  const left = await cli("set", REF, "done");
+  expect(left.out).toContain("standing thread; not marked done");
+  const replied = await cli("done", REF, "finished");
+  expect(replied.out).toContain("THREAD_LEFT_OPEN");
+  expect({ name: http().name, archived: http().archived, renames: renamed() - before, standing: map()[ID]?.standing }).toEqual({ name: "📌 fix login", archived: false, renames: 0, standing: true });
+});
+
+test("setting standing again gives 📌 once, and a thread marked earlier gets it", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  await cli("set", REF, "waiting");
+  await cli("set", REF, "standing");
+  await cli("set", REF, "standing");
+  expect(http().name).toBe("📌 fix login");
+});
+
+test("unstanding takes 📌 off and the normal marks work again; a thread not standing is left alone", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  await cli("set", REF, "standing");
+  expect((await cli("set", REF, "unstanding")).out).toBe(`THREAD_UNSTANDING ${REF} applied`);
+  expect({ name: http().name, standing: map()[ID]?.standing }).toEqual({ name: "⏸️ fix login", standing: undefined });
+  await cli("set", REF, "working");
+  expect(http().name).toBe("🔄 fix login");
+  expect((await cli("set", REF, "unstanding")).out).toBe(`THREAD_NOT_STANDING ${REF}`);
+  expect(http().name).toBe("🔄 fix login");
+  await cli("set", REF, "done");
+  expect(http().name).toBe("✅ fix login");
+});
+
+test("a forced done ends a standing thread: ✅ with no 📌 left, archived, entry dropped", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  await cli("set", REF, "standing");
+  await cli("set", REF, "done", "--force");
+  expect({ name: http().name, archived: http().archived, entry: map()[ID] }).toEqual({ name: "✅ fix login", archived: true, entry: undefined });
+});
+
+test("thread done --force ends a standing thread the same way", async () => {
+  await cli("open", "fix login", "--first", "Start");
+  await cli("set", REF, "standing");
+  await cli("done", REF, "finished", "--force");
+  expect({ name: http().name, archived: http().archived, entry: map()[ID] }).toEqual({ name: "✅ fix login", archived: true, entry: undefined });
+});
+
+test("a 📌 in the title of a thread that was never standing stays through status changes", async () => {
+  await cli("open", "📌 notices", "--first", "Start");
+  await cli("set", REF, "waiting");
+  expect(http().name).toBe("⏸️ 📌 notices");
 });
 
 test("a lane still working in the thread keeps it working when another lane closes, open card or not", async () => {

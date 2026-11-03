@@ -17,13 +17,16 @@ export const withoutEmoji = (text: string): string =>
 
 export type ThreadStatus = "working" | "waiting" | "done";
 
-export const STATUS_EMOJI: Readonly<Record<ThreadStatus, string>> = { working: "🔄", waiting: "⏸️", done: "✅" };
+// A standing thread (thread-map.ts) wears its own mark whatever the status events ask; it is not one of the statuses.
+export type ThreadMark = ThreadStatus | "standing";
+
+export const STATUS_EMOJI: Readonly<Record<ThreadMark, string>> = { working: "🔄", waiting: "⏸️", done: "✅", standing: "📌" };
 
 // either style's mark, so switching statusStyle never leaves two marks on one name
 const STATUS_PREFIX = /^(?:\[[^\]]{1,20}\]|(?:🔄|⏸|✅|⏳)\uFE0F?)\s*/u;
 const EMOJI_PREFIX = /^(?:🔄|⏸|✅|⏳)\uFE0F?\s*/u;
 
-export const statusMark = (status: ThreadStatus, words: DiscordWords): string => (words.statusStyle === "emoji" ? STATUS_EMOJI[status] : `[${words[status]}]`);
+export const statusMark = (status: ThreadMark, words: DiscordWords): string => (words.statusStyle === "emoji" ? STATUS_EMOJI[status] : `[${words[status]}]`);
 
 // The name without any leading status marks: "🔄 🔄 x" and "✅ 🔄 x" both give "x". A title passed in with its own
 // mark, or an earlier rename that kept one, would otherwise stack marks. Any one bracket in front goes (an older
@@ -39,7 +42,12 @@ export const bareThreadName = (name: string, words: DiscordWords): string => {
   }
 };
 
-export const threadName = (status: ThreadStatus, title: string, words: DiscordWords): string => `${statusMark(status, words)} ${bareThreadName(title, words)}`;
+// 📌 is not a status mark to every other name, so a title of its own that starts with one stays: only a standing mark
+// being set (one 📌, not two) or released (unpin) takes it off.
+export const unpinnedName = (name: string, words: DiscordWords): string => bareThreadName(name, words).replace(/^(?:📌\uFE0F?\s*)+/u, "");
+
+export const threadName = (status: ThreadMark, title: string, words: DiscordWords, unpin = false): string =>
+  `${statusMark(status, words)} ${unpin || status === "standing" ? unpinnedName(title, words) : bareThreadName(title, words)}`;
 
 export const isDoneName = (name: string, words: DiscordWords): boolean => name.startsWith(STATUS_EMOJI.done) || name.startsWith(`[${words.done}]`);
 
@@ -63,11 +71,11 @@ export const desiredStatus = (hint: ThreadStatus, openCards: readonly string[], 
 
 // Discord rate-limits thread renames (about two per ten minutes), so nothing is sent when the status already holds.
 // Resolves true when it sent a change.
-export const setThreadStatus = async (dc: Discord, threadId: string, status: ThreadStatus, words: DiscordWords, current?: ThreadInfo): Promise<boolean> => {
+export const setThreadStatus = async (dc: Discord, threadId: string, status: ThreadMark, words: DiscordWords, current?: ThreadInfo, unpin = false): Promise<boolean> => {
   const info = current ?? (await dc.call<ThreadInfo>("GET", `/channels/${threadId}`));
   if (info.type === undefined || !THREAD_TYPES.has(info.type)) throw new NotAThreadError(`channel ${threadId} is not a thread (type ${info.type ?? "unknown"}); its name is left alone`);
   const name = info.name ?? "";
-  const next = threadName(status, name, words);
+  const next = threadName(status, name, words, unpin);
   const archived = info.thread_metadata?.archived === true;
   if (status === "done") {
     if (next === name && archived) return false;

@@ -221,7 +221,7 @@ dori resolve Q1
 
 `--thread` を付けると、その作業スレッド内にカードを投稿し、待機状態にします。回答はその場で記録になり、別の記録行は投稿しません。同じスレッドに未回答の質問がなくなれば作業中に戻ります。`dori reopen` はボタンを戻し、スレッドを再び待機状態にします。`--thread` がなければ新しいカードは設定済みのチャンネルに投稿します。スレッドに関連付けられた以前のチャンネルカードは、そのスレッドへ通知なしの回答記録を残します。後続作業が終わったら `dori resolve` で追跡から外します。折りたたまれたカードはチャットに残ります。未回答のカードを resolve で外した場合も、同じスレッドに未回答の質問がなくなれば作業中に戻るので、取り下げた質問のせいでスレッドが待機のまま残ることはありません。
 
-`discord.statusStyle: "emoji"` はスレッド名の先頭に 🔄 作業中、⏸️ 待機、✅ 完了を付けます。既定の `"words"` は `[working]`、`[waiting]`、`[done]` です。マークはスレッドにだけ付きます。テキストチャンネル・フォーラム・カテゴリをスレッドとして渡しても(例: `dori ask --thread` にチャンネル id)名前は変わらず、その状態は `THREAD_STATUS_DROPPED <id> ... is not a thread` として捨てられます。`dori thread reply` / `wait` / `done` が状態を設定し、done はアーカイブ、reply/wait はアーカイブ解除します。完了スレッドに所有者が書き込むと、リスナーが作業中として開き直します。サービスやカード文言の翻訳設定は [Discord + aoe セットアップ](skills/dori-mode/setups/discord-aoe/README.md) を参照してください。
+`discord.statusStyle: "emoji"` はスレッド名の先頭に 🔄 作業中、⏸️ 待機、✅ 完了を付け、意図して開いたままにするスレッド(`dori thread set <ref> standing`、解除は `unstanding`)には状態に関係なく 📌 を付けます。既定の `"words"` は `[working]`、`[waiting]`、`[done]` です。マークはスレッドにだけ付きます。テキストチャンネル・フォーラム・カテゴリをスレッドとして渡しても(例: `dori ask --thread` にチャンネル id)名前は変わらず、その状態は `THREAD_STATUS_DROPPED <id> ... is not a thread` として捨てられます。`dori thread reply` / `wait` / `done` が状態を設定し、done はアーカイブ、reply/wait はアーカイブ解除します。完了スレッドに所有者が書き込むと、リスナーが作業中として開き直します。サービスやカード文言の翻訳設定は [Discord + aoe セットアップ](skills/dori-mode/setups/discord-aoe/README.md) を参照してください。
 
 ### iPhone のショートカットで音声指示
 
