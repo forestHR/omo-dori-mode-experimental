@@ -38,7 +38,6 @@
     "api_base": "http://127.0.0.1:8810",
     "token_file": "/etc/dori-gate/dashboard-orders-token",
     "token_header": "X-PB-Gate-Token",
-    "max_age_hours": 24,
     "timeout_seconds": 5
   },
   "approval": {"channel_id": "REPLACE_WITH_APPROVAL_CHANNEL_ID", "poll_seconds": 20},

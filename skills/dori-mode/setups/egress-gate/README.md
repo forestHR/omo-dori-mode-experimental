@@ -78,13 +78,15 @@ every write, never cached: `GET <api_base>/api/todos/<id>` with the same gate to
 `token_header`). The answer must be a JSON object with `todo_id` equal to the asked id, `auto_applied` exactly
 `false` (the board took it in through the owner's approval card, not by its own auto-apply switch), `card` with the
 card's `channel_id` and `message_id` (digits), `status` one of `open_statuses` (default `열림`, `진행`; `완료` and
-`보류` are refused) and `approved_at` an ISO time with zone no older than `max_age_hours` (24, the same window as an
-order) and not in the future. Then the gate checks the card on Discord itself, with the owner-proof bot token: the
+`보류` are refused) and `approved_at` an ISO time with zone, not in the future. There is no 24-hour window: the
+todo is the owner's basis while it is open, and finishing, holding or deleting it ends that (owner 2026-11-03 10:53
+KST "그래 열려있는동안 해"); `owner_todo.max_age_hours` is no longer read, so an installed config that still has it
+keeps working. Then the gate checks the card on Discord itself, with the owner-proof bot token: the
 channel is in the owner's guild, the owner's own account (`owner_id`, not a bot) reacted ✅ on that message and did
 not react ⛔. Anything else, a non-2xx answer, no answer within `timeout_seconds` (5), a card the bot cannot read
 or a missing setting is `403 owner-todo-required` before Google. The gate then records the use
 (`POST <api_base>/api/todos/<id>/use`, same header; the answer's `todo_id` must match) and refuses the write if
-that fails. Like an order, a todo has no write count limit, only the window, and changes only the proof: outbound
+that fails. Like an order, a todo has no write count limit, and it changes only the proof: outbound
 writes still park on the approval card and Gmail send stays refused. The journal row keeps `owner_todo` (id, link,
 `approved_at`, card link). YooDori's backlog puts the header in each card-approved todo lane's brief
 (`references/scripts.md`, backlog feed). `owner_todo` usually shares `owner_order`'s `api_base` and token file.
