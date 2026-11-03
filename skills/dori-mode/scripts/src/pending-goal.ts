@@ -5,10 +5,11 @@ import { paneLife } from "./aoe.ts";
 import { pendingBackground, restoredMonitors } from "./background.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { type GoalRead, laneGoal } from "./goal.ts";
-import { readScreen, submitToPane } from "./panes.ts";
+import { omoPane, readScreen, submitToPane } from "./panes.ts";
 import { statusOf } from "./registry.ts";
 import { AGENT, descendants, ended, procTable, sessionDirFor, shellPidOf } from "./session-id.ts";
 import { turnRunning } from "./submit.ts";
+import { isHerdrPane } from "./herdr.ts";
 
 // A started lane has to set its goal (dori-superagent issue #50 reproduced here (MIT):
 // https://github.com/sisyphuslabs/dori-superagent/issues/50), but not within a fixed time: on 213 real lanes of four
@@ -33,9 +34,9 @@ export const goalReader = (deps: FlowDeps, cwd: string, session: string): ((pane
   deps.readGoal ?? (async () => laneGoal(deps.config.sessionsDir, cwd, session));
 
 export const agentGone = async (deps: FlowDeps, pane: string): Promise<string | undefined> => {
-  if (deps.config.backend === "aoe") {
+  if (omoPane(deps.config, pane)) {
     const life = await paneLife(deps.run, pane);
-    return life.live ? undefined : life.how === "gone" ? "the tmux session is gone" : `the agent exited (status ${life.status})`;
+    return life.live ? undefined : life.how === "gone" ? (isHerdrPane(pane) ? "the herdr pane is gone" : "the tmux session is gone") : life.status < 0 ? "no agent runs in the pane any more" : `the agent exited (status ${life.status})`;
   }
   // whether any agent still runs under the pane's shell, which is not the same question as which session it is:
   // resolveSession skips a command holding the word mcp (an MCP server of the agent), and a herdr lane carries its own

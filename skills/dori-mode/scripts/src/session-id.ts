@@ -2,6 +2,7 @@ import { readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { tmuxPanePid } from "./aoe.ts";
+import { isHerdrPane } from "./herdr.ts";
 import type { Backend } from "./config.ts";
 import type { Runner } from "./run.ts";
 
@@ -35,6 +36,11 @@ export const descendants = (table: readonly Proc[], root: number): Proc[] => {
   return out;
 };
 
+// The pane's agent: the topmost agent process at or under its shell, read in tree order. Its command line is not searched
+// for "mcp": a herdr lane carries its own prompt there (a lane keyed mcp-fix), and the agent's MCP servers sit below it.
+export const topAgent = (table: readonly Proc[], shell: number): Proc | undefined =>
+  shell ? [...table.filter((p) => p.pid === shell), ...descendants(table, shell)].find((p) => AGENT.test(p.cmd) && !ended(p)) : undefined;
+
 export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(sessionsDir, `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -58,14 +64,15 @@ export const hasSessionSelector = (argv: readonly string[]): boolean => argv.som
 export type SessionDeps = { readonly run: Runner; readonly sessionsDir: string; readonly backend?: Backend; readonly listDir?: (dir: string) => readonly string[] };
 
 export const shellPidOf = async (pane: string, deps: SessionDeps): Promise<number> => {
-  if (deps.backend === "aoe") return tmuxPanePid(deps.run, pane);
+  // the pane id says its backend (an aoe session stays tmux after the Dori's config moved to herdr): aoe.ts tmuxPanePid
+  if (deps.backend === "aoe" || isHerdrPane(pane) || pane.startsWith("aoe_")) return tmuxPanePid(deps.run, pane);
   const info = await deps.run(["herdr", "pane", "process-info", "--pane", pane]);
   return info.code === 0 ? Number((JSON.parse(info.out) as { result?: { process_info?: { shell_pid?: number } } }).result?.process_info?.shell_pid ?? 0) : 0;
 };
 
 export const resolveSession = async (pane: string, cwd: string, table: readonly Proc[], deps: SessionDeps): Promise<SessionHit> => {
   const shellPid = await shellPidOf(pane, deps);
-  const agent = shellPid ? descendants(table, shellPid).find((p) => AGENT.test(p.cmd) && !/\bmcp\b/.test(p.cmd)) : undefined;
+  const agent = topAgent(table, shellPid);
   if (!agent) return { id: "", via: "none" };
   const argv = agent.cmd.split(/\s+/);
   const fromFlag = argvSessionId(argv);

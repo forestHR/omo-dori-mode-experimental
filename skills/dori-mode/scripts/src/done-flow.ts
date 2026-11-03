@@ -13,7 +13,8 @@ import { leadLimitTick, limitResumeTick } from "./lead-limit.ts";
 import { missedAnswersTick } from "./missed-answers.ts";
 import { hasThread, type Lane, type Registry, statusOf, type ThreadPost, withStatus } from "./registry.ts";
 import { type Clock, iso, type Runner } from "./run.ts";
-import { sendVerified, submitToPane } from "./panes.ts";
+import { isHerdrPane } from "./herdr.ts";
+import { omoPane, sendVerified, submitToPane } from "./panes.ts";
 import { pendingGoalTick } from "./pending-goal.ts";
 import type { Submitted } from "./submit.ts";
 import { replacementOf } from "./frozen.ts";
@@ -153,7 +154,7 @@ export const typeIntoPane = async (deps: FlowDeps, pane: string, text: string): 
   if (!lane && !forwarded) {
     const closed = (await deps.registry.list()).filter((l) => l.pane === pane && statusOf(l) === "closed").sort((a, b) => (a.closedAt ?? "").localeCompare(b.closedAt ?? "")).at(-1);
     if (closed) {
-      const gone = deps.config.backend === "aoe" && !(await paneLife(deps.run, pane)).live ? "; its pane is gone" : "";
+      const gone = omoPane(deps.config, pane) && !(await paneLife(deps.run, pane)).live ? "; its pane is gone" : "";
       const reason = `LANE_IS_CLOSED ${closed.key} closed at ${closed.closedAt} by ${closerOf(closed)}${gone}: nothing was typed; no lane reads this pane, launch a new lane (dori launch) for new work`;
       log(`NOT_SUBMITTED ${pane} ${reason}`);
       return { status: "NOT_SUBMITTED", reason, pane, notes };
@@ -190,11 +191,11 @@ export const pauseLane = async (deps: FlowDeps, lane: Lane, reason: string): Pro
   return [`LANE_PAUSED ${lane.key} (was ${from}) ${reason}`, ...(goal ? [goal.line] : [])];
 };
 
-// The goal step of pause and resume, for an aoe lane with a pane (herdr panes are left as before): its GOAL_* line and
+// The goal step of pause and resume, for a lane with a pane dori drives omo in (panes.ts omoPane; another herdr agent's pane is left as before): its GOAL_* line and
 // whether the goal was changed; undefined when there is nothing to do.
 const goalLine = async (deps: FlowDeps, lane: Lane, act: GoalAct): Promise<{ readonly line: string; readonly changed: boolean } | undefined> => {
   const pane = lane.pane;
-  if (!pane || deps.config.backend !== "aoe") return undefined;
+  if (!pane || !omoPane(deps.config, pane)) return undefined;
   const head = act === "pause" ? "PAUSE_UNVERIFIED" : "RESUME_UNVERIFIED";
   const dead = await liveSession(deps, pane);
   if (dead) return { line: `GOAL_SKIPPED ${lane.key} ${pane}: no live session (${dead}), nothing to ${act}`, changed: false };
@@ -419,8 +420,10 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
       cleanup.push(`thread not set done: ${why}`);
     }
   }
-  if (deps.config.backend === "aoe") {
-    if (lane.pane) cleanup.push(await closeAoeSession(deps.run, lane.pane));
+  // an aoe session or a herdr pane is closed by its own backend (the pane id says which; a herdr pane's tab goes only when
+  // the pane is all it holds); a lane of another herdr agent keeps the tab/pane close it had
+  if (lane.pane && (deps.config.backend === "aoe" || isHerdrPane(lane.pane) || lane.pane.startsWith("aoe_"))) {
+    cleanup.push(await closeAoeSession(deps.run, lane.pane));
   } else if (lane.tab) cleanup.push((await deps.run(["herdr", "tab", "close", lane.tab])).code === 0 ? `tab ${lane.tab} closed` : `tab ${lane.tab} not closed`);
   else if (lane.pane) cleanup.push((await deps.run(["herdr", "pane", "close", lane.pane])).code === 0 ? `pane ${lane.pane} closed` : `pane ${lane.pane} not closed`);
   const root = lane.cwd ?? deps.config.defaultCwd;
@@ -489,7 +492,7 @@ export const watchTick = async (deps: FlowDeps): Promise<string[]> => {
       lane = { ...lane, claim: { ...claim, emitted: true } };
       await deps.registry.write(lane);
     }
-    if (deps.config.backend === "aoe" && lane.pane) {
+    if (lane.pane && omoPane(deps.config, lane.pane)) {
       const reopened = await claimTurn(deps, lane, lane.claim ?? claim);
       if (reopened) {
         out.push(reopened);

@@ -1,14 +1,15 @@
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 
-import { AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
+import { agentPath, AoeError, BUSY_MARK, envMismatch, forwardEnv, inputLine, laneEnv, openAoeSession, paneLife, target, WAKE_MARKS } from "./aoe.ts";
 import { turnRunning } from "./submit.ts";
+import { isHerdrPane, openHerdrSession } from "./herdr.ts";
 import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { agentGone, firstTurnRuns, GOAL_WAIT, goalReader, lastLines, noGoalWhy } from "./pending-goal.ts";
 import { AGENT, argvSessionId, descendants, ended, hasSessionSelector, procTable, sessionDirFor, shellPidOf } from "./session-id.ts";
 import { leadReplies } from "./lead-limit.ts";
-import { readScreen, sendVerified } from "./panes.ts";
+import { omoSession, readScreen, sendVerified } from "./panes.ts";
 import { hasThread, LANE_KEY, type Lane, NO_THREAD, threadRefProblem } from "./registry.ts";
 import { areaLabel, type AreaQuery, areaSignals, pastSignalsSection, tagsOf } from "./lane-signals.ts";
 import { iso } from "./run.ts";
@@ -529,7 +530,8 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane; report as the brief's footer says.`;
   // a model reply older than this is not an answer to this launch (a resumed session holds earlier ones)
   const launchedAt = deps.clock.now();
-  const opened = await (deps.config.backend === "aoe" ? openAoe(deps, input.key, cwd, model, prompt, laneEnv(deps.config.launchEnv, input.useGpu)) : openHerdr(deps, input.key, cwd, model, prompt)).catch((e: unknown) => {
+  const env = laneEnv(deps.config.launchEnv, input.useGpu);
+  const opened = await (deps.config.backend === "aoe" ? openAoe(deps, input.key, cwd, model, prompt, env) : openHerdr(deps, input.key, cwd, model, prompt, env)).catch((e: unknown) => {
     throw e instanceof LaunchFailed && openedThread ? new LaunchFailed(e.message, openedThread) : e;
   });
   const lane: Lane = { ...draft, pane: opened.pane, ...(opened.tab ? { tab: opened.tab } : {}), ...(opened.session ? { session: opened.session, sessionVia: "launch" } : {}) };
@@ -544,7 +546,7 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
   const screen = await readScreen(deps.run, deps.config.backend, opened.pane, 40);
   const bad = failureOf(deps, screen, cwd, opened.session ?? "", launchedAt);
   if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${opened.pane}: ${bad}` };
-  const started = deps.config.backend === "aoe" ? await aoeStartup(deps, input.key, opened.pane, screen) : `STARTUP_OK ${input.key} ${opened.pane}`;
+  const started = omoSession(deps.config) ? await aoeStartup(deps, input.key, opened.pane, screen) : `STARTUP_OK ${input.key} ${opened.pane}`;
   if (!started.startsWith("STARTUP_OK")) return { lane, startup: started };
   return { lane, startup: (await startupGoal(deps, input.key, opened.pane, cwd, opened.session ?? "", launchedAt)) ?? started };
 };
@@ -588,7 +590,7 @@ const startupGoal = async (deps: FlowDeps, key: string, pane: string, cwd: strin
 // anything else is STARTUP_UNCONFIRMED with its last lines, for the lead to look at (exit 3 like an error).
 export const aoeStartup = async (deps: FlowDeps, key: string, pane: string, screen: string): Promise<string> => {
   const life = await paneLife(deps.run, pane);
-  if (!life.live) return `STARTUP_ERROR ${key} ${pane}: ${life.how === "gone" ? "the tmux session is gone" : `the agent exited (status ${life.status})`}`;
+  if (!life.live) return `STARTUP_ERROR ${key} ${pane}: ${life.how === "gone" ? (isHerdrPane(pane) ? "the herdr pane is gone" : "the tmux session is gone") : life.status < 0 ? "no agent runs in the pane any more" : `the agent exited (status ${life.status})`}`;
   const full = await readScreen(deps.run, "aoe", pane);
   const shows = [screen, full].some((s) => turnRunning(s) || WAKE_MARKS.some((m) => s.includes(m)) || inputLine(s) !== undefined);
   return shows ? `STARTUP_OK ${key} ${pane}` : `STARTUP_UNCONFIRMED ${key} ${pane}: no running turn and no ❯ prompt on screen; last lines: ${lastLines(full || screen)}`;
@@ -603,15 +605,18 @@ type Opened = { readonly pane: string; readonly tab?: string; readonly failure?:
 export const withSessionId = (argv: readonly string[], id: string): string[] =>
   basename(argv[0] ?? "") === "omo" && !hasSessionSelector(argv) ? [argv[0] ?? "omo", "--session-id", id, ...argv.slice(1)] : [...argv];
 
-const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string): Promise<Opened> => {
-  const created = await deps.run(["herdr", "tab", "create", ...(deps.config.laneWorkspace ? ["--workspace", deps.config.laneWorkspace] : []), "--cwd", cwd, "--label", key, "--no-focus"]);
-  if (created.code !== 0) throw new LaunchFailed(`herdr tab create failed: ${created.err || created.out}`);
-  const made = (JSON.parse(created.out) as { result: { root_pane: { pane_id: string; tab_id?: string }; tab_id?: string } }).result;
-  const pane = made.root_pane.pane_id;
-  const tab = made.tab_id ?? made.root_pane.tab_id;
+// env: launchEnv for the lane (laneEnv), set on the agent's command line, since a herdr pane takes the server's environment
+const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string, env: Readonly<Record<string, string | undefined>> = {}): Promise<Opened> => {
   // the template is checked, not the filled argv: the prompt is one argument and never a selector
   const argv = fill(withSessionId(deps.config.agentCommand, crypto.randomUUID()), { model, prompt });
-  await deps.run(["herdr", "pane", "run", pane, argv.map(quoteForPane).join(" ")]);
+  // the shared opener (herdr.ts): a tab labelled with the key, a workspace first on a fresh server, the agent run there
+  let opened: { readonly pane: string; readonly tab?: string };
+  try {
+    opened = await openHerdrSession(deps.run, deps.clock, { title: key, cwd, argv, env: { ...env, PATH: agentPath(argv[0] ?? "omo") }, ...(deps.config.laneWorkspace ? { workspace: deps.config.laneWorkspace } : {}) });
+  } catch (e) {
+    throw new LaunchFailed(e instanceof Error ? e.message : String(e));
+  }
+  const { pane, tab } = opened;
   // a command with its own --session-dir keeps its sessions (and goals) outside sessionsDir, so launch cannot read them
   const elsewhere = argv.some((a) => a === "--session-dir" || a.startsWith("--session-dir="));
   return { pane, ...(tab ? { tab } : {}), session: elsewhere ? "" : argvSessionId(argv) };
