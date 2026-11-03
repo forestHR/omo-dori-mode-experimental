@@ -690,6 +690,9 @@ const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string
   // what the handover holds goes into the restatement before the new session writes, word for word, so it starts there
   // instead of coming back in supplement rounds
   if (!existsSync(understood)) writeFileSync(understood, seedRestatement(`${facts.lane.key}: what the new session understood`, UNDERSTOOD_HEADINGS, LANE_OWN, (t) => missingFrom(t, facts)));
+  // the probe goes in once the new session's first turn (reading the note) has ended: typed into a running turn it is a
+  // steering line among tool results, which a session read as the last line of the note and held (herdr QA 2026-11-03)
+  for (; i < tries && turnRunning(await captureTmux(deps.run, pane)); i++) await deps.clock.sleep(POLL_MS);
   const id = deps.nonce();
   if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: write what you understood to ${understood} (${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds the note's quotes, decisions and tried fixes word for word: keep them, add yours), then run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
   emit(`HANDOVER_PROBE_SENT ${id} -> ${pane}`);

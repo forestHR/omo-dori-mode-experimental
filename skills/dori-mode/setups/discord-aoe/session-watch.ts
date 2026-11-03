@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-// Watches the other aoe/tmux agent sessions and appends an event when one stops for a human:
-// aoe reports `waiting` or `error`, a turn ended and the pane stayed idle (no goal continuation),
+// Watches the other agent sessions (aoe/tmux, and herdr panes an agent runs in) and appends an event when one stops for a
+// human: aoe reports `waiting` or `error`, a turn ended and the pane stayed idle (no goal continuation),
 // or a briefed session printed a new `MILESTONE <id>:` line. Each event carries the pane's last
 // 20 lines, the lane's thread from the dori registry and what the session last said (from its transcript),
 // so the Dori can answer or ask the owner.
@@ -9,6 +9,8 @@ import { appendFileSync, existsSync, readFileSync, readlinkSync } from "node:fs"
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { aoeStates, captureTmux, liveSessions, paneLife, tmuxNameFor } from "../../scripts/src/aoe.ts";
+import { sessionFile as paneSessionFile } from "../../scripts/src/background.ts";
 import { loadConfig, loadEnvFile, envFilePath } from "../../scripts/src/config.ts";
 import { Registry } from "../../scripts/src/registry.ts";
 import { run } from "../../scripts/src/run.ts";
@@ -69,9 +71,12 @@ const sessionFile = async (tmux: string): Promise<string | null> => {
   return byStartTime(sessionDir(join(homedir(), ".omo", "agent", "sessions"), readlinkSync(`/proc/${omo}/cwd`)), startedMs);
 };
 
-const said = async (tmux: string): Promise<Said | null> => {
+// a herdr pane's transcript: the session its agent runs (background.ts sessionFile, from its command line or start time)
+const herdrSessionFile = async (pane: string, cwd: string): Promise<string | null> => (await paneSessionFile(run, config.sessionsDir, pane, cwd))?.path ?? null;
+
+const said = async (tmux: string, cwd = ""): Promise<Said | null> => {
   try {
-    const file = await sessionFile(tmux);
+    const file = tmux.includes(":") ? await herdrSessionFile(tmux, cwd) : await sessionFile(tmux);
     return file && existsSync(file) ? lastSaid(file) : null;
   } catch (e) {
     console.error(`SESSION-WATCH-SAID-FAIL ${tmux} ${e instanceof Error ? e.message : String(e)}`);
@@ -86,21 +91,24 @@ const emit = (row: Record<string, unknown>): void => {
 };
 
 const tick = async (): Promise<void> => {
-  const listed = JSON.parse(await sh(["aoe", "list", "--json", "--state", "live"])) as Listed[];
-  const ps = new Map((JSON.parse(await sh(["aoe", "ps", "--json"])) as { session: string; state: string }[]).map((p) => [p.session, p.state]));
-  const tmuxNames = (await sh(["tmux", "ls", "-F", "#S"])).split("\n").filter(Boolean);
+  const listed = await liveSessions(run);
+  const aoeListed = listed.some((x) => !x.pane);
+  const ps = aoeListed ? await aoeStates(run) : new Map<string, string>();
+  const tmuxNames = aoeListed ? (await sh(["tmux", "ls", "-F", "#S"])).split("\n").filter(Boolean) : [];
   const lanes = await registry.open();
   const context = await watchContext(loadConfig, lanes);
   const now = Date.now();
   for (const s of listed) {
-    const aoeState = ps.get(s.id);
-    const tmux = tmuxNames.find((n) => n.startsWith("aoe_") && !n.startsWith("aoe_term_") && n.endsWith(`_${s.id.slice(0, 8)}`));
-    if (!aoeState || !tmux || context.skip.has(tmux)) {
+    // a herdr pane counts while an agent runs in it, as "running" (herdr has no waiting/error state for omo)
+    const herdr = !!s.pane;
+    const tmux = herdr ? s.pane : tmuxNameFor(s, tmuxNames);
+    const aoeState = herdr ? (tmux && (await paneLife(run, tmux)).live ? "running" : undefined) : ps.get(s.id);
+    if (!aoeState || !tmux || tmux.startsWith("aoe_term_") || context.skip.has(tmux)) {
       seen.delete(s.id);
       continue;
     }
     // -S -40: the omo side panel (5.1.27+) stacks under the transcript on narrow panes and can push the last report into scrollback
-    const pane = await sh(["tmux", "capture-pane", "-p", "-S", "-40", "-t", `=${tmux}:`]);
+    const pane = herdr ? await captureTmux(run, tmux, 40) : await sh(["tmux", "capture-pane", "-p", "-S", "-40", "-t", `=${tmux}:`]);
     // state is judged on the visible screen only; scrollback can hold an old "esc to interrupt"
     const visible = pane.split("\n").slice(-24).join("\n");
     // omo shows "esc to interrupt" only while the main turn runs; aoe says `running` even when only background children do
@@ -118,12 +126,12 @@ const tick = async (): Promise<void> => {
       continue;
     }
     if (milestone && milestone !== prev.milestone && !busy && goalContinuing) {
-      emit({ kind: "session-milestone", ...base, said: await said(tmux) });
+      emit({ kind: "session-milestone", ...base, said: await said(tmux, s.path) });
       prev.notified = true;
     }
     if (!busy) prev.milestone = milestone;
     if ((aoeState === "waiting" || aoeState === "error") && prev.aoeState !== aoeState) {
-      emit({ kind: `session-${aoeState}`, ...base, said: await said(tmux) });
+      emit({ kind: `session-${aoeState}`, ...base, said: await said(tmux, s.path) });
       prev.notified = true;
     }
     if (busy) prev.notified = false;
@@ -132,7 +140,7 @@ const tick = async (): Promise<void> => {
       prev.notified = false;
     }
     if (!busy && !prev.notified && !goalContinuing && now - prev.idleSince >= IDLE_SETTLE_MS) {
-      emit({ kind: "session-idle", ...base, said: await said(tmux) });
+      emit({ kind: "session-idle", ...base, said: await said(tmux, s.path) });
       prev.notified = true;
     }
     prev.busy = busy;

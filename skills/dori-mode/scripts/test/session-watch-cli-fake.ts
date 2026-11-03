@@ -2,6 +2,8 @@
 import { mock } from "bun:test";
 import { appendFileSync, writeFileSync } from "node:fs";
 
+import * as realRun from "../src/run.ts";
+
 const configFile = process.env.DORI_CONFIG ?? "";
 const stateDir = process.env.DORI_STATE_DIR ?? "";
 const sessions = [
@@ -11,9 +13,13 @@ const sessions = [
   { id: "44444444-after", title: "after", path: "/repo" },
 ];
 let tick = 0;
+// the rest of run.ts (iso, realClock) stays: the watcher's shared modules use it
 mock.module("../src/run.ts", () => ({
+  ...realRun,
   run: async (argv: readonly string[]) => {
     let out = "";
+    // the watcher asks herdr for its panes too; no herdr server runs here
+    if (argv[0] === "herdr") return { code: 1, out: "", err: "server is not running" };
     if (argv[0] === "aoe" && argv[1] === "list") out = JSON.stringify(sessions);
     else if (argv[0] === "aoe" && argv[1] === "ps") out = JSON.stringify(sessions.map((s) => ({ session: s.id, state: tick === 2 ? "waiting" : "running" })));
     else if (argv[0] === "tmux" && argv[1] === "ls") out = sessions.map((s) => `aoe_${s.title}_${s.id.slice(0, 8)}`).join("\n");

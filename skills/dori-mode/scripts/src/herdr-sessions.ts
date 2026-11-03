@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { DoriConfig } from "./config.ts";
-import { agentLine, herdrSessions } from "./herdr.ts";
+import { agentLine, herdrAgentPid, herdrSessions, herdrShellPid } from "./herdr.ts";
 import type { Clock, Runner } from "./run.ts";
 import { argvSessionId, procTable, resolveSession } from "./session-id.ts";
 
@@ -50,20 +50,47 @@ export const herdrLeadSession = async (run: Runner, config: Partial<Pick<DoriCon
 // Starts the recorded conversation of a herdr pane again in that pane, whose agent is gone (its shell stayed or herdr
 // gave the pane back after a restart): omo --session-id resumes an existing session exactly. Waits for omo's ❯ prompt,
 // then types prompt (when not "") through type. A line saying what happened.
+// A server that just started spawns its restored panes a second or two later (pane_not_found until then), and herdr 0.9.5
+// itself starts an omo it recognised (as pi) again with --session <its file> (measured 2026-11-03): the pane is waited
+// for, and an agent already running there only gets the prompt.
 export const reviveHerdr = async (run: Runner, clock: Clock, config: Pick<DoriConfig, "stateDir" | "agentCommand" | "defaultModel">, pane: string, prompt: string, type: (pane: string, text: string) => Promise<boolean>): Promise<string> => {
   const rec = readHerdrSessions(config.stateDir)[pane];
   if (!rec || !argvSessionId(["--session-id", rec.session])) return `REVIVE_FAIL ${pane}: no omo session recorded for this pane (${file(config.stateDir)})`;
   if (!(await herdrSessions(run)).some((s) => s.pane === pane)) return `REVIVE_FAIL ${pane}: herdr has no such pane (its tab was closed); open a new session instead`;
-  const tool = config.agentCommand[0] ?? "omo";
-  const ran = await run(["herdr", "pane", "run", pane, agentLine([tool, "--session-id", rec.session, "--model", rec.model || config.defaultModel])], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
-  if (ran.code !== 0) return `REVIVE_FAIL ${pane}: herdr pane run failed: ${(ran.err || ran.out).slice(0, 160)}`;
+  for (let i = 0; i < 20 && !(await herdrShellPid(run, pane)); i++) await clock.sleep(1_000);
+  const restored = await herdrAgentPid(run, pane);
+  if (!restored) {
+    const tool = config.agentCommand[0] ?? "omo";
+    const ran = await run(["herdr", "pane", "run", pane, agentLine([tool, "--session-id", rec.session, "--model", rec.model || config.defaultModel])], { cwd: existsSync(rec.cwd) ? rec.cwd : undefined });
+    if (ran.code !== 0) return `REVIVE_FAIL ${pane}: herdr pane run failed: ${(ran.err || ran.out).slice(0, 160)}`;
+  }
+  const how = restored ? ` (herdr had started it again, pid ${restored})` : "";
   for (let i = 0; i < 90; i++) {
     const screen = (await run(["herdr", "pane", "read", pane, "--source", "visible"])).out;
     if (screen.split("\n").some((l) => l.trimStart().startsWith("❯"))) {
-      if (!prompt) return `REVIVE_OK ${pane} session ${rec.session}`;
-      return (await type(pane, prompt)) ? `REVIVE_OK ${pane} session ${rec.session} (prompt submitted)` : `REVIVE_PROMPT_NOT_SUBMITTED ${pane} session ${rec.session}`;
+      if (!prompt) return `REVIVE_OK ${pane} session ${rec.session}${how}`;
+      return (await type(pane, prompt)) ? `REVIVE_OK ${pane} session ${rec.session}${how} (prompt submitted)` : `REVIVE_PROMPT_NOT_SUBMITTED ${pane} session ${rec.session}${how}`;
     }
     await clock.sleep(2_000);
   }
   return `REVIVE_FAIL ${pane}: no ❯ prompt within 3 minutes of starting session ${rec.session}`;
+};
+
+// Ends the agent running in a herdr pane (SIGTERM, then waits up to 30 s for it to go): undefined when it ended, else why not.
+export const endHerdrAgent = async (run: Runner, clock: Clock, pane: string, signal: (pid: number) => boolean = (pid) => {
+  try {
+    process.kill(pid, "SIGTERM");
+    return true;
+  } catch {
+    return false;
+  }
+}): Promise<string | undefined> => {
+  const pid = await herdrAgentPid(run, pane);
+  if (!pid) return undefined;
+  if (!signal(pid)) return `SIGTERM to the agent ${pid} failed`;
+  for (let i = 0; i < 30; i++) {
+    if (!(await herdrAgentPid(run, pane))) return undefined;
+    await clock.sleep(1_000);
+  }
+  return `the agent ${pid} still runs 30 s after SIGTERM`;
 };

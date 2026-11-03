@@ -5,7 +5,9 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
-import { currentTmuxSession, paneActivity } from "./aoe.ts";
+import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
+import { isHerdrPane } from "./herdr.ts";
+import { endHerdrAgent, reviveHerdr } from "./herdr-sessions.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
@@ -76,7 +78,12 @@ import { transcribe, TranscriptionError } from "./messenger/voice.ts";
 
 const USAGE = `dori <command> [options]
 
-  lead                                 print the live lead as "<aoe-id> <tmux-session>"
+  lead                                 print the live lead as "<aoe-id> <tmux-session>" (herdr: "<omo session id> <pane>"),
+                                       " stopped" after it when its session or agent is not running
+  revive <herdr pane> [--text TEXT] [--restart]
+                                       start the omo session recorded for a herdr pane whose agent is gone again in that
+                                       pane (omo --session-id), wait for its prompt and type TEXT; REVIVE_OK or REVIVE_FAIL.
+                                       --restart first ends a running agent there (SIGTERM, up to 30 s)
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" --thread REF|new [--why-new "<reason>"] | --no-thread "<reason>" [--model M] [--cwd DIR] [--tag T ...] [--done-weak-ok]
          [--goal "owner words"] [--challenge-before STEP ...] [--use-gpu] [--ui] [--dry-run]
                                        every lane opens with a work thread (the owner's long work gets one): --thread REF
@@ -367,7 +374,7 @@ const USAGE = `dori <command> [options]
                                        put a card's buttons back / forget a settled question; a card still open (the
                                        owner answered in text) folds into its record with TEXT as the answer
   handover --approved-by REF [--note FILE] [--title T] [--model M] [--keep-old] [--no-monitors] [--minutes N] [--dry-run]
-                                       move the lead to a new session (backend aoe): write a note (open lanes, the old
+                                       move the lead to a new session (omo on aoe or herdr): write a note (open lanes, the old
                                        session's running monitors, open question cards, todos, timers, the owner's
                                        messages of the last 24 h from the inbox, the old log's path, --note: the old lead's
                                        summary under the headings of handover --template), open the new session on it,
@@ -533,7 +540,7 @@ const flags = parseArgs({
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
-    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
+    "delete-branch": { type: "boolean" }, restart: { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -906,7 +913,7 @@ try {
       break;
     }
     case "type": {
-      const pane = key ?? die("type needs a pane (tmux session with backend aoe, herdr pane id otherwise)");
+      const pane = key ?? die("type needs a pane (a tmux session name or a herdr pane id)");
       const file = opt("text-file");
       const text = file ? (await Bun.file(file).text()).trim() : need("text");
       if (!text) die("type needs non-empty text");
@@ -1847,6 +1854,18 @@ try {
     case "lead":
       console.log(await findLead(run, config));
       break;
+    case "revive": {
+      const pane = key ?? die("usage: dori revive <herdr pane> [--text TEXT]");
+      if (!isHerdrPane(pane)) die("revive takes a herdr pane id (an aoe session restarts with self-restart.sh)");
+      if (flags.values.restart && (await paneLife(run, pane)).live) {
+        const ended = await endHerdrAgent(run, realClock, pane);
+        if (ended) die(`REVIVE_FAIL ${pane}: ${ended}`);
+      }
+      const line = await reviveHerdr(run, realClock, config, pane, opt("text") ?? "", (p, t) => sendVerified(run, realClock, config, p, t));
+      console.log(line);
+      if (!line.startsWith("REVIVE_OK")) process.exitCode = 1;
+      break;
+    }
     case "thread": {
       await quietGuard();
       const [verb, ref, text] = flags.positionals;

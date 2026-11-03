@@ -67,7 +67,7 @@ else
   ID=$1
   T=${2:-${DORI_LEAD_TMUX:?set DORI_LEAD_TMUX or pass the tmux session}}
   # --start with an id (dori watch's lead revive): a session that came back meanwhile is left alone
-  if [ "$MODE" = start ] && tmux has-session -t "=$T" 2>/dev/null; then
+  if [ "$MODE" = start ] && [[ "$T" != *:* ]] && tmux has-session -t "=$T" 2>/dev/null; then
     echo "LEAD_ALREADY_RUNNING $T"
     exit 0
   fi
@@ -87,6 +87,23 @@ fi
 notify() { dori send discord --to "${DORI_DISCORD_PAIR_CHANNEL:-${DORI_DISCORD_CHANNEL:-}}" --text "$1" >>"$LOG" 2>&1 || log "SELF-RESTART-NOTIFY-FAIL"; }
 ready() { tmux capture-pane -p -t "=$T:" 2>/dev/null | grep -q '^❯'; }
 busy() { tmux capture-pane -p -t "=$T:" 2>/dev/null | grep -q 'esc to interrupt'; }
+
+# A herdr lead (a pane id with ":", backend herdr): the account's herdr server runs in its own unit (dori-herdr.service,
+# setups/discord-aoe/systemd), and dori revive starts the lead's recorded omo session again in its pane (--restart ends
+# its agent first) and types the prompt; aoe and tmux are not used.
+if [[ "$T" == *:* ]]; then
+  HERDR_UNIT=dori-herdr.service
+  systemctl --user cat "$HERDR_UNIT" >/dev/null 2>&1 && { systemctl --user start "$HERDR_UNIT" || log "HERDR_UNIT_START_FAIL $HERDR_UNIT"; }
+  for _ in $(seq 50); do herdr pane list >/dev/null 2>&1 && break; sleep 0.2; done
+  if OUT=$(dori revive "$T" --text "$PROMPT" $([ "$MODE" = restart ] && echo --restart) 2>&1); then
+    log "SELF-RESTART-OK herdr $OUT"
+    echo "$OUT"
+    exit 0
+  fi
+  log "SELF-RESTART-FAIL herdr $OUT"
+  notify "restart of $T failed: $OUT. Log: ~/.dori/self-restart.log. Start it by hand: dori revive $T"
+  exit 1
+fi
 
 if ! command -v "$AGENT" >/dev/null || ! "$AGENT" --version >>"$LOG" 2>&1; then
   log "SELF-RESTART-ABORT $AGENT missing or broken; session left running"

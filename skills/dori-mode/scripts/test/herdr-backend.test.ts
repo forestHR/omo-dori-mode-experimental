@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { closeAoeSession, envMismatch, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
 import { agentLine, openHerdrSession } from "../src/herdr.ts";
-import { readHerdrSessions, recordHerdrSession, reviveHerdr } from "../src/herdr-sessions.ts";
+import { endHerdrAgent, readHerdrSessions, recordHerdrSession, reviveHerdr } from "../src/herdr-sessions.ts";
 import { findLead } from "../src/lead.ts";
 import { leadAlive } from "../src/lead-down.ts";
 import { submitToPane } from "../src/panes.ts";
@@ -119,4 +119,31 @@ test("a session opened on a fresh herdr server, which has no workspace yet, gets
   };
   expect(await openHerdrSession(run, fakeClock(0), { title: "lane", cwd: "/tmp", argv: ["omo"] })).toEqual({ pane: "w1:p2", tab: "w1:t2" });
   expect(calls.filter((c) => c[2] === "create").map((c) => c.slice(1, 5))).toEqual([["tab", "create", "--cwd", "/tmp"], ["workspace", "create", "--label", "dori"], ["tab", "create", "--workspace", "w1"]]);
+});
+
+test("ending a herdr agent signals the pane's agent and waits until it is gone; one that stays is named", async () => {
+  const signalled: number[] = [];
+  const gone = await endHerdrAgent(fakeRunner(world), fakeClock(0), "w1:p1", (pid) => (signalled.push(pid), (world.herdrDead = ["w1:p1"]), true));
+  expect([gone, signalled]).toEqual([undefined, [4001]]);
+  world.herdrDead = [];
+  expect(await endHerdrAgent(fakeRunner(world), fakeClock(0), "w1:p1", () => true)).toBe("the agent 4001 still runs 30 s after SIGTERM");
+});
+
+test("a revive right after a server restart waits for herdr to spawn the pane, and an omo herdr already started again only gets the prompt", async () => {
+  const deps = omo({ leadPane: "w1:p1" });
+  recordHerdrSession(dir, "w1:p1", { session: "11111111-2222-4333-8444-555555555555", cwd: dir, at: new Date(0).toISOString() });
+  world.panes = [{ pane_id: "w1:p1", workspace_id: "w1", cwd: dir }];
+  world.herdrGone = ["w1:p1"];
+  const base = fakeRunner(world);
+  let reads = 0;
+  // pane list has it at once; process-info answers pane_not_found for the first two reads, then herdr has restored omo
+  const run: Runner = async (argv, o) => {
+    if (argv[2] === "process-info" && ++reads > 2) world.herdrGone = [];
+    return base(argv, o);
+  };
+  const typed: string[] = [];
+  const line = await reviveHerdr(run, deps.clock, deps.config, "w1:p1", "[DORI] back", async (_p, t) => (typed.push(t), true));
+  expect(line).toBe("REVIVE_OK w1:p1 session 11111111-2222-4333-8444-555555555555 (herdr had started it again, pid 4001) (prompt submitted)");
+  expect(world.calls.some((c) => c[2] === "run")).toBe(false);
+  expect(typed).toEqual(["[DORI] back"]);
 });

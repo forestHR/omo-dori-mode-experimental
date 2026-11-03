@@ -224,6 +224,17 @@ WantedBy=default.target
 
 The unit's `DORI_CONFIG`, `DORI_ENV_FILE` and `DORI_STATE_DIR` go into the server's global environment (with `tmux -D` the server starts with them; an adopted server gets them through `tmux set-environment -g`, `TMUX_ENV_SET <name>`), and `tmux-server` drops every other `DORI_*` it inherited. Every pane aoe opens or restarts takes the global environment (`dori launch`, `self-restart.sh`, the lead revive in `dori watch`, a restart from the aoe web), so a bare `dori` in a lead or lane window acts as this Dori and reads its token from that `dori.env`; `self-restart.sh` keeps these three names when it clears the server's `DORI_*`. Without them a Dori whose files are not in `~/.dori` cannot send from a new window (2026-10-22: a GongDori lane's first `dori send` failed with `DORI_DISCORD_TOKEN is not set`). A Dori in `~/.dori` can leave them out. On a server that is already running, `tmux set-environment -g <name> <path>` for the three adds them without a restart; panes started before keep their old environment.
 
+### Running on herdr instead of aoe/tmux
+
+The same listener, sweeps and question cards run with herdr panes (upstream's terminal) in place of aoe sessions; herdr also ships a native Windows build. On a Dori that moves:
+
+1. Install herdr (`curl -fsSL https://herdr.dev/install.sh | sh`, 0.9.5 or later) and link the guard: `ln -sf ~/.dori/src/skills/dori-mode/setups/discord-aoe/herdr-guard ~/.local/bin/herdr` (it refuses `herdr server stop` inside a pane, which would end every agent on the server, the lead's included).
+2. Install `systemd/dori-herdr.service` (a drop-in with `Environment=DORI_CONFIG=... DORI_ENV_FILE=... DORI_STATE_DIR=...` for a Dori whose files are not in `~/.dori`) and `systemctl --user enable --now dori-herdr.service`. The server lives there, apart from the dori units, so a dori update or a restart of dori-lanes leaves the lead and lanes running; a stopped herdr server ends every agent in its panes and gives back the same pane ids with empty shells.
+3. Open the lead in a herdr tab with its own session id (`herdr tab create --label <title> --cwd <dir>`, then `herdr pane run <pane> "omo --session-id <uuid> --model <model>"`; or start the old conversation there with `--session-id <its id>`), and set `"backend": "herdr"` and `"leadPane": "<pane id>"` in config.json. `dori lead` then prints `<omo session id> <pane>` and records the session, so `dori watch`'s lead revive and `self-restart.sh` (through `dori revive`) start that same conversation again after the server or the agent ended.
+4. Open aoe lanes keep working (each pane name says its backend); each moves to a herdr tab at its next `dori handover --lane`. When none is left, stop and disable the aoe units (`aoe-serve`, `<account>-tmux`) but keep them installed: setting `"backend": "aoe"` and the old `leadPane` back is the way back.
+
+Viewing: herdr has no web dashboard. Attach from another machine on the tailnet with `herdr --remote ssh://<host>` (herdr's own client, Linux, macOS or Windows).
+
 ### Google mail and calendar
 
 Install and authenticate `zele` on the host. The watcher only calls `mail list`, `cal events` and `cal get`.
