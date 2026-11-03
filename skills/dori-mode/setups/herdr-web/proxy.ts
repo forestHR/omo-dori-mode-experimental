@@ -1,4 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { run, type Runner } from "../../scripts/src/run.ts";
+import { cachedState } from "./state.ts";
+import { injectStateBar } from "./state-bar.ts";
 
 type Config = {
   readonly port: number;
@@ -21,7 +24,8 @@ button{background:#9dd5c4;border:0;border-radius:6px}label{display:block}
 const digest = (value: string) => createHash("sha256").update(value).digest();
 const hopHeaders = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "trailer"] as const;
 
-export function startProxy(config: Config) {
+export function startProxy(config: Config, runner: Runner = run) {
+  const state = cachedState(runner);
   const cookieName = `herdr_session_${config.port}`;
   const token = randomBytes(32).toString("hex");
   const authorized = (request: Request) =>
@@ -53,7 +57,11 @@ export function startProxy(config: Config) {
         } });
       }
       const upgrading = request.headers.get("upgrade")?.toLowerCase() === "websocket";
-      if (!authorized(request)) return upgrading ? new Response("Unauthorized", { status: 401 }) : login();
+      if (!authorized(request)) return upgrading || url.pathname === "/__dori/state"
+        ? new Response("Unauthorized", { status: 401, headers: { "cache-control": "no-store" } }) : login();
+      if (url.pathname === "/__dori/state" && request.method === "GET") {
+        return Response.json(await state(), { headers: { "cache-control": "no-store" } });
+      }
       const target = `http://127.0.0.1:${config.upstreamPort}${url.pathname}${url.search}`;
       if (upgrading) {
         const upstream = new WebSocket(target.replace(/^http/, "ws"), request.headers.get("sec-websocket-protocol")?.split(",").map((p) => p.trim()) ?? []);
@@ -92,7 +100,7 @@ export function startProxy(config: Config) {
       resultHeaders.set("cache-control", "no-store");
       // ttyd 1.7.7 omits a viewport declaration and otherwise renders a 980px phone page.
       const body = response.headers.get("content-type")?.includes("text/html")
-        ? (await response.text()).replace("<head>", '<head><meta name="viewport" content="width=device-width,initial-scale=1">')
+        ? injectStateBar(await response.text())
         : response.body;
       return new Response(body, { status: response.status, headers: resultHeaders });
     },

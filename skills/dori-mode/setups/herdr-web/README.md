@@ -8,7 +8,15 @@ session and types into it.
 It runs plain `herdr` inside ttyd 1.7.7, with a small Bun HTTP/WebSocket cookie-login proxy (`proxy.ts`) in front. The
 TUI talks to the account's own default `~/.config/herdr/herdr.sock`, so browser terminals are clients of the account's
 server, not a second session store, and closing a browser leaves the sessions running. ttyd needs `--writable`; without
-it keyboard input is disabled. ttyd's HTML gets a viewport declaration, so phone browsers use their real width.
+it keyboard input is disabled. Each new browser terminal first reads `leadPane` through Dori's config loader
+(`DORI_CONFIG`, with `DORI_LEAD_PANE` overriding it), focuses that pane's tab, then attaches to herdr.
+Set `DORI_CONFIG` in the terminal unit's environment file when the account uses a non-default config.
+
+The terminal page has a wrapping pane-state bar, including the focused tab, above the terminal. Labels and states stay
+visible on phones; the terminal is resized to the remaining height. Its cookie-protected `GET /__dori/state` polls every
+three seconds and shares a two-second server cache. It reuses `herdrSessions` and `paneActivity`: agent screens are read
+through `herdrLife`/`herdrRead`, mapping busy/running to working, questions/waiting/errors to waiting, idle to idle,
+and panes without an agent to none. Herdr's own agent status is not used to judge omo.
 
 The proxy takes the passphrase from `HERDR_WEB_PASSPHRASE` in its env file below; when that is unset it reuses
 `AOE_SERVE_PASSPHRASE` from `~/.config/agent-of-empires/serve.env` (optional, so an account that never ran aoe needs no
@@ -32,6 +40,21 @@ HERDR_WEB_ORIGIN=https://<this host's tailnet name>[:<https port>]
 # only on an account without aoe's serve.env (a fresh install); a moved Dori leaves it out and keeps its aoe passphrase
 HERDR_WEB_PASSPHRASE=<a passphrase, for example from openssl rand -hex 16>
 ```
+
+## Skip the first-run welcome
+
+For each Dori account, set this **top-level** key (before any `[section]`) in its existing
+`~/.config/herdr/config.toml`:
+
+```toml
+onboarding = false
+```
+
+This is a documented account-config step, not a unit override or a second herdr config. In herdr 0.9.5,
+`src/config.rs::should_show_onboarding` treats a missing key as true. Continuing the welcome writes false to
+the client's local config (`src/client/shell/overlay_input.rs::complete_onboarding`) and opens integration settings.
+A browser disconnected before continuing therefore sees it again on the next terminal. The next web terminal
+reads the setting at attachment; existing panes and their server do not need to be restarted.
 
 ## Deploy
 
@@ -60,6 +83,7 @@ belongs in the host's own setup, not here.
 
 ```sh
 bun test skills/dori-mode/setups/herdr-web/proxy.test.ts
+bun test skills/dori-mode/setups/herdr-web/terminal.test.ts
 ```
 
 Browser QA uses a temporary XDG_CONFIG_HOME, a task-owned browser profile, a test passphrase and ephemeral loopback

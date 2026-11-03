@@ -5,6 +5,7 @@ After=herdr-web-terminal@%i.service
 
 [Service]
 Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # optional: a Dori that moved from aoe keeps its aoe serve passphrase; a fresh install sets HERDR_WEB_PASSPHRASE below
 EnvironmentFile=-%h/.config/agent-of-empires/serve.env
 EnvironmentFile=%h/.config/herdr/web-%i.env
