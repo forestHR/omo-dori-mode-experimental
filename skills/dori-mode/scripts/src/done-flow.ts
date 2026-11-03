@@ -363,7 +363,16 @@ export const unpushedWork = async (deps: FlowDeps, lane: Lane): Promise<string[]
 // and archived: no summary is CLOSE_SUMMARY_MISSING, a post that did not go out is CLOSE_SUMMARY_NOT_SENT, and either way
 // nothing is changed and the lane stays open. When the lane's result is already in the thread (posted, else the claim's
 // posted) and no summary is given here, none is posted: CLOSE_SUMMARY_SKIPPED, and the thread is marked as usual.
-export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summary?: string, posted?: string, lesson?: Pick<LessonInput, "rule" | "evidence">): Promise<{ readonly closed: boolean; readonly lines: string[] }> => {
+// dori close --lesson TEXT, given any number of times: each lesson is one record (src/lessons.ts keeps one evidence per
+// rule), so the n-th --evidence goes with the n-th --lesson; one --evidence serves them all, none means the Done line. Any
+// other count cannot be paired and comes back as the reason, for the close to refuse before it does anything.
+export const closeLessons = (rules: readonly string[], evidence: readonly string[], done: string): Pick<LessonInput, "rule" | "evidence">[] | string => {
+  if (!rules.length) return [];
+  if (evidence.length > 1 && evidence.length !== rules.length) return `${rules.length} --lesson and ${evidence.length} --evidence: give one --evidence per --lesson, one for all, or none (the Done line)`;
+  return rules.map((rule, i) => ({ rule, evidence: evidence.length > 1 ? evidence[i]! : (evidence[0] ?? done) }));
+};
+
+export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summary?: string, posted?: string, lessons: readonly Pick<LessonInput, "rule" | "evidence">[] = []): Promise<{ readonly closed: boolean; readonly lines: string[] }> => {
   const exists = deps.exists ?? existsSync;
   const checks = await checkDone(lane.done, deps.run, signalIo(deps, lane));
   const lines = checks.map((c) => `SIGNAL ${c.ok ? "OK " : "NOT"} ${c.signal} -> ${c.detail}`);
@@ -470,8 +479,8 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
   const receipt = { checks, note, cleanup };
   await deps.registry.write(withStatus(lane, "closed", note, at, { closedAt: at, receipt }));
   // dori close --lesson (dori-superagent #65): kept only after the close is recorded, and a failure to keep it is a warning
-  // that never undoes or blocks the close.
-  if (lesson) {
+  // that never undoes or blocks the close. Each lesson is kept on its own: one that cannot be kept costs only itself.
+  for (const lesson of lessons) {
     try {
       lines.push(`LESSON ${new Lessons(deps.config.stateDir).add({ ...lesson, lane: lane.key, cwd: root }, deps.clock.now()).id}`);
     } catch (e) {
