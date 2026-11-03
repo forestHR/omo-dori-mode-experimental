@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { closeAoeSession, envMismatch, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
 import { agentLine, openHerdrSession } from "../src/herdr.ts";
 import { readScreen } from "../src/panes.ts";
-import { shellPidOf } from "../src/session-id.ts";
+import { resolveSession, shellPidOf, topAgent } from "../src/session-id.ts";
+import { agentTree } from "../src/frozen.ts";
+import { localChains } from "../src/lane-handover.ts";
 import { closeLane } from "../src/done-flow.ts";
 import { launchLane } from "../src/launch.ts";
 import { submitToPane } from "../src/panes.ts";
@@ -168,4 +170,17 @@ test("a herdr launch of an agent that is no omo needs no node: it starts with th
     if (nvm === undefined) delete process.env.NVM_DIR;
     else process.env.NVM_DIR = nvm;
   }
+});
+
+test("the agent of a herdr lane keyed mcp-fix (its prompt on the command line) is found for handover, freeze and its session", async () => {
+  const table = [
+    { pid: 4000, ppid: 1, cmd: "-bash", stat: "S" },
+    { pid: 4001, ppid: 4000, cmd: "omo --session-id 11111111-2222-4333-8444-555555555555 --model m ulw. Read the lane brief at /tmp/mcp.md. You are the mcp-fix lane", stat: "S" },
+    { pid: 4002, ppid: 4001, cmd: "bun /x/mcp-server.js", stat: "S" },
+  ];
+  expect(topAgent(table, 4000)?.pid).toBe(4001);
+  expect(localChains(table, 4000, []).agent?.pid).toBe(4001);
+  expect(agentTree(table, 4000, 999).agent?.pid).toBe(4001);
+  const run: Runner = async (argv) => ({ code: 0, out: argv[2] === "process-info" ? JSON.stringify({ result: { process_info: { shell_pid: 4000 } } }) : "", err: "" });
+  expect((await resolveSession("w1:p1", "/tmp", table, { run, sessionsDir: dir, backend: "herdr" })).id).toBe("11111111-2222-4333-8444-555555555555");
 });

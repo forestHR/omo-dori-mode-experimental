@@ -11,14 +11,15 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from "node:path";
 
 import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./background.ts";
-import { aoeSessions, captureTmux, closeAoeSession, envMismatch, inputLine, laneEnv, openAoeSession, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
+import { captureTmux, closeAoeSession, envMismatch, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
 import { turnRunning } from "./submit.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { freezePane, writeFrozen } from "./frozen.ts";
 import { ackFile, endStrayTasks, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
 import { awaitPrompt } from "./launch.ts";
 import { QuestionStore } from "./messenger/discord-cards.ts";
-import { sendVerified } from "./panes.ts";
+import { herdrResult, isHerdrPane } from "./herdr.ts";
+import { omoSession, sendVerified } from "./panes.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
@@ -240,7 +241,7 @@ export const compactionStuckOn = (screen: string): number => {
 // "[bash] <defunct>") is no work either: it refused 5 automatic moves of yoodori-gate-gaps on 2026-10-19.
 export const localChains = (table: readonly Proc[], shellPid: number, monitorPids: readonly number[], exclude: ReadonlySet<number> = new Set()): { readonly agent?: Proc; readonly chains: Job[]; readonly tree: Set<number> } => {
   const tree = descendants(table, shellPid);
-  const agent = tree.find((p) => AGENT.test(p.cmd) && !/\bmcp\b/.test(p.cmd));
+  const agent = tree.find((p) => AGENT.test(p.cmd) && !ended(p));
   const ids = new Set([shellPid, ...tree.map((p) => p.pid)]);
   if (!agent) return { chains: [], tree: ids };
   const session = new Set([...ancestors(table, agent.pid)].filter((pid) => ids.has(pid)));
@@ -324,7 +325,7 @@ export const markReady = async (deps: LaneHandoverDeps, lane: Lane, here: string
   if (!existsSync(noteFile)) return { code: 2, line: `HANDOVER_READY_REFUSED ${lane.key}: note file not found: ${noteFile}` };
   const lacking = missingHeadings(readFileSync(noteFile, "utf8"), SUMMARY_HEADINGS);
   if (lacking.length) return { code: 2, line: `HANDOVER_READY_REFUSED ${lane.key}: the summary ${noteFile} lacks ${lacking.map((h) => `## ${h}`).join(", ")} (dori handover ready --template)` };
-  const old = sessionFor(await aoeSessions(deps.run), lane.pane);
+  const old = sessionFor(await liveSessions(deps.run), lane.pane);
   const { pids } = await monitorPidsOf(deps, lane.pane, old?.path ?? lane.cwd ?? deps.config.defaultCwd);
   const table = await deps.procs();
   const shell = await tmuxPanePid(deps.run, lane.pane);
@@ -438,7 +439,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}) } : {}) });
     return { code: 2 };
   };
-  if (config.backend !== "aoe") return refuse("dori handover --lane needs backend aoe");
+  if (!omoSession(config)) return refuse("dori handover --lane needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
   const lane = await deps.registry.read(key);
   if (!lane) return refuse("no such lane");
   if (statusOf(lane) === "closed") return refuse("the lane is closed");
@@ -458,8 +459,8 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes" }, key, lane.pane ?? "", readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox ?? "", deps.ownerIds ?? []));
   if (unapproved) return refuse(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
-  const old = sessionFor(await aoeSessions(deps.run), lane.pane);
-  if (!old) return refuse(`no live aoe session for pane ${lane.pane}`);
+  const old = sessionFor(await liveSessions(deps.run), lane.pane);
+  if (!old) return refuse(`no live session for pane ${lane.pane}`);
   const real = deps.realpath(old.path);
   // omo may keep the session under the path aoe shows or under the real one (a symlinked cwd): use whichever names the session
   let base = old.path;
@@ -566,7 +567,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const title = titleFor(old.title, stamp);
   if (opts.dryRun) {
     if (blocked) return { code: 2, note };
-    deps.print(`HANDOVER_DRY_RUN ${key} would open aoe session "${title}" in ${real} (--model ${facts.model}${thinking ? ` --thinking ${thinking}` : ""}), point the lane at it, check the status line, ${monitors.length} monitors (${monitors.map((m) => m.description || m.command || m.path).join(", ") || "none"}) and a probe within ${opts.verifyMin ?? config.handover.verifyMin} min, then ${opts.keepOld ? "keep" : "close"} ${lane.pane}; detached jobs left alone: ${detached.map((d) => d.pid).join(",") || "none"}`);
+    deps.print(`HANDOVER_DRY_RUN ${key} would open ${config.backend} session "${title}" in ${real} (--model ${facts.model}${thinking ? ` --thinking ${thinking}` : ""}), point the lane at it, check the status line, ${monitors.length} monitors (${monitors.map((m) => m.description || m.command || m.path).join(", ") || "none"}) and a probe within ${opts.verifyMin ?? config.handover.verifyMin} min, then ${opts.keepOld ? "keep" : "close"} ${lane.pane}; detached jobs left alone: ${detached.map((d) => d.pid).join(",") || "none"}`);
     return { code: 0, note };
   }
   const lockFile = join(dir, `${key}.lock`);
@@ -689,6 +690,9 @@ const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string
   // what the handover holds goes into the restatement before the new session writes, word for word, so it starts there
   // instead of coming back in supplement rounds
   if (!existsSync(understood)) writeFileSync(understood, seedRestatement(`${facts.lane.key}: what the new session understood`, UNDERSTOOD_HEADINGS, LANE_OWN, (t) => missingFrom(t, facts)));
+  // the probe goes in once the new session's first turn (reading the note) has ended: typed into a running turn it is a
+  // steering line among tool results, which a session read as the last line of the note and held (herdr QA 2026-11-03)
+  for (; i < tries && turnRunning(await captureTmux(deps.run, pane)); i++) await deps.clock.sleep(POLL_MS);
   const id = deps.nonce();
   if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: write what you understood to ${understood} (${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds the note's quotes, decisions and tried fixes word for word: keep them, add yours), then run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
   emit(`HANDOVER_PROBE_SENT ${id} -> ${pane}`);
@@ -768,7 +772,9 @@ const forwardLate = async (deps: LaneHandoverDeps, facts: LaneFacts, ctx: MoveCo
 // The registry entry and the open question cards of the lane follow its pane.
 const pointLane = async (deps: LaneHandoverDeps, key: string, from: string, to: string, why: string, emit: (line: string) => void): Promise<void> => {
   const fresh = await deps.registry.read(key);
-  if (fresh && fresh.pane !== to) await deps.registry.write({ ...fresh, pane: to, history: [...(fresh.history ?? []), { at: iso(deps.clock), status: statusOf(fresh), note: why }] });
+  // a herdr lane's tab is the new pane's (dori close closes it); the old tab goes with the old session
+  const tab = isHerdrPane(to) ? ((await herdrResult(deps.run, ["pane", "get", to]))?.pane as { tab_id?: string } | undefined)?.tab_id : undefined;
+  if (fresh && fresh.pane !== to) await deps.registry.write({ ...fresh, pane: to, tab, history: [...(fresh.history ?? []), { at: iso(deps.clock), status: statusOf(fresh), note: why }] });
   const cards = new QuestionStore(deps.cardDir).retarget({ tmux: from }, { tmux: to });
   emit(`HANDOVER_LANE ${key} pane -> ${to}; cards ${cards.length ? cards.join(",") : "none"}`);
 };
@@ -776,7 +782,7 @@ const pointLane = async (deps: LaneHandoverDeps, key: string, from: string, to: 
 // Repairs what an interrupted run left: while the old session lives it stays the lane and the new one is closed; when
 // only the new one lives (the old was already closed) the lane stays on the new one.
 export const recover = async (deps: LaneHandoverDeps, p: Pending, emit: (line: string) => void): Promise<void> => {
-  const sessions = await aoeSessions(deps.run);
+  const sessions = await liveSessions(deps.run);
   const oldAlive = !!sessionFor(sessions, p.from);
   const newAlive = !!sessionFor(sessions, p.to);
   if (oldAlive) {
@@ -803,7 +809,9 @@ const moveLane = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, facts
   const { lane, from } = facts;
   let pane: string;
   try {
-    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", model: facts.model, ...(facts.thinking ? { thinking: facts.thinking } : {}), env: laneEnv(config.launchEnv, lane.useGpu) });
+    // the new session opens in this Dori's backend, so a lane moves from aoe to herdr at its next handover
+    const workspace = config.backend === "herdr" ? config.laneWorkspace || (isHerdrPane(from.pane) ? sessionFor(await liveSessions(deps.run), from.pane)?.profile : undefined) : undefined;
+    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", model: facts.model, ...(facts.thinking ? { thinking: facts.thinking } : {}), env: laneEnv(config.launchEnv, lane.useGpu), backend: config.backend, ...(workspace ? { workspace } : {}) });
     ctx.mark("open", true);
   } catch (e) {
     ctx.mark("open", false);
@@ -880,7 +888,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   const checked = await verifyLane(deps, facts, pane, opts.verifyMin ?? config.handover.verifyMin, note.replace(/\.md$/, ".understood.md"), emit);
   ctx.supplements.push(...(checked.supplements ?? []));
   mark("verify", !checked.reasons.length);
-  if (checked.reasons.length && !sessionFor(await aoeSessions(deps.run), from.pane)) {
+  if (checked.reasons.length && !sessionFor(await liveSessions(deps.run), from.pane)) {
     // nothing to go back to: the old session ended during the checks, so the new one stays the lane
     emit(`HANDOVER_OLD_GONE ${lane.key}: ${from.pane} ended during the checks (${checked.reasons.join("; ")}); the lane stays on ${pane}`);
     await tell(deps, pane, `[LEAD] ${COMMITTED}: the old session ended during the checks, so you are the ${lane.key} lane now although a check failed (${checked.reasons.join("; ")}); tell the lead what you see. ${config.launchKeywords}: go on with step 5 of the note.`);
@@ -945,7 +953,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   // resumed only to be closed: a stopped process does not act on the hangup
   thaw();
   const closed = await closeAoeSession(deps.run, from.pane);
-  const ok = closed.includes("stopped and trashed");
+  const ok = isClosedLine(closed);
   mark("close", ok);
   emit(ok ? `HANDOVER_CLOSED ${closed}` : `HANDOVER_CLOSE_FAIL ${closed}`);
   await tell(deps, pane, `[LEAD] ${COMMITTED}: the handover is checked and the old session ${ok ? "is closed" : `${from.pane} did not close but stays idle`}; you are the ${lane.key} lane now. ${config.launchKeywords}: go on with step 5 of the note.`);
@@ -961,7 +969,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
 // The length signals of the session in any pane (a lane's or the lead's): context use from its status line, compactions
 // and age from its session log.
 export const paneSignals = async (deps: LaneHandoverDeps, pane: string, model: string): Promise<Signals> => {
-  const s = sessionFor(await aoeSessions(deps.run), pane);
+  const s = sessionFor(await liveSessions(deps.run), pane);
   const screen = await captureTmux(deps.run, pane);
   const shown = statusLine(screen, model);
   const blockedTurns = compactionStuckOn(screen);

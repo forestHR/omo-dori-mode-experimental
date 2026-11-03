@@ -2,7 +2,7 @@ import { repeatTick } from "./auto-signals.ts";
 import { type DoriConfig, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { researchCheck, stuckTop } from "./explore.ts";
-import { paneTranscript, readScreen, sendVerified } from "./panes.ts";
+import { omoPane, omoSession, paneTranscript, readScreen, sendVerified } from "./panes.ts";
 import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { leadAlert } from "./autoturn.ts";
@@ -185,7 +185,7 @@ const leadDueFile = (stateDir: string): string => join(stateDir, "handover", "le
 // (HANDOVER_REFUSED); the owner hears of a move that happened.
 const rolloverDue = async (deps: FlowDeps, hooks: RolloverHooks, who: Who, key: string, pane: string, model: string, seen: RolloverDue | undefined, stuck: Signals["stuck"], save: (due: RolloverDue) => Promise<void>): Promise<SweepAct[]> => {
   const h = deps.config.handover;
-  if (deps.config.backend !== "aoe") return [];
+  if (!omoSession(deps.config)) return [];
   const auto = (who === "lane" ? h.autoRolloverLanes : h.autoRolloverLead) ? hooks.auto : undefined;
   const limits = limitsFor(who, h);
   const reasons = async (): Promise<string[]> => {
@@ -291,7 +291,7 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
     return r !== undefined && !taskOpen(r);
   }, leadTranscript: async () => {
     const pane = deps.config.leadPane;
-    if (deps.config.backend !== "aoe" || !pane) return undefined;
+    if (!pane || !omoPane(deps.config, pane)) return undefined;
     const path = await paneTranscript(deps.run, deps.config.sessionsDir, pane);
     return path ? readFileSync(path, "utf8") : undefined;
   }, ...given };

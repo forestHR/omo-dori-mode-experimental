@@ -4,7 +4,7 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { aoeSessions, captureTmux, closeAoeSession, inputLine, laneEnv, openAoeSession, sessionFor } from "./aoe.ts";
+import { captureTmux, closeAoeSession, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, sessionFor } from "./aoe.ts";
 import { strayTasks, taskRecords } from "./background.ts";
 import { type HandoverWatcher } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
@@ -14,7 +14,8 @@ import { leadMovedText, noteLaneTell } from "./lane-tells.ts";
 import { compactionStuckOn } from "./lane-handover.ts";
 import { awaitPrompt } from "./launch.ts";
 import { type Question, QuestionStore } from "./messenger/discord-cards.ts";
-import { sendVerified } from "./panes.ts";
+import { isHerdrPane } from "./herdr.ts";
+import { omoSession, sendVerified } from "./panes.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso } from "./run.ts";
 import { descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
@@ -737,7 +738,7 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
     if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lead", at, key: "lead", from: config.leadPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why] });
     return { code: 2 };
   };
-  if (config.backend !== "aoe") return refuse("dori handover needs backend aoe");
+  if (!omoSession(config)) return refuse("dori handover needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
   if (!config.leadPane) return refuse("leadPane is not set");
   if (deps.envLeadPane) return refuse(`DORI_LEAD_PANE=${deps.envLeadPane} is set in the environment and overrides leadPane in ${deps.configPath}, so lanes would keep reporting there; remove it (also from any wrapper script) and keep the pane in the config file`);
   if (opts.note && !existsSync(opts.note)) return refuse(`note file not found: ${opts.note}`);
@@ -747,8 +748,8 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
   const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLead, key: "handover.autoRolloverLead" }, "lead", config.leadPane, readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox, deps.ownerIds ?? []));
   if (unapproved) return refuse(`the lead moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
-  const old = sessionFor(await aoeSessions(deps.run), config.leadPane);
-  if (!old) return refuse(`no live aoe session for leadPane ${config.leadPane}`);
+  const old = sessionFor(await liveSessions(deps.run), config.leadPane);
+  if (!old) return refuse(`no live session for leadPane ${config.leadPane}`);
   const bad = config.handover.watchers.find((w) => !w.name || !Array.isArray(w.check) || !w.check.length);
   if (bad) return refuse(`handover.watchers entry ${JSON.stringify(bad)} needs a name and a check argv`);
   const session = await deps.sessionOf(config.leadPane, old.path).catch(() => "");
@@ -795,7 +796,7 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
   const model = opts.model || config.handover.model || config.defaultModel;
   const title = opts.title || config.handover.title || `${old.title.replace(/-\d{8}$/, "")}-${stamp.slice(4, 8)}${stamp.slice(9, 13)}`;
   if (opts.dryRun) {
-    deps.print(`HANDOVER_DRY_RUN would open aoe session "${title}" in ${cwd} (${model}), point leadPane and ${facts.lanes.length} lanes at it, restart ${units.join(",") || "no units"}, check ${facts.monitors.length} monitors (${facts.monitors.map((m) => m.description || m.command || m.path).join(", ") || "none"}), ${facts.watchers.length} watchers (${facts.watchers.map((w) => w.name).join(", ") || "none"}) and two probes within ${opts.verifyMin ?? config.handover.verifyMin} min, then ${opts.keepOld ? "keep" : "close"} ${config.leadPane}`);
+    deps.print(`HANDOVER_DRY_RUN would open ${config.backend} session "${title}" in ${cwd} (${model}), point leadPane and ${facts.lanes.length} lanes at it, restart ${units.join(",") || "no units"}, check ${facts.monitors.length} monitors (${facts.monitors.map((m) => m.description || m.command || m.path).join(", ") || "none"}), ${facts.watchers.length} watchers (${facts.watchers.map((w) => w.name).join(", ") || "none"}) and two probes within ${opts.verifyMin ?? config.handover.verifyMin} min, then ${opts.keepOld ? "keep" : "close"} ${config.leadPane}`);
     return { code: 0, note };
   }
   const lockFile = join(dir, "lock");
@@ -843,7 +844,9 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
   let pane: string;
   try {
     // the lead is no lane: it never starts with launchEnv, even when the handover runs from a lane's environment
-    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", model, env: laneEnv(config.launchEnv, true) });
+    // the new lead opens in this Dori's backend: a herdr Dori's next to the old herdr lead (its workspace), an aoe lead moves to herdr once the config says so
+    const workspace = config.backend === "herdr" && isHerdrPane(facts.from.pane) ? sessionFor(await liveSessions(deps.run), facts.from.pane)?.profile : undefined;
+    pane = await openAoeSession(deps.run, deps.clock, { title, cwd: facts.cwd, tool: config.agentCommand[0] ?? "omo", model, env: laneEnv(config.launchEnv, true), backend: config.backend, ...(workspace ? { workspace } : {}) });
     mark("open", true);
   } catch (e) {
     mark("open", false);
@@ -863,7 +866,7 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
     emit(`HANDOVER_FAIL the first message did not register in ${pane}; nothing moved, ${config.leadPane} stays the lead`);
     return { code: 3, note, to: pane };
   }
-  const to: Target = { pane, aoeId: sessionFor(await aoeSessions(deps.run), pane)?.id ?? "", session: "" };
+  const to: Target = { pane, aoeId: sessionFor(await liveSessions(deps.run), pane)?.id ?? "", session: "" };
   emit(`HANDOVER_STARTED ${config.leadPane} -> ${pane}`);
   const restartAll = async (): Promise<string[]> => {
     const failed: string[] = [];
@@ -928,7 +931,7 @@ const moveLead = async (deps: HandoverDeps, opts: HandoverOptions, facts: Handov
   emit(`HANDOVER_DONE ${config.leadPane} -> ${pane}; closing ${config.leadPane}`);
   record("done", []);
   const closed = await closeAoeSession(deps.run, config.leadPane);
-  const ok = closed.includes("stopped and trashed");
+  const ok = isClosedLine(closed);
   mark("close", ok);
   emit(ok ? `HANDOVER_CLOSED ${closed}` : `HANDOVER_CLOSE_FAIL ${closed}`);
   await tell(pane, `[LEAD] ${COMMITTED}: the handover is checked and the old session ${ok ? "is closed" : `${config.leadPane} did not close but stays idle`}; you are the lead now. Go on with step 5 of the note.`);
