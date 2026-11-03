@@ -43,13 +43,15 @@ export const herdrShellPid = async (run: Runner, pane: string): Promise<number> 
 
 export class HerdrShellError extends Error {
   readonly code = "HERDR_SHELL_UNSUPPORTED";
-  constructor(readonly pane: string, readonly executable: string, readonly version: string) {
-    super(`HERDR_SHELL_UNSUPPORTED ${pane}: ${executable || "unknown shell"} (${version}); Windows herdr panes need pwsh 7.3+`);
+  constructor(readonly pane: string, readonly executable: string, readonly version: string, need = "Windows herdr panes need pwsh 7.3+") {
+    super(`HERDR_SHELL_UNSUPPORTED ${pane}: ${executable || "unknown shell"} (${version}); ${need}`);
     this.name = "HerdrShellError";
   }
 }
 
-export const requireHerdrPwsh = async (run: Runner, pane: string, platform: NodeJS.Platform = process.platform): Promise<void> => {
+// emptyEnv: variables the launch sets to "". pwsh before 7.5 removes a variable assigned an empty string, which would turn
+// e.g. CUDA_VISIBLE_DEVICES="" (no GPU) into all GPUs, so such a launch needs 7.5+.
+export const requireHerdrPwsh = async (run: Runner, pane: string, platform: NodeJS.Platform = process.platform, emptyEnv: readonly string[] = []): Promise<void> => {
   if (platform !== "win32") return;
   const pid = await herdrShellPid(run, pane);
   const shell = (await procTable(run, platform)).find((process) => process.pid === pid);
@@ -61,6 +63,7 @@ export const requireHerdrPwsh = async (run: Runner, pane: string, platform: Node
   const major = Number(parts?.[1] ?? 0);
   const minor = Number(parts?.[2] ?? 0);
   if (result.code !== 0 || major < 7 || (major === 7 && minor < 3)) throw new HerdrShellError(pane, executable, version || "unknown version");
+  if (emptyEnv.length && major === 7 && minor < 5) throw new HerdrShellError(pane, executable, version, `keeping the empty value of ${emptyEnv.join(", ")} needs pwsh 7.5+ (older pwsh removes the variable); update pwsh or leave the value out of launchEnv`);
 };
 
 // The pane's agent: the foreground process herdr names (an agent started with pane run is the shell's foreground job), else
@@ -118,7 +121,7 @@ export const openHerdrSession = async (run: Runner, clock: Clock, opts: { readon
   const tab = made.root_pane.tab_id ?? made.tab?.tab_id ?? made.tab_id;
   // a fresh shell may drop what is typed before its prompt is drawn
   for (let i = 0; i < 20 && !(await herdrRead(run, pane)).trim(); i++) await clock.sleep(250);
-  await requireHerdrPwsh(run, pane);
+  await requireHerdrPwsh(run, pane, process.platform, Object.entries(opts.env ?? {}).flatMap(([k, v]) => (v === "" ? [k] : [])));
   const ran = await run(["herdr", "pane", "run", pane, agentLine(opts.argv, opts.env)]);
   if (ran.code !== 0) throw new Error(`herdr pane run failed in ${pane}: ${ran.err || ran.out}`);
   return { pane, ...(tab ? { tab } : {}) };
