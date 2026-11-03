@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { run } from "../src/run.ts";
 import { withState } from "./fakes.ts";
+import { DISCORD_FORM_SLACK, DISCORD_MESSAGE_MAX, type DiscordFile, discordMessageProblem } from "../src/messenger/upload-files.ts";
 
 test("Discord CLI enables typing by default, skips it on request, and leaves edits alone", async () => {
   const state = withState();
@@ -406,7 +407,7 @@ test("send --file refuses a missing, empty, too big or non-regular file, more th
       ["SEND_FILE_REFUSED", ["slack", "--to", "C1", ...Array.from({ length: 11 }, () => ["--file", ok]).flat()]],
       ["SEND_FILE_REFUSED", ["slack", "--to", "C1", "--file", ""]],
       ["SEND_FILE_REFUSED", ["slack", "--to", "C1", "--file", ok, "--again"]],
-      ["SEND_FILE_REFUSED", ["discord", "--to", "channel", "--file", ok, "--text", "x"]],
+      ["SEND_FILE_REFUSED", ["telegram", "--to", "1", "--file", ok, "--text", "x"]],
       ["SEND_FILE_REFUSED", ["slack", "--to", "C1", "--edit", "1.2", "--file", ok, "--text", "x"]],
     ];
     const got = [];
@@ -419,6 +420,139 @@ test("send --file refuses a missing, empty, too big or non-regular file, more th
     expect({ got, unsafe: unsafe.code !== 0 && !unsafe.out.includes("SENT"), calls }).toEqual({ got: cases.map(([line]) => ({ code: 2, line })), unsafe: true, calls: [] });
   } finally {
     server.stop(true);
+    state.done();
+  }
+});
+
+// 2026-11-03: GongDori could not put a drawing into the owner's thread (send --file was Slack only) and called the Discord
+// API with the bot token by hand (#dori-pair 1567110863117226090). Discord takes the text and up to 10 files as one
+// multipart message: payload_json plus files[n], each named in payload_json's attachments.
+const fileCli = async (dir: string, args: readonly string[]) => {
+  const file = join(dir, "http.json");
+  const r = await run(["env", `DORI_CONFIG=${join(dir, "missing.json")}`, `DORI_STATE_DIR=${dir}`, `DORI_ENV_FILE=${join(dir, "missing.env")}`, "DORI_DISCORD_TOKEN=fake", `DORI_TEST_HTTP=${file}`,
+    "bun", "--preload", join(import.meta.dir, "discord-cli-fake.ts"), join(import.meta.dir, "../src/cli.ts"), ...args]);
+  const calls = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")).calls as { method: string; path: string; body: Record<string, unknown>; files?: unknown[] }[]) : [];
+  return { code: r.code, out: r.out, err: r.err, posts: calls.filter((c) => c.method === "POST" && c.path.endsWith("/messages")) };
+};
+
+test("send discord --file posts the text and every file as one multipart message, with --reply; a file alone needs no text", async () => {
+  const state = withState();
+  try {
+    const png = join(state.dir, "drawing.png");
+    const pdf = join(state.dir, "plan.pdf");
+    writeFileSync(png, "png bytes");
+    writeFileSync(pdf, "pdf bytes");
+    const r = await fileCli(state.dir, ["send", "discord", "--to", "channel", "--thread", "thread", "--no-typing", "--text", "도면이야", "--reply", "1561976021270396959", "--file", png, "--file", pdf]);
+    const bare = await fileCli(state.dir, ["send", "discord", "--to", "channel", "--no-typing", "--file", png]);
+    expect({ code: r.code, out: r.out, bare: bare.out, posts: r.posts.concat(bare.posts.slice(1)) }).toEqual({
+      code: 0, out: "SENT 900", bare: "SENT 900", posts: [
+        {
+          method: "POST", path: "/channels/thread/messages",
+          body: { content: "도면이야", allowed_mentions: { parse: [] }, message_reference: { message_id: "1561976021270396959", fail_if_not_exists: false }, attachments: [{ id: 0, filename: "drawing.png" }, { id: 1, filename: "plan.pdf" }] },
+          files: [{ field: "files[0]", name: "drawing.png", type: "image/png", text: "png bytes" }, { field: "files[1]", name: "plan.pdf", type: "application/pdf", text: "pdf bytes" }],
+        },
+        { method: "POST", path: "/channels/channel/messages", body: { allowed_mentions: { parse: [] }, attachments: [{ id: 0, filename: "drawing.png" }] }, files: [{ field: "files[0]", name: "drawing.png", type: "image/png", text: "png bytes" }] },
+      ],
+    });
+  } finally {
+    state.done();
+  }
+});
+
+test("thread reply --file posts the files in the thread with the text, or alone", async () => {
+  const state = withState();
+  try {
+    const png = join(state.dir, "drawing.png");
+    writeFileSync(png, "png bytes");
+    const r = await fileCli(state.dir, ["thread", "reply", "discord:300000000000000003", "그림 올렸어", "--file", png]);
+    const bare = await fileCli(state.dir, ["thread", "reply", "discord:300000000000000003", "--file", png]);
+    const shape = (p: { path: string; body: Record<string, unknown>; files?: unknown[] } | undefined) => ({ path: p?.path, content: p?.body.content, attachments: p?.body.attachments, files: p?.files?.length });
+    expect({ outs: [r.code, r.out, bare.code, bare.out], posts: bare.posts.map(shape) }).toEqual({
+      outs: [0, "POSTED 900", 0, "POSTED 900"], posts: [
+        { path: "/channels/300000000000000003/messages", content: "그림 올렸어", attachments: [{ id: 0, filename: "drawing.png" }], files: 1 },
+        { path: "/channels/300000000000000003/messages", content: undefined, attachments: [{ id: 0, filename: "drawing.png" }], files: 1 },
+      ],
+    });
+  } finally {
+    state.done();
+  }
+});
+
+test("the same text and files again is a repeat (SEND_DUPLICATE); other bytes under the same name, or no file, post", async () => {
+  const state = withState();
+  try {
+    const png = join(state.dir, "drawing.png");
+    writeFileSync(png, "png bytes");
+    const args = ["send", "discord", "--to", "channel", "--no-typing", "--text", "도면이야", "--file", png];
+    const outs = [(await fileCli(state.dir, args)).out, (await fileCli(state.dir, args)).out.split(":")[0]];
+    outs.push((await fileCli(state.dir, ["thread", "reply", "discord:300000000000000003", "도면이야", "--file", png])).out);
+    outs.push((await fileCli(state.dir, ["thread", "reply", "discord:300000000000000003", "도면이야", "--file", png])).out.split(":")[0]);
+    writeFileSync(png, "new png bytes");
+    outs.push((await fileCli(state.dir, args)).out);
+    const last = await fileCli(state.dir, args.slice(0, -2));
+    expect({ outs: [...outs, last.out], posts: last.posts.length }).toEqual({ outs: ["SENT 900", "SEND_DUPLICATE 900", "POSTED 900", "SEND_DUPLICATE 900", "SENT 900", "SENT 900"], posts: 4 });
+  } finally {
+    state.done();
+  }
+});
+
+test("discord --file refuses a missing, empty, non-regular or too big file, more than 10 files and --edit before any request", async () => {
+  const state = withState();
+  try {
+    const ok = join(state.dir, "ok.png");
+    writeFileSync(ok, "x");
+    writeFileSync(join(state.dir, "empty.png"), "");
+    mkdirSync(join(state.dir, "folder"));
+    writeFileSync(join(state.dir, "big.mp4"), "");
+    truncateSync(join(state.dir, "big.mp4"), 20 * 1024 ** 2 + 1); // sparse: one byte over Discord's 20 MiB a file
+    // each under 20 MiB, together over the 25 MiB a message request may be (review of #308)
+    for (const half of ["half1.mp4", "half2.mp4"]) {
+      writeFileSync(join(state.dir, half), "");
+      truncateSync(join(state.dir, half), 13 * 1024 ** 2);
+    }
+    const send = ["send", "discord", "--to", "channel", "--no-typing", "--text", "x"];
+    const cases: [string, string[]][] = [
+      ["SEND_FILE_MISSING", [...send, "--file", ok, "--file", join(state.dir, "nope.png")]],
+      ["SEND_FILE_REFUSED", [...send, "--file", join(state.dir, "empty.png")]],
+      ["SEND_FILE_REFUSED", [...send, "--file", join(state.dir, "folder")]],
+      ["SEND_FILE_TOO_BIG", [...send, "--file", join(state.dir, "big.mp4")]],
+      ["SEND_FILE_REFUSED", [...send, ...Array.from({ length: 11 }, () => ["--file", ok]).flat()]],
+      ["SEND_FILE_REFUSED", [...send, "--edit", "1", "--file", ok]],
+      ["SEND_FILE_MISSING", ["thread", "reply", "discord:300000000000000003", "x", "--file", join(state.dir, "nope.png")]],
+      ["SEND_FILE_TOO_BIG", ["thread", "done", "discord:300000000000000003", "x", "--file", join(state.dir, "big.mp4")]],
+      ["SEND_FILE_TOO_BIG", [...send, "--file", join(state.dir, "half1.mp4"), "--file", join(state.dir, "half2.mp4")]],
+      ["SEND_FILE_TOO_BIG", ["thread", "reply", "discord:300000000000000003", "x", "--file", join(state.dir, "half1.mp4"), "--file", join(state.dir, "half2.mp4")]],
+    ];
+    const got = [];
+    for (const [, args] of cases) {
+      const r = await fileCli(state.dir, args);
+      got.push({ code: r.code, line: r.err.split(" ")[0], posts: r.posts.length });
+    }
+    expect({ got, requests: existsSync(join(state.dir, "http.json")) }).toEqual({ got: cases.map(([line]) => ({ code: 2, line, posts: 0 })), requests: false });
+  } finally {
+    state.done();
+  }
+});
+
+test("a Discord message with files may be 25 MiB with its text and form slack, and not one byte more", () => {
+  const file = (n: number): DiscordFile => ({ filename: "a.bin", type: "application/octet-stream", bytes: new Uint8Array(n), sha256: "" });
+  const room = DISCORD_MESSAGE_MAX - DISCORD_FORM_SLACK - Buffer.byteLength("그림");
+  expect({
+    fits: discordMessageProblem([file(room - 10), file(10)], "그림"),
+    over: discordMessageProblem([file(room - 10), file(11)], "그림")?.split(" ")[0],
+    textOnly: discordMessageProblem([], "x".repeat(DISCORD_MESSAGE_MAX)),
+  }).toEqual({ fits: undefined, over: "SEND_FILE_TOO_BIG", textOnly: undefined });
+});
+
+test("존댓말 with a file for a 반말 owner is refused before anything is sent (SPEECH_REFUSED), in send and thread reply", async () => {
+  const state = withState();
+  try {
+    const png = join(state.dir, "drawing.png");
+    writeFileSync(png, "png bytes");
+    const send = await speechCli(state.dir, ["send", "discord", "--to", "300000000000000003", "--no-typing", "--text", POLITE, "--file", png]);
+    const reply = await speechCli(state.dir, ["thread", "reply", "discord:300000000000000003", POLITE, "--file", png]);
+    expect([send, reply]).toMatchObject([{ code: 2, refused: true, posted: [] }, { code: 2, refused: true, posted: [] }]);
+  } finally {
     state.done();
   }
 });

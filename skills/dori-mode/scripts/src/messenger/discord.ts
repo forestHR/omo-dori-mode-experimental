@@ -1,6 +1,7 @@
 import type { Clock } from "../run.ts";
 import { DEFAULT_RETRY, guardText, type Http, MessengerError, type RetryPolicy, withBackoff } from "./http.ts";
 import { nameThreadLinks } from "./thread-links.ts";
+import type { DiscordFile } from "./upload-files.ts";
 
 const retryAfter = (body: string): number | undefined => {
   try {
@@ -32,8 +33,10 @@ export class Discord {
     return new Discord(this.http, this.clock, this.botToken, this.base, { ...this.policy, attempts: 1 });
   }
 
-  async call<T = unknown>(method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE", path: string, body?: Record<string, unknown>): Promise<T> {
-    const res = await withBackoff(this.http, this.clock, { method, url: `${this.base}${path}`, headers: { Authorization: `Bot ${this.botToken}`, "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) }, this.policy, retryAfter);
+  // a FormData body is multipart: fetch writes its Content-Type with the boundary
+  async call<T = unknown>(method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE", path: string, body?: Record<string, unknown> | FormData): Promise<T> {
+    const form = body instanceof FormData;
+    const res = await withBackoff(this.http, this.clock, { method, url: `${this.base}${path}`, headers: { Authorization: `Bot ${this.botToken}`, ...(form ? {} : { "Content-Type": "application/json" }) }, ...(body ? { body: form ? body : JSON.stringify(body) } : {}) }, this.policy, retryAfter);
     if (res.status >= 300) {
       const header = Number(res.headers["retry-after"]);
       const wait = res.status === 429 ? (retryAfter(res.body) ?? (Number.isFinite(header) && header > 0 ? header : undefined)) : undefined;
@@ -43,7 +46,8 @@ export class Discord {
   }
 
   // reply: the id of a message in the same channel this one answers (shown as a Discord reply; no ping to its author)
-  async send(channelId: string, content: string, typing = false, ping?: string, reply?: string): Promise<string> {
+  // files: attachments of this one message (payload_json + files[n]); with files the text may be empty
+  async send(channelId: string, content: string, typing = false, ping?: string, reply?: string, files: readonly DiscordFile[] = []): Promise<string> {
     guardText(content);
     if (ping !== undefined && (ping.length === 0 || /[^0-9]/.test(ping))) throw new MessengerError("--ping takes a digits-only user id", 400);
     if (ping !== undefined && !content.includes(`<@${ping}>`)) content = `<@${ping}> ${content}`;
@@ -53,7 +57,12 @@ export class Discord {
         console.error(`DISCORD_TYPING_FAIL ${e instanceof Error ? e.message : String(e)}`);
       });
     }
-    return (await this.call<{ id: string }>("POST", `/channels/${channelId}/messages`, { content: guardText(content), allowed_mentions: { parse: [], ...(ping !== undefined ? { users: [ping] } : {}) }, ...(reply !== undefined ? { message_reference: { message_id: reply, fail_if_not_exists: false } } : {}) })).id;
+    const payload = { ...(content || !files.length ? { content: guardText(content) } : {}), allowed_mentions: { parse: [], ...(ping !== undefined ? { users: [ping] } : {}) }, ...(reply !== undefined ? { message_reference: { message_id: reply, fail_if_not_exists: false } } : {}) };
+    if (!files.length) return (await this.call<{ id: string }>("POST", `/channels/${channelId}/messages`, payload)).id;
+    const form = new FormData();
+    form.append("payload_json", JSON.stringify({ ...payload, attachments: files.map((f, id) => ({ id, filename: f.filename })) }));
+    for (const [i, f] of files.entries()) form.append(`files[${i}]`, new Blob([f.bytes], { type: f.type }), f.filename);
+    return (await this.call<{ id: string }>("POST", `/channels/${channelId}/messages`, form)).id;
   }
 
   async edit(channelId: string, messageId: string, content: string): Promise<void> {

@@ -63,7 +63,7 @@ import { computeScorecard, dayWindow, formatScorecard, saveScorecard, ScorecardE
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { clearEyes, Slack, slackRowIds, slackUnreact } from "./messenger/slack.ts";
 import type { UploadFile } from "./messenger/slack.ts";
-import { readUploads, UploadRefused } from "./messenger/upload-files.ts";
+import { type DiscordFile, discordMessageProblem, filesKey, readDiscordFiles, readUploads, UploadRefused } from "./messenger/upload-files.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -343,12 +343,16 @@ const USAGE = `dori <command> [options]
                                        be undone; loop is what dori-lanes runs every stateGit.everyMin minutes
   send <slack|telegram|discord> --to TARGET --text TEXT | --text-file FILE [--thread ID] [--edit ID] [--status working|done] [--no-typing] [--ping USER_ID] [--reply ID] [--again]
   send slack --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread TS]
+  send discord --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread ID] [--reply ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN);
                                        --file (slack, up to 10, 1 GB each) uploads the files and shares them as one message
                                        with the text, in the thread with --thread (SENT <file ids>); a missing, empty or too
                                        big file is refused before anything is sent (SEND_FILE_MISSING|REFUSED|TOO_BIG, exit 2);
                                        shared once per call, never retried or repeat-checked: a failure exits non-zero;
                                        the watcher's eyes stay on (a text answer takes them off)
+                                       --file (discord, up to 10, 20 MiB each, 25 MiB a message; also thread reply|wait|done) posts the text
+                                       and the files as one message (SENT <id>; same refusals before anything is sent); a
+                                       repeat needs the same files too (sha256), --again sends it anyway
                                        --text-file posts the file's text (real line breaks) the same way as --text. A text
                                        with a literal \n and no real line break outside code is refused before anything is
                                        sent (SEND_LITERAL_NEWLINE, exit 2; also thread reply|wait|done|open --first, ask,
@@ -457,7 +461,7 @@ const USAGE = `dori <command> [options]
   thread list                          print mapped thread ids, sessions and titles
   thread set discord:<id> working|waiting|done|standing|unstanding [--open-card]
                                        queue its status; done archives it and removes its mapping
-  thread <reply|wait|done> discord:<id> <text> | --text-file FILE
+  thread <reply|wait|done> discord:<id> <text> | --text-file FILE [--file PATH ...]
                                        post in a work thread and set its status (working, waiting, done); done archives it
                                        (Discord env: DORI_DISCORD_TOKEN, DORI_DISCORD_GUILD, DORI_DISCORD_CHANNEL, DORI_DISCORD_OWNER)`;
 
@@ -731,6 +735,7 @@ const notePost = async (thread: string, id: string, text: string): Promise<void>
   const here = await currentTmuxSession(run).catch(() => "");
   await recordThreadPost(deps.registry, here, thread, id, text, new Date().toISOString()).catch((e: unknown) => console.error(`THREAD_POST_NOT_RECORDED discord:${thread} ${id}: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`));
 };
+const withFileNames = (text: string, files: readonly DiscordFile[]): string => [text, ...files.map((f) => `[file] ${f.filename}`)].filter(Boolean).join("\n");
 // --posted: a message id or its Discord link
 const postedId = (): string | undefined => {
   const raw = opt("posted")?.trim();
@@ -1696,19 +1701,24 @@ try {
       const edit = opt("edit");
       const filePaths = ((flags.values.file as (string | boolean)[] | undefined) ?? []).map((p) => (typeof p === "string" ? p.trim() : ""));
       if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);
-      if (filePaths.length && platform !== "slack") die(`SEND_FILE_REFUSED --file is only supported for slack, not ${platform}; nothing was sent`, 2);
+      if (filePaths.length && platform !== "slack" && platform !== "discord") die(`SEND_FILE_REFUSED --file is only supported for slack and discord, not ${platform}; nothing was sent`, 2);
       if (filePaths.length && edit) die("SEND_FILE_REFUSED --file is for a new message, not --edit; nothing was sent", 2);
-      if (filePaths.length && flags.values.again) die("SEND_FILE_REFUSED --again is for a text post; a --file send is never checked for repeats; nothing was sent", 2);
+      if (filePaths.length && platform === "slack" && flags.values.again) die("SEND_FILE_REFUSED --again is for a text post; a slack --file send is never checked for repeats; nothing was sent", 2);
       let uploads: UploadFile[] = [];
+      // discord: the files go in the message's own request and their sha256 into its repeat check
+      let discordFiles: DiscordFile[] = [];
       try {
-        uploads = filePaths.length ? readUploads(filePaths) : [];
+        if (filePaths.length && platform === "slack") uploads = readUploads(filePaths);
+        if (filePaths.length && platform === "discord") discordFiles = await readDiscordFiles(filePaths);
       } catch (e) {
         if (!(e instanceof UploadRefused)) throw e;
         die(e.message, 2);
       }
-      // with --file the text is optional: it goes out as the files' message (initial_comment)
-      const body = uploads.length && !opt("text") && !opt("text-file") ? "" : postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE (or --file PATH, slack)"), "send");
+      // with --file the text is optional: it goes out as the files' message (Slack initial_comment, Discord content)
+      const body = filePaths.length && !opt("text") && !opt("text-file") ? "" : postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE (or --file PATH, slack or discord)"), "send");
       const text = status === "working" || status === "done" ? progressText(status, body, config.discord) : body;
+      const tooBig = discordMessageProblem(discordFiles, text);
+      if (tooBig) die(tooBig, 2);
       const rawPing = flags.values.ping;
       if (rawPing !== undefined && (typeof rawPing !== "string" || rawPing.length === 0 || /[^0-9]/.test(rawPing))) die("--ping takes a digits-only user id");
       const ping = typeof rawPing === "string" ? rawPing : undefined;
@@ -1720,7 +1730,7 @@ try {
       const token = (name: string) => process.env[name] ?? die(`${name} is not set`);
       // a new message goes out once per place, reply target, ping and text in SEND_DEDUPE_MS (src/send-dedupe.ts)
       const once = async (post: () => Promise<string>) => {
-        const r = await sendOnce(join(config.stateDir, "sent"), sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, text]), post, { again: Boolean(flags.values.again) });
+        const r = await sendOnce(join(config.stateDir, "sent"), sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, text, ...filesKey(discordFiles)]), post, { again: Boolean(flags.values.again) });
         console.log(r.duplicate ? duplicateLine(r) : `SENT ${r.id}`);
         return r;
       };
@@ -1754,8 +1764,8 @@ try {
         await ownerSpeech(body, "send", () => ownerPlace(dc, edit ? to : (thread ?? to)));
         if (edit) await dc.edit(to, edit, text);
         else {
-          const r = await once(() => dc.send(thread ?? to, text, !flags.values["no-typing"], ping, reply));
-          if (!r.duplicate) await notePost(thread ?? to, r.id, body);
+          const r = await once(() => dc.send(thread ?? to, text, !flags.values["no-typing"], ping, reply, discordFiles));
+          if (!r.duplicate) await notePost(thread ?? to, r.id, withFileNames(body, discordFiles));
         }
       } else die(`unknown platform ${platform}`);
       break;
@@ -1988,19 +1998,30 @@ try {
         break;
       }
       if ((verb !== "reply" && verb !== "wait" && verb !== "done") || !ref) die("usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE");
-      onlyOptions(`thread ${verb}`, ["text-file", "force", "lane", "again"], 3);
-      const body = postable(await textOrFile(text?.trim(), "usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE"), `thread ${verb}`);
+      onlyOptions(`thread ${verb}`, ["text-file", "force", "lane", "again", "file"], 3);
+      const filePaths = ((flags.values.file as (string | boolean)[] | undefined) ?? []).map((p) => (typeof p === "string" ? p.trim() : ""));
+      if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);
+      let files: DiscordFile[] = [];
+      try {
+        files = await readDiscordFiles(filePaths);
+      } catch (e) {
+        if (!(e instanceof UploadRefused)) throw e;
+        die(e.message, 2);
+      }
+      const body = files.length && !text?.trim() && !opt("text-file") ? "" : postable(await textOrFile(text?.trim(), "usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE (or --file PATH)"), `thread ${verb}`);
+      const tooBig = discordMessageProblem(files, body);
+      if (tooBig) die(tooBig, 2);
       const dc = discordClient();
       await ownerSpeech(body, `thread ${verb}`, () => ownerPlace(dc, discordThreadId(ref ?? "")));
       // the same key as `dori send discord --to <thread id>`, so the two commands do not post one text twice either
-      const threadOnce = (post: () => Promise<string>) => sendOnce(join(config.stateDir, "sent"), sendKey(["discord", discordThreadId(ref ?? ""), undefined, undefined, body]), post, { again: Boolean(flags.values.again) });
+      const threadOnce = (post: () => Promise<string>) => sendOnce(join(config.stateDir, "sent"), sendKey(["discord", discordThreadId(ref ?? ""), undefined, undefined, body, ...filesKey(files)]), post, { again: Boolean(flags.values.again) });
       if (verb === "done") {
         // the text is posted either way; with users left the thread keeps its mark and stays open
         const thread = `discord:${discordThreadId(ref ?? "")}`;
         const holders = await holdersOf(thread);
         if (holders && !flags.values.force) {
-          const r = await threadOnce(() => postInThread(dc, ref ?? "", body));
-          if (!r.duplicate) await notePost(discordThreadId(ref ?? ""), r.id, body);
+          const r = await threadOnce(() => postInThread(dc, ref ?? "", body, files));
+          if (!r.duplicate) await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
           console.log(`${r.duplicate ? duplicateLine(r) : `POSTED ${r.id}`} THREAD_LEFT_OPEN ${thread}: ${holders}; not marked done (--force marks it done anyway)`);
           break;
         }
@@ -2013,9 +2034,9 @@ try {
         return statuses.request(t, s);
       };
       // a repeat is not posted, but the status still goes through: a done after a reply with the same words still closes
-      const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark));
+      const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark, files));
       if (r.duplicate) await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);
-      else await notePost(discordThreadId(ref ?? ""), r.id, body);
+      else await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
       console.log(`${r.duplicate ? duplicateLine(r) : `POSTED ${r.id}`}${verb === "done" ? " THREAD_DONE" : verb === "wait" ? " THREAD_WAITING" : ""}`);
       break;
     }
