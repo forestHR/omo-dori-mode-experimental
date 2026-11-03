@@ -71,6 +71,9 @@ export type RolloverEntry =
       // a lane run refused while the lane was busy: the options it was given, so the start again after the lane's ready mark
       // (freshness readyResume) moves it the way it was asked
       readonly request?: RolloverRequest;
+      // a lead's waiting request: what the lane was asked to reach a safe point for, and whether the pane took it (freshness
+      // asks again until it does)
+      readonly safePoint?: { readonly why: string; readonly told: boolean };
       // the subscription accounts of the old and new session ("" when the status line did not show one)
       readonly accounts?: { readonly from: string; readonly to: string };
       readonly supplementRounds?: number;

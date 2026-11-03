@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { autoReadyLine, freshnessTick, pidAlive, resumeArgs } from "../src/freshness.ts";
 import { closeDueFrozen, readFrozen } from "../src/frozen.ts";
 import { ackHandover, manifestPath } from "../src/handover.ts";
-import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, type LaneHandoverOptions, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
+import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, type LaneHandoverOptions, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark, waitingRequest } from "../src/lane-handover.ts";
 import { appendRollover, approvalProblem, AUTO_GRANT_MS, mintAutoGrant, takeAutoGrant, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, peerStuckLines, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
 import { stuckTop, stuckView } from "../src/explore.ts";
 import { recordFix } from "../src/same-fix.ts";
@@ -680,7 +680,9 @@ test("a killed run whose old session is already gone keeps the lane on the new o
   expect((await readLane(deps)).pane).toBe(NEW);
   expect(stoppedIds()).toEqual([]);
   expect(running.code).toBe(2);
-  expect(printed.at(-1)).toStartWith("HANDOVER_REFUSED demo: another handover of demo is running (pid 777");
+  // a live run mid-move takes no request: refused the takeover way, with no rollover row of its own (review 320 round 8)
+  expect(printed.at(-1)).toStartWith("HANDOVER_REFUSED demo: another handover is running (pid 777");
+  expect(readRollovers(state.dir).filter((e) => e.kind === "rollover" && e.result === "refused")).toEqual([]);
 });
 
 test("--keep-old leaves the old session open and tells it it is no longer the lane", async () => {
@@ -1548,6 +1550,85 @@ test("two runs that both find the lock held each leave a request of their own: t
   expect(r.code).toBe(2);
   expect(printed.find((l) => l.startsWith("HANDOVER_STEPPED_ASIDE demo: "))).toContain("pid 4242");
   expect(takeovers()).toEqual(["demo.takeover-4243-b.json"]);
+});
+
+const WAITING = { kind: "rollover", who: "lane", at: "2026-10-11T16:20:00.000Z", key: "demo", from: OLD, approvedBy: LEAD_STUCK, signals: {}, steps: [], result: "refused", reasons: ["busy"], blocked: "busy", request: {} } as const;
+const rolloverRows = () => readRollovers(state.dir).filter((e) => e.kind === "rollover");
+
+test("a run that loses the lock to another caller after its checks writes no note and no rollover row: it goes the takeover way and is refused, so the waiting request stays the last (review 320 round 8)", async () => {
+  // Given: two forcing callers restarted in the same second after the holder exited; the other one locks first
+  const base = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  let raced = false;
+  const deps: LaneHandoverDeps = {
+    ...base,
+    reportOwner: async () => "msg-1",
+    procs: async () => {
+      if (!raced) {
+        raced = true;
+        mkdirSync(lanes, { recursive: true });
+        writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:35:01Z" }));
+        live.add(77);
+      }
+      return table;
+    },
+  };
+  appendRollover(state.dir, WAITING);
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  // Then: nothing of this run is left for the winner's new session to read
+  expect(r.code).toBe(2);
+  expect(readdirSync(lanes).filter((n) => /^demo-\d{8}-\d{6}/.test(n))).toEqual([]);
+  expect(rolloverRows()).toHaveLength(1);
+  expect(printed.some((l) => l.startsWith("HANDOVER_REFUSED demo: another handover is running (pid 77"))).toBe(true);
+  expect(opened()).toBe(false);
+  expect(takeovers()).toEqual([]);
+});
+
+test("a forcing run that finds a live run mid-move (its pending journal) logs no rollover row: the waiting request outlives that run dying before it repointed (review 320 round 8)", async () => {
+  // Given
+  const base = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  mkdirSync(lanes, { recursive: true });
+  writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid: 77, at: "2026-10-11T16:30:00Z", from: OLD, to: NEW, note: join(lanes, "demo-20261011-163000.md") }));
+  writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
+  live.add(77);
+  appendRollover(state.dir, WAITING);
+  // When: the forcing run gives up while the move runs, then the moving run dies before it repointed the lane
+  const r = await laneHandover({ ...base, reportOwner: async () => "msg-1" }, "demo", "aoe_lead_x", { approvedBy: LEAD_STUCK, force: true });
+  live.delete(77);
+  // Then
+  expect(r.code).toBe(2);
+  expect(printed.some((l) => l.startsWith("HANDOVER_REFUSED demo: another handover is running (pid 77"))).toBe(true);
+  expect(rolloverRows()).toHaveLength(1);
+  expect(waitingRequest(readRollovers(state.dir), "demo", OLD)).toMatchObject({ approvedBy: LEAD_STUCK, blocked: "busy" });
+  expect(takeovers()).toEqual([]);
+});
+
+test("a safe-point request that did not reach the lane is kept on the waiting request, and freshness asks again once the pane takes text, once (review 320 round 8)", async () => {
+  // Given: the lane's pane refuses the text (a herdr question open) while a long chain runs
+  const base = await setup();
+  let deliver = false;
+  const asks = () => sent(w).filter((t) => t.startsWith("[LEAD] The lead moves demo to a new session"));
+  const deps: LaneHandoverDeps = {
+    ...base,
+    run: async (argv, opts) => (!deliver && argv[0] === "tmux" && argv[1] === "send-keys" && argv.some((a) => a.startsWith("[LEAD] The lead moves demo")) ? { code: 1, out: "", err: "pane refused" } : base.run(argv, opts)),
+  };
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  const row = rolloverRows().at(-1);
+  const asksBefore = asks().length;
+  // When: the pane takes text again; freshness sweeps twice
+  deliver = true;
+  const hooks = { signals: async () => ({}), alive: (pid: number) => live.has(pid), resume: async () => ({ started: false, line: "not now" }) };
+  await deps.registry.patch("demo", { lastReplyAt: deps.clock.now() });
+  await freshnessTick(deps, "/home/test", hooks);
+  await freshnessTick(deps, "/home/test", hooks);
+  // Then
+  expect(r.code).toBe(2);
+  expect(row).toMatchObject({ result: "refused", blocked: "work", safePoint: { told: false } });
+  expect(asksBefore).toBe(0);
+  expect(asks()).toHaveLength(1);
+  expect(readFileSync(deps.config.watchLog, "utf8")).toContain("HANDOVER_SAFE_POINT_ASKED demo");
 });
 
 // omo's input box sits between two ─ borders; the status lines under it can quote "esc to interrupt" (here the cwd and a

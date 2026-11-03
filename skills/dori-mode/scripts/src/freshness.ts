@@ -293,6 +293,16 @@ const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pa
   const stateDir = deps.config.stateDir;
   const asked = waitingRequest(readRollovers(stateDir), key, pane);
   if (!asked) return [];
+  // the safe-point ask the pane did not take (a herdr question open, a pane gone for a moment) is typed again each sweep
+  // until it is, once per request: without it the lane never learns it should mark ready (review 320 round 8)
+  const askFile = join(stateDir, "handover", "lanes", `${key}.safe-point.json`);
+  if (asked.safePoint && !asked.safePoint.told && readJson<{ request?: string }>(askFile)?.request !== asked.at && !handoverRunning(stateDir, "lane", key, hooks.alive ?? pidAlive)) {
+    if (await sendVerified(deps.run, deps.clock, deps.config, pane, safePointText(key, asked.safePoint.why, "lead"))) {
+      mkdirSync(join(stateDir, "handover", "lanes"), { recursive: true });
+      writeFileSync(askFile, `${JSON.stringify({ request: asked.at, at: new Date(deps.clock.now()).toISOString() })}\n`);
+      watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line: `HANDOVER_SAFE_POINT_ASKED ${key} asked: the safe-point request of the handover asked at ${asked.at} reached ${pane} now` });
+    }
+  }
   const claimed = resumeFile(stateDir, key);
   const claim = readJson<{ request?: string; since?: string; approvedBy?: string; result?: string; toldAt?: string; readyAt?: string; at?: string }>(claimed);
   const by = (asked.approvedBy ?? "").trim();
