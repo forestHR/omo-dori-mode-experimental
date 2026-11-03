@@ -69,35 +69,31 @@ test("a text omo took from the box but never put in the transcript stays NOT_SUB
   expect(r.reason).toContain("the text is not in the session's transcript");
 });
 
-// A slash command runs in omo itself: no user message in the transcript (/goal pause writes nothing there at all), only a
-// notice above the box. Shaped after test pane w1:p17 on 2026-11-03, where /thinking low applied but read NOT_SUBMITTED.
-const slashTyped = (above: readonly string[], text: string) => [...above, BORDER, `❯ ${text}`, BORDER, " ~/qa • effort medium"].join("\n");
+// A slash command runs in omo itself: no user message in the transcript (/goal pause writes nothing there at all), and omo
+// rewrites its last status line in place, so a repeated /thinking low changes nothing on screen. Shaped after test pane w1:p17
+// on 2026-11-03, where /thinking low applied but read NOT_SUBMITTED.
+const slashTyped = (above: readonly string[], text: string) => [...above, BORDER, `❯ ${text}`, BORDER, " ~/qa • effort low"].join("\n");
 const slashDone = (above: readonly string[]) => [...above, BORDER, "❯ ", BORDER, " ~/qa • effort low"].join("\n");
 
-test("a slash command omo answered with a notice above the emptied box is SUBMITTED, with no transcript entry", async () => {
-  const above = [" Update Available", ""];
-  const { keys } = keysFor([slashTyped(above, "/thinking low"), slashDone([...above, " Thinking level: low"])]);
+test("a slash command omo took from the box is SUBMITTED with no running turn, no transcript entry and nothing new on screen", async () => {
+  const above = [" Update Available", " Thinking level: low"];
+  const { keys, log } = keysFor([slashTyped(above, "/thinking low"), slashDone(above)]);
   const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/thinking low");
-  expect(r).toEqual({ status: "SUBMITTED", reason: "input box empty and omo shows the command's result: Thinking level: low" });
+  expect(r).toEqual({ status: "SUBMITTED", reason: "input box empty: omo took the slash command (it runs one it knows; one it does not know it sends as a message on the second Enter)" });
+  expect(log.enters).toBe(1);
 });
 
-test("the same notice printed again by a repeated slash command still counts as new", async () => {
-  const above = [" Thinking level: low", ""];
-  const { keys } = keysFor([slashTyped(above, "/thinking low"), slashDone([...above, " Thinking level: low"])]);
-  expect((await submitText(keys, fakeClock(0), "/thinking low")).status).toBe("SUBMITTED");
-});
-
-test("a slash command whose box emptied with nothing new above it stays NOT_SUBMITTED", async () => {
-  const above = [" Thinking level: low", ""];
-  const { keys } = keysFor([slashTyped(above, "/goal pause"), slashDone(above)]);
-  const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/goal pause");
+test("a slash command left in the box (a command omo does not know, startup still running) is NOT_SUBMITTED after 2 Enters", async () => {
+  const { keys, log } = keysFor([slashTyped([" Startup is still in progress"], "/thinking low")]);
+  const r = await submitText(keys, fakeClock(0), "/thinking low");
   expect(r.status).toBe("NOT_SUBMITTED");
-  expect(r.reason).toContain("no new line from omo above the box");
+  expect(r.reason).toStartWith("text still in the input box after 2 Enters: /thinking low");
+  expect(log.enters).toBe(2);
 });
 
-test("a plain text is not confirmed by a new line above the box: it still needs a turn, the Steering queue or the transcript", async () => {
-  const { keys } = keysFor([slashTyped([], "[LEAD] hello"), slashDone([" Thinking level: low"])]);
-  const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "[LEAD] hello");
+test("a text of more than one line that starts with a slash still needs a turn, the Steering queue or the transcript", async () => {
+  const { keys } = keysFor([slashDone([])]);
+  const r = await submitText({ ...keys, delivered: async () => false }, fakeClock(0), "/goal pause\nthen report");
   expect(r.status).toBe("NOT_SUBMITTED");
   expect(r.reason).toContain("the text is not in the session's transcript");
 });

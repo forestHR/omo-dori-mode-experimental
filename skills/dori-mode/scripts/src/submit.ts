@@ -74,29 +74,14 @@ export const steeringQueued = (screen: string, text: string): boolean => {
   });
 };
 
-// A slash command (/thinking low, /goal pause) runs in omo itself: it never becomes a user message of the transcript (/goal
-// pause writes nothing there at all), and omo answers it with a notice above the box ("Thinking level: low", "Error: cannot
-// update goal: no goal exists"). Only one line of text that starts with / and a word counts.
+// A slash command (/thinking low, /goal pause) runs in omo itself and never becomes a user message of the transcript (/goal
+// pause writes nothing there at all), and its notice above the box is no proof either: omo rewrites the last status line in
+// place, so a repeated /thinking low changes nothing on screen. What omo does is empty the box as it dispatches the command:
+// senpi's onSubmit runs every built-in and extension command before the compaction queue and the streaming steer that hold
+// a plain text, a command it does not know goes back into the box, and so does any text during startup (senpi
+// interactive-mode.js, omo 5.1.5x). So for one line of text that starts with / and a word, an emptied box is the evidence
+// (test pane w1:p17 on 2026-11-03: /thinking low applied, yet read NOT_SUBMITTED for want of a transcript message).
 export const isSlashCommand = (text: string): boolean => !text.includes("\n") && /^\/[A-Za-z][\w:-]*(?:\s|$)/.test(text);
-
-const aboveBox = (screen: string): string[] => {
-  const box = inputBox(screen);
-  return screen.split("\n").slice(0, box.top).map((line) => cutAt(line, box.width).trim()).filter(Boolean);
-};
-
-// The last line above the box that after shows more times than before did (so a notice printed again counts): omo's answer
-// to a slash command. undefined when nothing new is there.
-export const newNotice = (before: string, after: string): string | undefined => {
-  const seen = new Map<string, number>();
-  for (const line of aboveBox(before)) seen.set(line, (seen.get(line) ?? 0) + 1);
-  const fresh: string[] = [];
-  for (const line of aboveBox(after)) {
-    const n = seen.get(line) ?? 0;
-    if (n > 0) seen.set(line, n - 1);
-    else fresh.push(line);
-  }
-  return fresh.at(-1);
-};
 
 // What is still unsent in the input box, the ❯ and whitespace folded away; "" when the box is empty
 export const editorText = (screen: string): string =>
@@ -135,9 +120,6 @@ export const submitText = async (keys: PaneKeys, clock: Clock, text: string, tim
   const typed = await keys.type(text);
   if (typed) return failed(typed);
   await clock.sleep(timing.settleMs); // let the agent take the whole text (a long one arrives as a paste) before Enter
-  // a slash command is confirmed by omo's notice: the screen before the Enter is what it is compared with
-  const slash = isSlashCommand(text);
-  const typedScreen = slash ? await keys.read() : "";
   let screen = "";
   let left = "";
   for (let enter = 1; enter <= 2; enter++) {
@@ -151,17 +133,15 @@ export const submitText = async (keys: PaneKeys, clock: Clock, text: string, tim
     if (!left) break;
   }
   if (left) return failed(`text still in the input box after 2 Enters: ${left.slice(0, 60)}; ${await clearOwn(keys, clock, timing, text, emptyBefore)}`);
+  if (isSlashCommand(text)) return { status: "SUBMITTED", reason: "input box empty: omo took the slash command (it runs one it knows; one it does not know it sends as a message on the second Enter)" };
   for (let poll = 0; poll < timing.busyPolls; poll++) {
     if (turnRunning(screen)) return { status: "SUBMITTED", reason: "input box empty and the turn runs" };
     if (steeringQueued(screen, text)) return { status: "SUBMITTED", reason: "input box empty and the text waits in the Steering queue" };
-    const notice = slash ? newNotice(typedScreen, screen) : undefined;
-    if (notice) return { status: "SUBMITTED", reason: `input box empty and omo shows the command's result: ${notice.slice(0, 80)}` };
     if (keys.delivered && (await keys.delivered())) return { status: "SUBMITTED", reason: "input box empty and the session's transcript has the text" };
     await clock.sleep(timing.pollMs);
     screen = await keys.read();
   }
   const within = `within ${(timing.busyPolls * timing.pollMs) / 1000}s`;
-  if (slash) return failed(`input box empty but no running turn ("${BUSY_MARK}") and no new line from omo above the box ${within} (a slash command never reaches the transcript)`);
   return failed(keys.delivered
     ? `input box empty but no running turn ("${BUSY_MARK}") and the text is not in the session's transcript ${within} (omo holds a text typed while the main turn waits on its children; it may arrive when that turn ends)`
     : `input box empty but no running turn ("${BUSY_MARK}") ${within}`);
