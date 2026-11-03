@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { Discord, discordPresence } from "../src/messenger/discord.ts";
 import { type Http, type HttpRequest, type HttpResponse, MessengerError, UnsafeMessageError } from "../src/messenger/http.ts";
 import { Slack } from "../src/messenger/slack.ts";
+import { readUploads } from "../src/messenger/upload-files.ts";
 import { slackPresence } from "../src/messenger/slack-presence.ts";
 import { htmlTable, startThinking, Telegram, THINKING } from "../src/messenger/telegram.ts";
 import { typingWhile } from "../src/messenger/typing.ts";
 import { run as realRun } from "../src/run.ts";
 import { transcribe, TranscriptionError } from "../src/messenger/voice.ts";
-import { fakeClock } from "./fakes.ts";
+import { fakeClock, withState } from "./fakes.ts";
 
 type Script = (req: HttpRequest, n: number) => HttpResponse;
 const fakeHttp = (script: Script) => {
@@ -60,16 +63,40 @@ test("text carrying a $( substitution is refused before any request goes out, on
   expect(seen).toHaveLength(0);
 });
 
-test("a Slack upload asks for an upload URL, sends the bytes there, then shares the file into the thread", async () => {
+test("a Slack upload asks for an upload URL per file, sends the bytes there, then shares all files as one message into the thread", async () => {
+  let slots = 0;
   const { http, seen } = fakeHttp((req) => {
-    if (req.url.endsWith("files.getUploadURLExternal")) return ok({ ok: true, upload_url: "https://files.example/up/1", file_id: "F1" });
+    if (req.url.endsWith("files.getUploadURLExternal")) return ok({ ok: true, upload_url: `https://files.example/up/${++slots}`, file_id: `F${slots}` });
     if (req.url.startsWith("https://files.example")) return { status: 200, headers: {}, body: "OK" };
     return ok({ ok: true });
   });
-  const id = await new Slack(http, sleeps().clock, { token: "t" }).upload("C1", "report.png", new Uint8Array([1, 2, 3]), "5.6");
-  expect(id).toBe("F1");
-  expect(seen.map((r) => r.url.split("/").pop())).toEqual(["files.getUploadURLExternal", "1", "files.completeUploadExternal"]);
-  expect(JSON.parse(String(seen[2]?.body))).toMatchObject({ channel_id: "C1", thread_ts: "5.6" });
+  const file = (filename: string, bytes: number[]) => ({ filename, length: bytes.length, read: async () => new Uint8Array(bytes) });
+  const files = [file("report.png", [1, 2, 3]), file("deck.pdf", [4])];
+  const r = await new Slack(http, sleeps().clock, { token: "t" }).upload("C1", files, "5.6", "the deck");
+  expect(r).toEqual(["F1", "F2"]);
+  expect(seen.map((r) => r.url.split("/").pop())).toEqual(["files.getUploadURLExternal", "1", "files.getUploadURLExternal", "2", "files.completeUploadExternal"]);
+  expect(JSON.parse(String(seen[2]?.body))).toEqual({ filename: "deck.pdf", length: 1 });
+  expect(JSON.parse(String(seen[4]?.body))).toEqual({ files: [{ id: "F1", title: "report.png" }, { id: "F2", title: "deck.pdf" }], channel_id: "C1", thread_ts: "5.6", initial_comment: "the deck" });
+});
+
+test("a file changed in size after it was checked stops the upload before anything is shared", async () => {
+  const state = withState();
+  try {
+    const p = join(state.dir, "deck.pdf");
+    writeFileSync(p, "aaaa");
+    const [u] = readUploads([p]);
+    writeFileSync(p, "aaaaa");
+    await expect(u?.read() ?? Promise.resolve()).rejects.toThrow("SEND_FILE_CHANGED");
+  } finally {
+    state.done();
+  }
+});
+
+test("a Slack upload whose text carries a $( substitution is refused before any file goes out", async () => {
+  const { http, seen } = fakeHttp(() => ok({ ok: true }));
+  const file = { filename: "a.pdf", length: 1, read: async () => new Uint8Array([1]) };
+  await expect(new Slack(http, sleeps().clock, { token: "t" }).upload("C1", [file], undefined, "deck $(whoami)")).rejects.toBeInstanceOf(UnsafeMessageError);
+  expect(seen).toHaveLength(0);
 });
 
 test("a Telegram reply starts as Thinking…, streams drafts no faster than the interval, then persists as a real message", async () => {

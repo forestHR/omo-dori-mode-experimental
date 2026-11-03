@@ -187,6 +187,7 @@ CLI には、Dori に必要なメッセンジャーまわりの機能も入っ�
 | コマンド | やること |
 |---|---|
 | `dori send slack\|telegram\|discord --to T --text X [--thread ID] [--edit ID]` | メッセージの送信と編集。レート制限は待ってから送り直し、`$(` を含む文字列は拒否します |
+| `dori send slack --to C --file PATH [--file PATH ...] [--text X] [--thread TS]` | ファイルを最大 10 個（1 個 1GB まで）アップロードし、文字列と一緒に Slack の 1 メッセージとして共有します。存在しない・空・大きすぎるファイルは送信前に拒否します |
 | `dori presence slack\|discord` | アカウントをオンライン表示のまま保つ。Discord ボットはゲートウェイで、Slack のユーザーアカウントは 1 分ごとに合図を送る Web クライアント型ソケットで保ちます |
 | `dori transcribe <file>` | `hooks.transcribe` のコマンドで音声メッセージを文字にする |
 | `dori can-launch` | もうひとつレーンを開く余裕があるかを確かめる |

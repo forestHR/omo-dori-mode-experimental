@@ -1,11 +1,16 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Clock } from "../run.ts";
-import { guardText, type Http, MessengerError, withBackoff } from "./http.ts";
+import { guardText, type Http, MessengerError, type RetryPolicy, withBackoff } from "./http.ts";
 import { type ThreadLedger, tsAfter } from "./thread-ledger.ts";
 
 export type SlackAuth = { readonly token: string; readonly cookie?: string };
 export type Posted = { readonly channel: string; readonly ts: string };
+// read() gives the bytes only when that file's turn comes, so a send of several big files holds one at a time
+export type UploadFile = { readonly filename: string; readonly length: number; readonly read: () => Promise<Uint8Array<ArrayBuffer>>; readonly title?: string };
+
+// one request, no retry: for a call that may have taken effect even when it answered 5xx
+const ONCE: RetryPolicy = { attempts: 1, baseMs: 0, maxMs: 0 };
 
 export class Slack {
   constructor(
@@ -24,8 +29,8 @@ export class Slack {
     };
   }
 
-  async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const res = await withBackoff(this.http, this.clock, { method: "POST", url: `${this.base}/${method}`, headers: this.headers(true), body: JSON.stringify(params) });
+  async call(method: string, params: Record<string, unknown>, policy?: RetryPolicy): Promise<Record<string, unknown>> {
+    const res = await withBackoff(this.http, this.clock, { method: "POST", url: `${this.base}/${method}`, headers: this.headers(true), body: JSON.stringify(params) }, policy);
     const body = JSON.parse(res.body || "{}") as Record<string, unknown>;
     if (res.status !== 200 || body.ok !== true) throw new MessengerError(`slack ${method}: ${String(body.error ?? res.status)}`, res.status, String(body.error ?? ""));
     if (this.ledger && method === "chat.postMessage" && typeof body.ts === "string") {
@@ -44,12 +49,21 @@ export class Slack {
     await this.call("chat.update", { channel, ts, text: guardText(text) });
   }
 
-  async upload(channel: string, filename: string, bytes: Uint8Array<ArrayBuffer>, threadTs?: string, title?: string): Promise<string> {
-    const slot = await this.call("files.getUploadURLExternal", { filename, length: bytes.byteLength });
-    const put = await withBackoff(this.http, this.clock, { method: "POST", url: String(slot.upload_url), body: bytes });
-    if (put.status !== 200) throw new MessengerError(`slack upload: ${put.status}`, put.status);
-    await this.call("files.completeUploadExternal", { files: [{ id: slot.file_id, title: title ?? filename }], channel_id: channel, ...(threadTs ? { thread_ts: threadTs } : {}) });
-    return String(slot.file_id);
+  // Every file gets its own upload URL and bytes, then one completeUploadExternal shares them all as one message, with
+  // the comment as its text (initial_comment) and in the thread when threadTs is given. The comment is checked before
+  // any request. The share goes out once: completeUploadExternal is never retried (a 5xx may have shared already), so
+  // a failure ends the send as a failure and a person calls it again. Returns the file ids in order.
+  async upload(channel: string, files: readonly UploadFile[], threadTs?: string, comment?: string): Promise<string[]> {
+    const text = comment ? guardText(comment) : undefined;
+    const done: { id: string; title: string }[] = [];
+    for (const f of files) {
+      const slot = await this.call("files.getUploadURLExternal", { filename: f.filename, length: f.length });
+      const put = await withBackoff(this.http, this.clock, { method: "POST", url: String(slot.upload_url), body: await f.read() });
+      if (put.status !== 200) throw new MessengerError(`slack upload ${f.filename}: ${put.status}`, put.status);
+      done.push({ id: String(slot.file_id), title: f.title ?? f.filename });
+    }
+    await this.call("files.completeUploadExternal", { files: done, channel_id: channel, ...(threadTs ? { thread_ts: threadTs } : {}), ...(text ? { initial_comment: text } : {}) }, ONCE);
+    return done.map((f) => f.id);
   }
 
   async setPresence(presence: "auto" | "away"): Promise<void> {

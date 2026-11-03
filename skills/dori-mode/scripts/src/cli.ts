@@ -57,6 +57,8 @@ import { normFix, recordFix } from "./same-fix.ts";
 import { computeScorecard, dayWindow, formatScorecard, saveScorecard, ScorecardError } from "./scorecard.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { clearEyes, Slack, slackUnreact } from "./messenger/slack.ts";
+import type { UploadFile } from "./messenger/slack.ts";
+import { readUploads, UploadRefused } from "./messenger/upload-files.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -318,7 +320,13 @@ const USAGE = `dori <command> [options]
                                        content; restore "yesterday 21:00" (stateGit.timeZone) commits first, so it can
                                        be undone; loop is what dori-lanes runs every stateGit.everyMin minutes
   send <slack|telegram|discord> --to TARGET --text TEXT | --text-file FILE [--thread ID] [--edit ID] [--status working|done] [--no-typing] [--ping USER_ID] [--reply ID] [--again]
+  send slack --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread TS]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN);
+                                       --file (slack, up to 10, 1 GB each) uploads the files and shares them as one message
+                                       with the text, in the thread with --thread (SENT <file ids>); a missing, empty or too
+                                       big file is refused before anything is sent (SEND_FILE_MISSING|REFUSED|TOO_BIG, exit 2);
+                                       shared once per call, never retried or repeat-checked: a failure exits non-zero;
+                                       the watcher's eyes stay on (a text answer takes them off)
                                        --text-file posts the file's text (real line breaks) the same way as --text. A text
                                        with a literal \n and no real line break outside code is refused before anything is
                                        sent (SEND_LITERAL_NEWLINE, exit 2; also thread reply|wait|done|open --first, ask,
@@ -1631,14 +1639,27 @@ try {
     case "send": {
       await quietGuard();
       const platform = key ?? die("send needs slack, telegram or discord");
-      onlyOptions("send", ["to", "text", "text-file", "thread", "edit", "status", "no-typing", "ping", "reply", "again"], 1);
+      onlyOptions("send", ["to", "text", "text-file", "thread", "edit", "status", "no-typing", "ping", "reply", "again", "file"], 1);
       const to = need("to");
       const status = opt("status");
       if (status !== undefined && (platform !== "discord" || (status !== "working" && status !== "done"))) die("--status takes working or done, with discord");
-      const body = postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE"), "send");
-      const text = status === "working" || status === "done" ? progressText(status, body, config.discord) : body;
       const thread = opt("thread");
       const edit = opt("edit");
+      const filePaths = ((flags.values.file as (string | boolean)[] | undefined) ?? []).map((p) => (typeof p === "string" ? p.trim() : ""));
+      if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);
+      if (filePaths.length && platform !== "slack") die(`SEND_FILE_REFUSED --file is only supported for slack, not ${platform}; nothing was sent`, 2);
+      if (filePaths.length && edit) die("SEND_FILE_REFUSED --file is for a new message, not --edit; nothing was sent", 2);
+      if (filePaths.length && flags.values.again) die("SEND_FILE_REFUSED --again is for a text post; a --file send is never checked for repeats; nothing was sent", 2);
+      let uploads: UploadFile[] = [];
+      try {
+        uploads = filePaths.length ? readUploads(filePaths) : [];
+      } catch (e) {
+        if (!(e instanceof UploadRefused)) throw e;
+        die(e.message, 2);
+      }
+      // with --file the text is optional: it goes out as the files' message (initial_comment)
+      const body = uploads.length && !opt("text") && !opt("text-file") ? "" : postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE (or --file PATH, slack)"), "send");
+      const text = status === "working" || status === "done" ? progressText(status, body, config.discord) : body;
       const rawPing = flags.values.ping;
       if (rawPing !== undefined && (typeof rawPing !== "string" || rawPing.length === 0 || /[^0-9]/.test(rawPing))) die("--ping takes a digits-only user id");
       const ping = typeof rawPing === "string" ? rawPing : undefined;
@@ -1659,7 +1680,10 @@ try {
         if (edit) await slack.edit(to, edit, text);
         else {
           let posted: { channel: string; ts: string } | undefined;
-          await once(async () => (posted = await slack.post(to, text, thread)).ts);
+          // files are shared once per call and never by the repeat check: a failure exits non-zero and a person calls again.
+          // The eyes stay: completeUploadExternal names no message ts to tell which messages the share answered.
+          if (uploads.length) console.log(`SENT ${(await slack.upload(to, uploads, thread, text || undefined)).join(",")}`);
+          else await once(async () => (posted = await slack.post(to, text, thread)).ts);
           // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off
           if (posted && process.env.DORI_SLACK_TOKEN?.startsWith("xoxb-")) {
             const files = { inbox: process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"), uneyed: join(config.stateDir, "slack-uneyed.log") };

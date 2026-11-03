@@ -353,7 +353,8 @@ tokens are in `dori.env`, so the monitor can be armed before the owner has insta
   [#9](https://github.com/sisyphuslabs/dori-superagent/issues/9)). A failed reaction never holds the message back:
   `SLACK_REACT_FAIL <channel> <ts> <error>`, or `SLACK_REACT_SKIPPED` once when the app has no `reactions:write`.
 - **Answering.** `dori send slack --to <channel> --text ...`, plus `--thread <reply thread>` unless the line says `-`
-  (a plain DM is answered in the DM). The post is the bot's, with `DORI_SLACK_TOKEN`.
+  (a plain DM is answered in the DM). The post is the bot's, with `DORI_SLACK_TOKEN`. Files (a deck, a PDF, a video)
+  go out the same way with `--file PATH` (repeatable, `--text` becomes their message; the app needs `files:write`).
 - **Eyes off.** Once the answer is out, `dori send slack` takes the watcher's eyes off every earlier addressed message
   it answers: the inbox rows (`scope: "slack"`) in that channel whose `reply_thread` is the answer's `--thread`, or whose
   own ts is that `--thread`; an answer with no `--thread` (a plain DM, or a channel message answered in the channel
