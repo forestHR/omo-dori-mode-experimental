@@ -38,7 +38,7 @@ For native Windows installation, skill registration and `dori serve`, follow the
 - `gh` (the GitHub CLI) for checking merged PRs and closed issues; `npm` for published versions
 - [agent-messenger](https://github.com/agent-messenger/agent-messenger) for the bot itself
 
-macOS gets the full host guard. On Linux, load and disk work, and memory and swap read as unknown.
+macOS gets the full host guard. On Linux, load, memory (MemAvailable in `/proc/meminfo`) and disk work, and swap reads as unknown.
 
 ## Naming your Dori
 
