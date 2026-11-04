@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditHook, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
+import { laneGapSplit, applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditHook, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
 import { loadConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
-import { APPLIED_HEADING, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
+import { APPLIED_HEADING, appliesUnder, appliesWhy, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
 import type { Runner } from "../src/run.ts";
 import { DirectiveMissingError, eightSteps, launchLane, renderBrief, uiSteps } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -206,7 +206,7 @@ test("directive-audit: gaps of the day go to the watch log and one summary to th
   await deps.registry.write({ ...clean, key: "old", thread: "none", brief: "/nope.md", openedAt: "2026-10-14T00:00:00.000Z" });
   const inbox = await write("inbox.jsonl", "");
   const quiet = await runDirectiveAudit(deps, { since: "2026-10-15T06:00:00.000Z", inbox, owner: "7" });
-  expect(quiet.lines).toEqual(["DIRECTIVE_AUDIT_OK since 2026-10-15T06:00:00.000Z: 1 lanes and the owner's messages read against 38 directives, no gap"]);
+  expect(quiet.lines).toEqual(["DIRECTIVE_AUDIT_OK since 2026-10-15T06:00:00.000Z: 1 lanes and the owner's messages read against 39 directives, no gap"]);
   expect(await Bun.file(deps.config.watchLog).exists()).toBe(false);
   expect(sent(world)).toEqual([]);
   // a lane whose brief lacks a directive and has no thread, and a standing directive of the owner nobody put in the ledger
@@ -448,6 +448,11 @@ test("directives check: a reviewer of another family reads each new prompt again
   const none = await checkMeaning(deps, { ...ledger, entries: [{ ...skill, prompt: "다음부터는 스킬을 반드시 확인한다." }] });
   expect(none.ok).toBe(false);
   expect(none.lines[0]).toStartWith("DIRECTIVES_MEANING_FAILED skill-check");
+  // dori-superagent #71 (https://github.com/sisyphuslabs/dori-superagent/issues/71): the reply is kept in a 0600 file the line names
+  const kept = /no VERDICT line; reviewer stdout kept in (\S+\.txt)/.exec(none.lines[0] ?? "")?.[1] ?? "";
+  expect(kept.startsWith(`${deps.config.stateDir}/reviewer-output/`)).toBe(true);
+  expect(statSync(kept).mode & 0o777).toBe(0o600);
+  expect(readFileSync(kept, "utf8")).toBe("I think it is fine");
 });
 
 test("the blocks the ledger names are the ones launch inserts", async () => {
@@ -600,6 +605,126 @@ test("an owner message carries the directives its words call, the host's own fir
   expect(thread.slice(0, 2)).toEqual(["card-docs", "request-thread"]);
   expect(thread).toEqual(expect.arrayContaining(["docs-same-pr", "pair-route", "lane-thread"]));
   expect(thread.filter((id) => ["eight-steps", "four-fields", "ui-steps"].includes(id))).toEqual([]);
+});
+
+// owner Q480: every-lane entries narrowed for briefs. The lead's surfaces must not change: a keyword in an owner message
+// doubled his rows' hints and pushed out what his words called (replay 2026-11-04: 26 of 2,060 rows).
+test("a briefOnly entry reaches a brief only when its scope hits, and the lead's surfaces read it as an every-lane entry", async () => {
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
+  const ctx = (text: string) => scopeContext(text, ledger, { repo: "some-repo" });
+  const entry = ledger.entries.find((e) => e.id === "pair-route")!;
+  expect(entry.scope.briefOnly).toBe(true);
+  expect(appliesWhy(entry, ctx("로그인 화면의 글자를 고친다"))).toBeUndefined();
+  for (const room of ["#dori-pair에 결과를 올린다", "도리페어에 결과를 올린다", "도리 톡방에 올린다"]) for (const id of ["pair-route", "pair-efficient", "pair-owner-relay"]) expect(appliesWhy(ledger.entries.find((e) => e.id === id)!, ctx(room))).toStartWith("keyword ");
+  expect(textDirectives("유돌한테 넘겨", ledger).map(({ e }) => e.id)).not.toContain("pair-route");
+  const thread = textDirectives("로그인 화면의 글자를 고친다", ledger, { all: true });
+  expect(thread.find(({ e }) => e.id === "pair-route")?.why).toBe("all lanes");
+});
+
+test("no scope narrowed for briefs hits the eight-step template by itself: it would be every lane again", async () => {
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
+  const narrowed = ledger.entries.filter((e) => e.scope.briefOnly);
+  expect(narrowed.map((e) => e.id).sort()).toEqual(["new-features-zzangdori", "pair-efficient", "pair-owner-relay", "pair-route"]);
+  const ctx = scopeContext(await eightSteps(), ledger, { repo: "some-repo" });
+  expect(narrowed.filter((e) => appliesWhy(e, ctx)).map((e) => e.id)).toEqual([]);
+});
+
+// owner Q482: launch fixes the every-lane entries and the repo's own; a small model picks among the rest, and the rules decide when it cannot
+const withModel = <T extends { run: (...a: never[]) => unknown }>(deps: T, reply: { code: number; out: string } | readonly { code: number; out: string }[]) => {
+  const asked: string[][] = [];
+  const run = (cmd: string[], opts?: unknown) => {
+    if (cmd[0] !== "omo") return (deps.run as (c: string[], o?: unknown) => unknown)(cmd, opts);
+    asked.push(cmd);
+    const r = "code" in reply ? reply : reply[asked.length - 1]!;
+    return Promise.resolve({ ...r, err: "" });
+  };
+  const config = { ...(deps as unknown as { config: { directives: object } }).config, directives: { ...(deps as unknown as { config: { directives: object } }).config.directives, pickModel: "anthropic-subscription/claude-haiku-5-5" } };
+  return { deps: { ...deps, run, config } as T, asked };
+};
+const pickBrief = fields.replace("로그인 고침", "유돌한테 넘길 일을 정리한다");
+
+test("launch: the model's pick decides the non-fixed entries, every-lane and repo entries stay, the choice is on the lane's record", async () => {
+  const { deps, asked } = withModel(await ledgerDeps(), { code: 0, out: 'x {"picked":[{"id":"transcribe-yoodori","why":"녹음"},{"id":"not-an-id","why":"?"}]}' });
+  const r = await renderBrief(deps, input(await write("pick.md", pickBrief)));
+  expect(asked.length).toBe(3);
+  expect(asked[0]!.join(" ")).not.toContain("ulw");
+  expect(r.draft.directives?.pick?.picked.map((p) => p.id)).toEqual(["transcribe-yoodori"]);
+  const applied = r.draft.directives?.applied ?? [];
+  expect(applied).toEqual(expect.arrayContaining(["transcribe-yoodori", "docs-same-pr", "eight-steps", "options-ledger"]));
+  // the rule would call pair-route for the name in the brief; the model did not
+  expect(applied).not.toContain("pair-route");
+  expect(r.lines.find((l) => l.startsWith("LAUNCH_DIRECTIVE_PICKED"))).toContain("transcribe-yoodori");
+});
+
+test("launch: the three runs are merged; a run that fails adds nothing and the others still count", async () => {
+  const one = (id: string) => ({ code: 0, out: `{"picked":[{"id":"${id}","why":"w"}]}` });
+  const both = withModel(await ledgerDeps(), [one("transcribe-yoodori"), { code: 1, out: "" }, one("deck-context")]);
+  const r = await renderBrief(both.deps, input(await write("merge.md", pickBrief)));
+  expect(r.draft.directives?.pick?.picked.map((p) => p.id).sort()).toEqual(["deck-context", "transcribe-yoodori"]);
+  expect(r.draft.directives?.pick?.runs).toEqual({ asked: 3, answered: 2 });
+  expect(r.draft.directives?.pickFallback).toBeUndefined();
+  expect(r.lines.find((l) => l.startsWith("LAUNCH_DIRECTIVE_PICKED"))).toContain("2 of 3 runs answered");
+});
+
+test("launch: a model that fails, answers without JSON or names nothing leaves the choice to the scope rules, and the record says why", async () => {
+  for (const reply of [{ code: 1, out: "" }, { code: 0, out: "ULTRAWORK MODE ENABLED!" }, { code: 0, out: '{"picked":[]}' }, { code: 0, out: '{"picked":[{"id":"not-an-id"}]}' }]) {
+    const { deps } = withModel(await ledgerDeps(), reply);
+    const r = await renderBrief(deps, input(await write("fall.md", pickBrief)));
+    expect(r.draft.directives?.pick).toBeUndefined();
+    expect(r.draft.directives?.pickFallback).toContain("claude-haiku");
+    expect(r.draft.directives?.applied).toContain("pair-route");
+    expect(r.lines.some((l) => l.startsWith("LAUNCH_DIRECTIVE_PICK_FALLBACK"))).toBe(true);
+  }
+});
+
+test("the model reads the whole brief, and a directive it never saw is decided by its scope rule, so apply still delivers it", async () => {
+  const far = `${fields}\n${"채움 ".repeat(5000)}\n맨 끝 요구`;
+  const { deps, asked } = withModel(await ledgerDeps(), { code: 0, out: '{"picked":[{"id":"transcribe-yoodori","why":"w"}]}' });
+  const r = await renderBrief(deps, input(await write("far.md", far)));
+  expect(asked[0]!.join(" ")).toContain("맨 끝 요구");
+  expect(r.draft.directives?.pick?.evaluated).toContain("pair-route");
+  const ledger = loadLedger(deps.config);
+  const pick = r.draft.directives!.pick!;
+  const ctx = scopeContext(pickBrief, ledger, { repo: "some-repo" });
+  const route = ledger.entries.find((e) => e.id === "pair-route")!;
+  // seen and left out; a later entry with the same scope has not been seen
+  expect(appliesUnder(route, ctx, pick)).toBeUndefined();
+  expect(appliesUnder({ ...route, id: "entered-later" }, ctx, pick)).toStartWith("keyword ");
+  // a brief that cannot go through an argument leaves it to the rules
+  const huge = await renderBrief(deps, input(await write("huge.md", `${fields}\n${"채움 ".repeat(40000)}`)));
+  expect(huge.draft.directives?.pickFallback).toContain("too long");
+});
+
+test("directives apply on a lane with a pick: a directive added after the launch is sent, one the model left out is not, and the pick stays on the record", async () => {
+  const late = { id: "late-rule", name: "늦게 든 지침", by: "owner", basis: "fixture basis line", words: "로그인 일은 늘 두 번 본다", prompt: "로그인 일은 늘 두 번 본다.", date: "2026-10-16", source: "https://discord.com/channels/1/2/9", scope: { keywords: ["로그인"] }, mode: "inject" };
+  const deps = await ledgerDeps({ backend: "aoe", directives: { common: COMMON_LEDGER, local: await write("late.json", JSON.stringify({ ...local, entries: [...local.entries, late] })) } });
+  const ledger = loadLedger(deps.config);
+  const seen = ledger.entries.filter((e) => e.id !== "late-rule").map((e) => e.id);
+  const lane = await laneOf(deps, "pick-apply", await write("pick-apply.md", `${fields}유돌한테 넘긴다\n`));
+  const pick = { model: "m", picked: [{ id: "transcribe-yoodori", why: "w" }], runs: { asked: 3, answered: 3 }, evaluated: seen };
+  await deps.registry.patch("pick-apply", { directives: { applied: [], waived: [], pick } });
+  const r = await applyDirectives(deps, (await deps.registry.read("pick-apply"))!);
+  expect(r.ok).toBe(true);
+  expect(r.added).toEqual(expect.arrayContaining(["late-rule", "transcribe-yoodori", "docs-same-pr"]));
+  expect(r.added).not.toContain("pair-route");
+  expect((await deps.registry.read("pick-apply"))?.directives?.pick).toEqual(pick);
+  expect(lane.key).toBe("pick-apply");
+});
+
+test("directive-audit against a pick: what the model chose and the brief lacks is a gap, what it left out is listed and not counted", async () => {
+  const deps = await ledgerDeps();
+  const ledger = loadLedger(deps.config);
+  const pick = { model: "m", picked: [{ id: "transcribe-yoodori", why: "녹음" }] };
+  const lane = { key: "picked", title: "t", thread: "discord:42", brief: await write("audit-pick.md", pickBrief), done: "x", cwd: "/work/hr35-isaac", openedAt: "2099-01-01T00:00:00.000Z", directives: { applied: [], waived: [], pick } };
+  const blocks = { "eight-steps": await eightSteps(), "ui-steps": await uiSteps() };
+  const r = await laneGapSplit(deps, lane as never, ledger, blocks, { files: [] });
+  const ids = r.gaps.map((g) => g.id);
+  expect(ids).toEqual(expect.arrayContaining(["transcribe-yoodori", "docs-same-pr", "options-ledger"]));
+  expect(ids).not.toContain("pair-route");
+  expect(r.excused.find((x) => x.gap.id === "pair-route")?.line).toStartWith("DIRECTIVE_PICK_SKIPPED picked pair-route:");
+  // a lane launched without a pick is read by the rules as before
+  const { pick: _gone, ...rest } = lane.directives;
+  expect((await laneGapSplit(deps, { ...lane, directives: rest } as never, ledger, blocks, { files: [] })).gaps.map((g) => g.id)).toContain("pair-route");
 });
 
 test("directive-audit: a thread the lead opened without reading the ledger and no lane works in is DIRECTIVE_LEAD; a checked one, a lane's and an older one are not", () => {

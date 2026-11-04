@@ -50,6 +50,8 @@ export const EXCLUDES = [
   "*.log", "*.lock", "*.pid", "*.tmp", "*.swp", "*cache*", "qa/", "qa-*", "trash-*/", "gpu/",
   "# dori review's PR diffs: gh pr diff rebuilds them, and a PR's test fixtures look like tokens (the review .md and receipt .json stay)",
   "**/receipts/reviews/*.diff",
+  "# a reviewer's stdout kept when it gave no verdict (dori-superagent #71): private to this host, masked only for known patterns",
+  "reviewer-output/",
   "# checkouts, worktrees, models, binaries, archives, media",
   "src/", "wt/", "node_modules/", "models/", "whisper.cpp/", "research/",
   "*.zip", "*.tar", "*.tar.*", "*.tgz", "*.gz", "*.7z", "*.bin", "*.gguf", "*.onnx", "*.so", "*.o",

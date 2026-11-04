@@ -34,8 +34,13 @@ BODY_CAP = 25 * 1024 * 1024
 HEADER_CAP = 65536
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
        "te", "trailer", "transfer-encoding", "upgrade"}
-GOOGLE_HOSTS = {"www.googleapis.com", "gmail.googleapis.com", "docs.googleapis.com",
-                "tasks.googleapis.com", "sheets.googleapis.com", "people.googleapis.com"}
+GOOGLE_HOSTS = {"www.googleapis.com", "gmail.googleapis.com", "docs.googleapis.com", "tasks.googleapis.com",
+                "sheets.googleapis.com", "people.googleapis.com", "forms.googleapis.com"}
+# Forms: read and edit one of the owner's own forms. Everything else stays shut: responses are other people's data
+# nothing here needs, and setPublishSettings, watches and forms.create are not form edits.
+FORMS_ROUTE = re.compile(r"v1/forms/([A-Za-z0-9_-]{1,200})(:batchUpdate)?")
+FORMS_EDITS = {"updateFormInfo", "updateSettings", "createItem", "moveItem", "deleteItem", "updateItem"}
+FORM_MIME = "application/vnd.google-apps.form"
 # Contacts are read-only: name-to-address lookup for a recipient, never a contact write or directory listing.
 PEOPLE_READS = re.compile(r"v1/(?:people:(?:searchContacts|batchGet)|otherContacts(?::search)?"
                           r"|people/me/connections|people/[A-Za-z0-9_-]+)")
@@ -554,9 +559,16 @@ async def reply(writer: asyncio.StreamWriter, status: int, body: bytes, headers=
 DRIVE_ROLES = {"reader": "보기", "commenter": "댓글", "writer": "편집", "fileOrganizer": "정리",
               "organizer": "관리", "owner": "소유권"}
 CARD_KIND = {"calendar": "일정 초대", "drive": "Drive 공유", "docs": "문서 공유", "gmail": "메일",
-             "tasks": "할 일", "obsidian": "노트"}
-# A decided card thread's title prefix, in the node's request-thread words (origin_notice.ThreadOutcome).
+             "tasks": "할 일", "obsidian": "노트", "forms": "폼"}
+# A card thread's one leading mark (owner Q474, 2026-11-03): 🔔 a card waits on the owner; decided, ✅ done, ⛔ cancelled,
+# 💤 folded without an answer, ❗ failed. THREAD_STATUSES are the older word prefixes, still read so old names convert.
+THREAD_MARKS = ("✅", "⛔", "💤", "❗")
 THREAD_STATUSES = ("✅ 완료", "⛔ 취소", "⌛ 만료", "❗ 실패")
+WAITING_MARK = "🔔"
+# The kind icons that follow the one mark (✉️ mail, 🔐 a gate card, 📬 a digest); a gate card's kind is 🔐.
+KIND_ICONS = ("🔐", "✉️", "✉", "📬")
+# Every leading mark either side ever wrote (the Dori fork's 🔄 🔔 ⏸️ ✅ 📌 and the old words), so a name keeps exactly one.
+LEADING_MARK = re.compile(r"^(?:(?:✅ 완료|⛔ 취소|⌛ 만료|❗ 실패) · |(?:완료|취소|만료|실패) · |(?:🔄|🔔|⏸|✅|⛔|💤|❗|⌛|📌)\ufe0f?\s*)")
 # An approved write the service answered with a non-2xx status; the code itself stays in the GATE_WRITE log line.
 UPSTREAM_FAILED = "❗ 실행 실패"
 
@@ -698,9 +710,38 @@ def byte_size(size: int) -> str:
 
 
 def thread_status(outcome: str) -> str | None:
-    """The thread prefix for a card outcome line; None for outcomes that leave the thread alone."""
-    return {"✅ 실행됨": "✅ 완료", "✅ 승인됨": "✅ 완료", UPSTREAM_FAILED: "❗ 실패", "⛔ 취소됨": "⛔ 취소", "만료됨": "⌛ 만료",
-            "실행 실패": "❗ 실패"}.get(outcome)
+    """The thread mark for a card outcome line; None for outcomes that leave the thread alone."""
+    return {"✅ 실행됨": "✅", "✅ 승인됨": "✅", UPSTREAM_FAILED: "❗", "⛔ 취소됨": "⛔", "만료됨": "💤",
+            "실행 실패": "❗"}.get(outcome)
+
+
+def grantee(body: bytes) -> str:
+    """Who a sharing body grants to: a Drive permission's address, domain or type, a Calendar ACL rule's scope;
+    "" when it cannot be read."""
+    try:
+        data = json.loads(body or b"{}")
+    except ValueError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+    who = data.get("emailAddress") or data.get("domain") or scope.get("value") or data.get("type") or scope.get("type") or ""
+    return str(who).lower()
+
+
+def bare_thread_name(name: str) -> str:
+    """The name without any leading mark: "✅ ❗ 실패 · 🔐 x" and "🔔 🔐 x" both give "🔐 x"."""
+    while True:
+        rest = LEADING_MARK.sub("", name, count=1)
+        if rest == name:
+            return name
+        name = rest
+
+
+def decided_name(name: str) -> bool:
+    """Whether a thread name says its cards are decided: one of the end marks, or an older word prefix."""
+    return any(name.startswith(prefix + " · ") for prefix in THREAD_STATUSES) or any(
+        name.startswith(mark + " ") for mark in THREAD_MARKS)
 
 
 class Gate:
@@ -1125,6 +1166,13 @@ class Gate:
             raise Refused(found[0])
         return data
 
+    async def form_owned(self, form_id: str) -> None:
+        # A form open to responders stays editable: Drive lists that access (view=published) only when
+        # includePermissionsForView asks for it, so drive_owned does not count it as public. Refused, not a card:
+        # someone else's form, a shared drive's or one anyone can edit is not opened to the Dori at all.
+        if (await self.drive_owned(form_id)).get("mimeType") != FORM_MIME:
+            raise Refused("not-a-form")
+
     def metadata(self, headers: dict, body: bytes, upload: bool) -> dict:
         content_type = headers.get("content-type", "application/json")
         if upload and content_type.lower().startswith("multipart/related"):
@@ -1257,6 +1305,18 @@ class Gate:
                 snapshot = await self.google_json("/docs.googleapis.com/v1/documents/" +
                                                   quote(match[1], safe="") + "?fields=revisionId,title")
             return "docs", "documents.batchUpdate" if match[1] else "documents.create", snapshot
+        if host == "forms.googleapis.com":
+            match = FORMS_ROUTE.fullmatch(route[1:])
+            if method != "POST" or not match or not match[2]:
+                raise Refused("write-not-allowed")
+            edits = data.get("requests")
+            if not isinstance(edits, list) or not all(isinstance(e, dict) and len(e) == 1 and FORMS_EDITS.issuperset(e)
+                                                      for e in edits):
+                raise Refused("forms-request-not-allowed")
+            await self.form_owned(match[1])
+            # The whole form before the edit: a deleted item has no other way back (not a one-call restore).
+            form = await self.google_json("/forms.googleapis.com/v1/forms/" + match[1])
+            return "forms", "forms.batchUpdate", {**form, "title": form.get("info", {}).get("title", "")}
         raise Refused("write-not-allowed")
 
     def record(self, uid, api, op, method, path, query, status, response, proof, snapshot, approved_by=None,
@@ -1277,6 +1337,9 @@ class Gate:
                 if not link and api == "docs" and data.get("documentId"):
                     resource["id"] = data["documentId"]
                     link = "https://docs.google.com/document/d/" + data["documentId"]
+                if api == "forms" and snapshot:
+                    resource.update(id=snapshot.get("formId"), title=snapshot["title"])
+                    link = "https://docs.google.com/forms/d/" + str(snapshot.get("formId")) + "/edit"
                 if link:
                     resource["link"] = link
         restorable = (snapshot is not None and
@@ -1757,8 +1820,9 @@ class Gate:
                 for item in value:
                     destination(item)
 
-        destination(data)
-        destination(snapshot)
+        if api != "forms":  # a form's option values and image uris are not recipients
+            destination(data)
+            destination(snapshot)
         fallback = snapshot or {}
         title = " ".join(str(data.get("title") or data.get("summary") or data.get("name") or
                              fallback.get("title") or fallback.get("summary") or fallback.get("name") or "").splitlines())
@@ -1773,37 +1837,40 @@ class Gate:
             name = " ".join(name.splitlines()) or f"파일 이름을 읽지 못함 · {shared[1][:40]}"
             role = DRIVE_ROLES.get(str({**fallback, **data}.get("role", "")), "")
             title = (f"{name} 공유({role})" if role else f"{name} 공유") if shared[2] == "permissions" else f"{name} 댓글"
-        thread = await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
-        await self.supersede(thread, api, op, path, method, title)
-        # Owner 2026-10-19 00:00 KST: the card shows who, what and the reactions; the reason,
-        # the owner-message link and the expiry stay in the pending record.
-        content = (f"승인 필요 · {CARD_KIND.get(api, api)}\n"
-                   f"받는 사람: {', '.join(sorted(set(destinations)))[:500] or path[:500]}\n"
-                   f"내용: {defang(title[:200])}\n✅ 실행 · ⛔ 취소")
-        channel = thread
-        status, _, response = await self.bot_call("POST", f"/channels/{channel}/messages",
-                                                 {"content": content, "allowed_mentions": {"parse": []}, "flags": 4})
-        if not 200 <= status < 300:
-            raise Refused("approval-post-failed", 502)
-        message = str(json_object(response)["id"])
-        identity = f"{time.time_ns():020d}-{secrets.token_hex(6)}"
-        link = f"https://discord.com/channels/{self.config['owner_guild']}/{channel}/{message}"
-        host, _, route = path[1:].partition("/")
-        entry = dict(id=identity, ts=utc(), uid=uid, method=method, path=path, query=query,
-                     upstream_url=self.base(host) + "/" + quote(route, safe="/:@") + ("?" + urlencode(query) if query else ""),
-                     headers={k: v for k, v in headers.items() if k.lower() in {"content-type", "accept"}},
-                     body=base64.b64encode(body).decode(), owner_message=proof,
-                     owner_order=self.order_facts.get(proof), owner_todo=self.todo_facts.get(proof),
-                     reason=",".join(sorted(set(reasons))), api=api, op=op,
-                     channel=channel, message=message, card=link, title=title, thread=thread,
-                     content_hash=hashlib.sha256(json_object(response).get("content", content).encode()).hexdigest(), status="pending",
-                     snapshot_hash=hashlib.sha256(json_bytes(snapshot)).hexdigest(),
-                     restoring=restoring,
-                     delete=op in {"events.delete", "tasks.delete"} or op == "files.update" and data.get("trashed") is True)
-        if api == "obsidian":
-            entry["vault_path"] = dict(query)["path"]
-            entry["vault_content"] = data["restore_content"] if restoring else body.decode("utf-8")
-        private_write(self.state / "pending" / (identity + ".json"), json_bytes(entry))
+        # Owner Q474 (2026-11-03): from choosing the thread until the card is on record, no other card chooses one and
+        # the poller decides nothing, so cards asked at once share the thread and no thread is closed under a new card.
+        async with self.approval_lock:
+            thread = await self.card_thread(channel, proof, f"{CARD_KIND.get(api, api)} · {(title or op)[:40]}")
+            await self.supersede(thread, api, op, path, method, title, body)
+            # Owner 2026-10-19 00:00 KST: the card shows who, what and the reactions; the reason,
+            # the owner-message link and the expiry stay in the pending record.
+            content = (f"승인 필요 · {CARD_KIND.get(api, api)}\n"
+                       f"받는 사람: {', '.join(sorted(set(destinations)))[:500] or path[:500]}\n"
+                       f"내용: {defang(title[:200])}\n✅ 실행 · ⛔ 취소")
+            channel = thread
+            status, _, response = await self.bot_call("POST", f"/channels/{channel}/messages",
+                                                     {"content": content, "allowed_mentions": {"parse": []}, "flags": 4})
+            if not 200 <= status < 300:
+                raise Refused("approval-post-failed", 502)
+            message = str(json_object(response)["id"])
+            identity = f"{time.time_ns():020d}-{secrets.token_hex(6)}"
+            link = f"https://discord.com/channels/{self.config['owner_guild']}/{channel}/{message}"
+            host, _, route = path[1:].partition("/")
+            entry = dict(id=identity, ts=utc(), uid=uid, method=method, path=path, query=query,
+                         upstream_url=self.base(host) + "/" + quote(route, safe="/:@") + ("?" + urlencode(query) if query else ""),
+                         headers={k: v for k, v in headers.items() if k.lower() in {"content-type", "accept"}},
+                         body=base64.b64encode(body).decode(), owner_message=proof,
+                         owner_order=self.order_facts.get(proof), owner_todo=self.todo_facts.get(proof),
+                         reason=",".join(sorted(set(reasons))), api=api, op=op,
+                         channel=channel, message=message, card=link, title=title, thread=thread,
+                         content_hash=hashlib.sha256(json_object(response).get("content", content).encode()).hexdigest(), status="pending",
+                         snapshot_hash=hashlib.sha256(json_bytes(snapshot)).hexdigest(),
+                         restoring=restoring,
+                         delete=op in {"events.delete", "tasks.delete"} or op == "files.update" and data.get("trashed") is True)
+            if api == "obsidian":
+                entry["vault_path"] = dict(query)["path"]
+                entry["vault_content"] = data["restore_content"] if restoring else body.decode("utf-8")
+            private_write(self.state / "pending" / (identity + ".json"), json_bytes(entry))
         for emoji in ("✅", "⛔"):
             status, _, _ = await self.bot_call("PUT", f"/channels/{channel}/messages/{message}/reactions/{quote(emoji)}/@me")
             if not 200 <= status < 300:
@@ -1816,21 +1883,33 @@ class Gate:
         A request written inside a thread keeps its card there; one written in the approval channel
         gets a thread on that message (Discord: thread id == message id); anything else opens a new
         thread in the approval channel. Any failure keeps the old place, the channel itself.
+
+        Owner Q474 (2026-11-03, "드라이브 공유는 묶음 한 스레드"): the cards one owner message asks for share one
+        thread, so a card or batch whose message already has an undecided card or batch goes into that thread
+        (2026-10-30 one request made eighteen Drive sharing threads in two minutes). Callers hold approval_lock.
         """
+        for record in [*self.pending(), *self.batches()]:
+            if (proof and record.get("owner_message") == proof and record.get("status", "pending") == "pending"
+                    and record.get("thread") and str(record["thread"]) != channel):
+                return str(record["thread"])
         parts = proof.rsplit("/", 2) if proof.startswith("https://discord.com/channels/") else []
         origin, message = (parts[-2], parts[-1]) if len(parts) == 3 and parts[-1].isdigit() else ("", "")
-        name = f"🔐 {title}"[:100]
+        name = f"{WAITING_MARK} 🔐 {title}"[:100]
         try:
             if origin and origin != channel:
                 status, _, body = await self.bot_call("GET", f"/channels/{origin}")
                 info = json_object(body) if 200 <= status < 300 else {}
                 if info.get("type") in (11, 12) and str(info.get("parent_id")) == channel:
+                    await self.mark_joined_thread(origin, info)
                     return origin
             if origin == channel and message:
                 status, _, _ = await self.bot_call(
                     "POST", f"/channels/{channel}/messages/{message}/threads",
                     {"name": name, "auto_archive_duration": 10080})
-                if 200 <= status < 300 or status == 400:  # 400: that message already has its thread
+                if 200 <= status < 300:
+                    return message
+                if status == 400:  # that message already has its thread, often one a Dori opened first
+                    await self.mark_joined_thread(message)
                     return message
             status, _, body = await self.bot_call(
                 "POST", f"/channels/{channel}/threads", {"name": name, "type": 11, "auto_archive_duration": 10080})
@@ -1842,24 +1921,57 @@ class Gate:
         print("GATE_CARD_THREAD_FALLBACK", file=sys.stderr, flush=True)
         return channel
 
-    async def supersede(self, thread, api, op, path, method, title) -> None:
-        """A newer card for the same work in the same thread replaces the older undecided one."""
-        async with self.approval_lock:
-            for entry in self.pending():
-                if (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
-                        or entry.get("path") != path or entry.get("status") != "pending"
-                        or method == "POST" and entry.get("title") != title):
-                    continue
-                base = f"/channels/{entry['channel']}/messages/{entry['message']}"
-                if await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅"):
-                    continue  # the owner already decided that card; the poller handles it
-                (self.state / "pending" / (entry["id"] + ".json")).unlink(missing_ok=True)
-                self.deny(entry["uid"], "google", entry["method"], entry["path"], "superseded")
-                status, _, body = await self.bot_call("GET", base)
-                original = json_object(body).get("content", "") if 200 <= status < 300 else ""
-                await self.bot_call("PATCH", base, {
-                    "content": ("🔁 새 판으로 대체됨 — 이 카드는 실행되지 않습니다\n" + original)[:2000],
-                    "allowed_mentions": {"parse": []}})
+    async def mark_joined_thread(self, thread, info=None) -> None:
+        """A card joining a thread a Dori opened first (`dori thread open --from`) gives it the card thread's shape.
+
+        2026-11-04: YooDori's "🔔 정해영 OmO 문의 답장" kept that name after the card joined it. The name becomes the
+        one waiting mark and the kind icon with the Dori's title kept ("🔔 🔐 정해영 OmO 문의 답장"), so the owner sees
+        a card waits and the decision later marks it. A name already in that shape and a thread the owner opened
+        himself stay as they are; a failed rename is logged and never stops the card."""
+        try:
+            if info is None:
+                status, _, body = await self.bot_call("GET", f"/channels/{thread}")
+                if not 200 <= status < 300:
+                    raise OSError(status)
+                info = json_object(body)
+            name, owner = str(info.get("name") or ""), str(info.get("owner_id") or "")
+            if not name or not owner or owner == str(self.config["owner_id"]):
+                return
+            bare = bare_thread_name(name)
+            if bare.startswith(KIND_ICONS) and bare != name and LEADING_MARK.sub("", name, count=1) == bare:
+                return  # one mark (any of them) and a kind icon: already the shape
+            wanted = f"{WAITING_MARK} {bare if bare.startswith(KIND_ICONS) else '🔐 ' + bare}"[:100]
+            # Discord renames an archived thread only together with unarchiving it; the card goes in next anyway.
+            status, _, _ = await self.bot_call("PATCH", f"/channels/{thread}", {"name": wanted, "archived": False})
+            if not 200 <= status < 300:
+                raise OSError(status)
+        except (Refused, OSError, ValueError, KeyError, http.client.HTTPException):
+            print("GATE_CARD_THREAD_RENAME_FAILED", file=sys.stderr, flush=True)
+
+    async def supersede(self, thread, api, op, path, method, title, body=b"") -> None:
+        """A newer card for the same work in the same thread replaces the older undecided one.
+
+        A sharing grant (Drive permission, Calendar ACL) is the same work only for the same grantee: two cards in one
+        thread may share one file or calendar with two people, and the second must not replace the first.
+        The caller holds approval_lock."""
+        incoming = grantee(body)  # read once: the loop below reuses `body` for the Discord replies
+        for entry in self.pending():
+            if (entry.get("thread") != thread or entry.get("api") != api or entry.get("op") != op
+                    or entry.get("path") != path or entry.get("status") != "pending"
+                    or method == "POST" and entry.get("title") != title
+                    or method == "POST" and path.endswith(("/permissions", "/acl"))
+                    and grantee(base64.b64decode(entry.get("body") or "")) != incoming):
+                continue
+            base = f"/channels/{entry['channel']}/messages/{entry['message']}"
+            if await self.owner_reacted(base, "⛔") or await self.owner_reacted(base, "✅"):
+                continue  # the owner already decided that card; the poller handles it
+            (self.state / "pending" / (entry["id"] + ".json")).unlink(missing_ok=True)
+            self.deny(entry["uid"], "google", entry["method"], entry["path"], "superseded")
+            status, _, body = await self.bot_call("GET", base)
+            original = json_object(body).get("content", "") if 200 <= status < 300 else ""
+            await self.bot_call("PATCH", base, {
+                "content": ("🔁 새 판으로 대체됨 — 이 카드는 실행되지 않습니다\n" + original)[:2000],
+                "allowed_mentions": {"parse": []}})
 
     async def owner_reacted(self, base, emoji) -> bool:
         after = None
@@ -1955,13 +2067,11 @@ class Gate:
             name = str(info.get("name") or "")
             if info.get("type") not in (11, 12) or str(info.get("parent_id")) != channel:
                 return
-            for old in THREAD_STATUSES:
-                if name.startswith(old + " · "):
-                    name = name[len(old) + 3:]
+            name = bare_thread_name(name)
             if not name.startswith("🔐 "):
                 return
             status, _, _ = await self.bot_call("PATCH", f"/channels/{thread}",
-                                               {"name": f"{prefix} · {name}"[:100], "archived": True})
+                                               {"name": f"{prefix} {name}"[:100], "archived": True})
             if not 200 <= status < 300:
                 raise OSError(status)
         except (Refused, OSError, ValueError, KeyError, http.client.HTTPException):
@@ -1983,8 +2093,7 @@ class Gate:
         info = json_object(body) if 200 <= status < 300 else {}
         name = str(info.get("name") or "")
         archived = (info.get("thread_metadata") or {}).get("archived")
-        if not (info.get("type") in (11, 12) and archived
-                and any(name.startswith(prefix + " · ") for prefix in THREAD_STATUSES)):
+        if not (info.get("type") in (11, 12) and archived and decided_name(name)):
             return None
         if await self.live_card_after_decision(match[1]):
             return None
@@ -2031,8 +2140,10 @@ class Gate:
         waiting = {e.get("thread") for e in self.pending()}
         for info in json_object(body).get("threads", []):
             thread = str(info.get("id", ""))
-            if (str(info.get("parent_id")) != channel or thread in waiting
-                    or not str(info.get("name") or "").startswith("🔐 ")):
+            name = str(info.get("name") or "")
+            # a decided thread someone reopened keeps its title; only a still-undecided "🔔 🔐 …" (or old "🔐 …") is swept
+            if (str(info.get("parent_id")) != channel or thread in waiting or decided_name(name)
+                    or not bare_thread_name(name).startswith("🔐 ")):
                 continue
             status, _, body = await self.bot_call("GET", f"/channels/{thread}/messages?limit=50")
             messages = json.loads(body) if 200 <= status < 300 else []
@@ -2046,7 +2157,8 @@ class Gate:
 
     async def approval_loop(self):
         try:
-            await self.close_decided_threads()
+            async with self.approval_lock:  # no card is choosing its thread while the sweep closes threads
+                await self.close_decided_threads()
         except (Refused, OSError, ValueError, KeyError, http.client.HTTPException):
             print("GATE_THREAD_SWEEP_FAILED", file=sys.stderr, flush=True)
         while True:
@@ -2764,6 +2876,12 @@ class Gate:
                     raise Refused("google-host-denied")
                 if host == "people.googleapis.com" and not (method == "GET" and PEOPLE_READS.fullmatch(route)):
                     raise Refused("contacts-read-only")
+                if host == "forms.googleapis.com":
+                    form = FORMS_ROUTE.fullmatch(route)
+                    if not form or (method, bool(form[2])) not in {("GET", False), ("POST", True)}:
+                        raise Refused("forms-route-not-allowed")
+                    if method == "GET":
+                        await self.form_owned(form[1])
                 query = [(k, v) for k, v in query if k.lower() not in {"access_token", "key"}]
                 if method in READS:
                     outgoing = google_headers(headers, await self.access_token())

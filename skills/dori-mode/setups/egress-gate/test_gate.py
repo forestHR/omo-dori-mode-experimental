@@ -48,6 +48,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.thread_meta = {}
         self.thread_patches = []
         self.thread_history = {}
+        self.on_card_post = None  # awaited when a card message is posted, before the fake answers
         self.author = "1"
         self.webhook = None
         self.proof_time = gate.utc()
@@ -58,6 +59,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.shared_drive = False
         self.foreign_files = set()  # Drive ids the fake answers as not the owner's
         self.file_mime = "application/vnd.google-apps.document"
+        self.file_published = False
         self.file_parents = []
         self.move_lands = True  # a Drive move PATCH changes file_parents
         self.write_delay = 0  # seconds the fake Google takes before it answers a write
@@ -213,10 +215,12 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             elif path.startswith("/api/v10/"):
                 route = path[len("/api/v10"):]
                 parts = route.split("/")
-                if route.endswith("/threads") and method == "POST":
+                if route.endswith("/threads") and method == "POST" and "messages" in parts and parts[4] in self.thread_meta:
+                    status, data = 400, {"code": 160004, "message": "A thread has already been created for this message"}
+                elif route.endswith("/threads") and method == "POST":
                     self.created_threads.append(route)
                     self.thread_names.append(json.loads(body)["name"])
-                    data = {"id": parts[4] if "messages" in parts else "777"}
+                    data = {"id": parts[4] if "messages" in parts else str(776 + len(self.created_threads))}
                     self.thread_meta[data["id"]] = {"id": data["id"], "type": 11, "parent_id": parts[2],
                                                     "name": json.loads(body)["name"]}
                 elif route == "/guilds/10/threads/active":
@@ -226,6 +230,10 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 elif route.endswith("/messages") and method == "GET":
                     data = [{"id": m, "content": c, "author": {"bot": True}}
                             for m, c in sorted(self.cards.items(), reverse=True) if self.card_channels.get(m) == parts[2]]
+                elif (parts[1] == "channels" and len(parts) == 3 and parts[2] in self.thread_meta and method == "PATCH"
+                      and "name" in json.loads(body) and json.loads(body).get("archived") is not False
+                      and (self.thread_meta[parts[2]].get("thread_metadata") or {}).get("archived")):
+                    status, data = 400, {"code": 50083, "message": "Thread is archived"}  # Discord: unarchive to rename
                 elif parts[1] == "channels" and len(parts) == 3 and parts[2] in self.thread_meta:
                     if method == "PATCH":
                         self.thread_patches.append((parts[2], json.loads(body)))
@@ -251,6 +259,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     elif method == "PATCH":
                         self.cards[message] = json.loads(body)["content"]
                 elif route.endswith("/messages") and method == "POST":
+                    if self.on_card_post:
+                        await self.on_card_post()
                     if parts[2] in self.thread_meta and "thread_metadata" in self.thread_meta[parts[2]]:
                         self.thread_meta[parts[2]]["thread_metadata"]["archived"] = False  # Discord reopens
                     message = str(1000 + len(self.cards))
@@ -273,6 +283,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     data = self.event
                 elif path.endswith("/permissions"):
                     data = {"permissions": [{"type": "anyone" if self.file_public else "user", "role": "reader"}]}
+                    if self.file_published and "includePermissionsForView=published" in target:
+                        data["permissions"].append({"type": "anyone", "role": "reader", "view": "published"})
                 elif "/permissions/" in path:
                     data = {"type": "user", "emailAddress": "other@example.com"}
                 elif "/drive/v3/files/" in path:
@@ -282,6 +294,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                         data["driveId"] = "shared"
                 elif path.startswith("/v1/documents/"):
                     data = {"revisionId": "revision", "title": "Before"}
+                elif path.startswith("/v1/forms/"):
+                    data = {"formId": "f", "info": {"title": "Seminar"}, "items": [{"itemId": "qr", "title": "QR"}]}
                 elif path.startswith("/tasks/v1/"):
                     data = {"id": "t", "title": "Before", "notes": "old"}
                 else:
@@ -490,7 +504,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         entry = self.service.pending()[0]
         # Then: the card sits in the thread on his message (thread id == message id).
         self.assertEqual(self.created_threads, ["/channels/20/messages/100/threads"])
-        self.assertEqual(self.thread_names, ["🔐 일정 초대 · Invite"])
+        self.assertEqual(self.thread_names, ["🔔 🔐 일정 초대 · Invite"])
         self.assertEqual((entry["channel"], self.card_channels[entry["message"]]), ("100", "100"))
 
     async def test_a_card_for_a_request_inside_a_thread_stays_in_that_thread(self):
@@ -506,6 +520,70 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         await self.service.poll_approvals()
         self.assertTrue(self.cards[entry["message"]].startswith("✅ 실행됨"))
 
+    def dori_thread(self, thread, name, owner="7"):
+        """A thread a Dori bot (or, with owner="1", the owner) opened before any card, as `dori thread open --from`."""
+        self.thread_meta[thread] = {"id": thread, "type": 11, "parent_id": "20", "guild_id": "10",
+                                    "owner_id": owner, "name": name}
+
+    async def test_a_card_joining_a_thread_a_dori_opened_gives_it_the_waiting_mark_and_the_card_kind(self):
+        # 2026-11-04 05:28Z: YooDori opened "🔔 정해영 OmO 문의 답장" on the owner's message, the card joined it
+        # and the name stayed without the kind, so the owner could not tell a card waits there.
+        for origin, thread in (("20/100", "100"), ("556/100", "556")):
+            with self.subTest(origin=origin):
+                self.thread_meta.clear()
+                self.thread_patches.clear()
+                self.dori_thread(thread, "🔔 정해영 OmO 문의 답장")
+                self.approval()
+                await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]},
+                                   origin=origin)
+                entry = self.service.pending()[-1]
+                self.assertEqual(self.created_threads, [])
+                self.assertEqual(self.card_channels[entry["message"]], thread)
+                self.assertEqual(self.thread_patches, [(thread, {"name": "🔔 🔐 정해영 OmO 문의 답장", "archived": False})])
+                self.approve()
+                await self.service.poll_approvals()
+                self.assertEqual(self.thread_patches[-1], (thread, {"name": "✅ 🔐 정해영 OmO 문의 답장", "archived": True}))
+
+    async def test_a_joined_thread_already_named_right_or_opened_by_the_owner_keeps_its_name(self):
+        for name, owner in (("🔔 🔐 정해영 OmO 문의 답장", "7"), ("🔔 ✉️ 정해영 OmO 문의 답장", "7"), ("📌 📬 Digest", "7"),
+                            ("🔄 ✉️ Reply", "7"), ("형의 요청", "1")):
+            with self.subTest(name=name, owner=owner):
+                self.thread_meta.clear()
+                self.thread_patches.clear()
+                for card in (self.state / "pending").glob("*.json"):
+                    card.unlink()  # else the next card joins the last one's thread (#319) and never looks at the name
+                self.dori_thread("100", name, owner)
+                self.approval()
+                await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]})
+                self.assertEqual(self.card_channels[self.service.pending()[-1]["message"]], "100")
+                self.assertEqual(self.thread_patches, [])
+
+    async def test_a_joined_archived_dori_thread_is_unarchived_by_the_rename(self):
+        # Discord renames an archived thread only together with archived: false.
+        self.dori_thread("100", "✉️ 정해영 OmO 문의 답장")
+        self.thread_meta["100"]["thread_metadata"] = {"archived": True}
+        self.approval()
+        await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]})
+        self.assertEqual(self.thread_meta["100"]["name"], "🔔 ✉️ 정해영 OmO 문의 답장")
+
+    async def test_an_unreadable_joined_thread_is_logged_and_the_card_still_goes_in(self):
+        self.dori_thread("556", "🔔 정해영 OmO 문의 답장")
+        self.approval()
+        self.thread_meta["100"] = {"id": "100"}  # Discord says the message has a thread ...
+        real_call = self.service.bot_call
+
+        async def call(method, path, data=None):  # ... but reading it fails
+            if method == "GET" and path == "/channels/100":
+                return 503, {}, b"{}"
+            return await real_call(method, path, data)
+
+        self.service.bot_call = call
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]})
+        self.assertIn("GATE_CARD_THREAD_RENAME_FAILED", err.getvalue())
+        self.assertEqual(self.card_channels[self.service.pending()[-1]["message"]], "100")
+        self.assertEqual(self.thread_patches, [])
+
     async def test_a_card_for_a_request_elsewhere_opens_its_own_thread(self):
         # Given / When: the owner's message lives in another channel of his server.
         self.approval()
@@ -514,6 +592,88 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         # Then: one new thread in the approval channel carries the card.
         self.assertEqual(self.created_threads, ["/channels/20/threads"])
         self.assertEqual(self.card_channels[self.service.pending()[0]["message"]], "777")
+
+    async def share(self, file, who="partner@example.net", origin="30/100"):
+        status, _ = await self.request(path=f"/www.googleapis.com/drive/v3/files/{file}/permissions", origin=origin,
+                                       data={"type": "user", "role": "reader", "emailAddress": who})
+        self.assertEqual(status, 202)
+
+    def card_threads(self):
+        """Where every undecided card and batch card of the run sits."""
+        return ([self.card_channels[e["message"]] for e in self.service.pending() if e["status"] == "pending"]
+                + [self.card_channels[b["message"]] for b in self.service.batches()])
+
+    async def test_the_cards_one_message_asks_for_share_one_thread_cards_first(self):
+        # Owner Q474: one request outside the approval channel made eighteen Drive sharing threads (2026-10-30).
+        self.approval()
+        await self.share("f")
+        await self.share("g")
+        self.assertEqual((await self.submit_batch(origin="30/100"))[0], 202)
+        self.assertEqual((await self.submit_batch(title="두째 정리", origin="30/100"))[0], 202)
+        self.assertEqual(self.created_threads, ["/channels/20/threads"])
+        self.assertEqual(self.card_threads(), ["777"] * 4)
+
+    async def test_the_cards_one_message_asks_for_share_one_thread_batch_first(self):
+        self.approval()
+        self.assertEqual((await self.submit_batch(origin="30/100"))[0], 202)
+        self.assertEqual((await self.submit_batch(title="두째 정리", origin="30/100"))[0], 202)
+        await self.share("f")
+        await self.share("g")
+        self.assertEqual(self.created_threads, ["/channels/20/threads"])
+        self.assertEqual(self.card_threads(), ["777"] * 4)
+
+    async def test_cards_one_message_asks_for_at_once_still_share_one_thread(self):
+        self.approval()
+        await asyncio.gather(*(self.share(f) for f in "fgh"), self.submit_batch(origin="30/100"))
+        self.assertEqual(self.created_threads, ["/channels/20/threads"])
+        self.assertEqual(self.card_threads(), ["777"] * 4)
+
+    async def test_a_decision_while_a_card_joins_the_thread_never_closes_the_thread_under_it(self):
+        # Given: a card of one owner message waits in its thread and the owner has cancelled it.
+        self.approval()
+        await self.share("f")
+        self.react(self.service.pending()[0]["message"], "⛔")
+        polls = []
+
+        async def poll_while_the_card_is_posted():
+            self.on_card_post = None
+            held = self.service.approval_lock.locked()  # by the submission: nothing else runs now
+            polls.append(asyncio.ensure_future(self.service.poll_approvals()))
+            if not held:
+                await polls[0]  # nothing holds the poller off: it decides and closes mid-submission
+        self.on_card_post = poll_while_the_card_is_posted
+        # When: a second card of that message is posted while the poller decides the first.
+        await self.share("g")
+        await asyncio.gather(*polls)
+        # Then: the new card waits in that thread, which is neither archived nor titled decided.
+        self.assertEqual(self.card_threads(), ["777"])
+        self.assertEqual([patch for patch in self.thread_patches if patch[0] == "777"], [])
+
+    async def test_another_owner_message_gets_its_own_thread_and_a_decided_thread_is_not_reused(self):
+        self.approval()
+        await self.share("f")
+        await self.share("g", origin="31/100")
+        self.assertEqual(self.created_threads, ["/channels/20/threads"] * 2)
+        self.assertEqual(sorted(self.card_threads()), ["777", "778"])
+        for entry in self.service.pending():
+            self.react(entry["message"], "⛔")
+        await self.service.poll_approvals()
+        # the first message's thread is decided and archived: a later card of that message opens a new one
+        await self.share("h")
+        self.assertEqual(self.card_threads(), ["779"])
+
+    async def test_the_same_share_asked_again_replaces_the_older_card_in_the_shared_thread(self):
+        self.approval()
+        await self.share("f")
+        first = self.service.pending()[0]
+        await self.share("f")
+        await self.share("f", who="second@example.net")
+        self.assertEqual(self.created_threads, ["/channels/20/threads"])
+        self.assertNotIn(first["id"], [e["id"] for e in self.service.pending()])
+        self.assertTrue(self.cards[first["message"]].startswith("🔁"))
+        self.assertEqual(sorted(json.loads(base64.b64decode(e["body"]))["emailAddress"] for e in self.service.pending()),
+                         ["partner@example.net", "second@example.net"])
+        self.assertEqual(self.card_threads(), ["777"] * 2)
 
     async def test_a_revised_request_replaces_the_older_card_which_then_never_runs(self):
         # Given: the same invite asked twice in one thread.
@@ -566,7 +726,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cards[entry["message"]].splitlines(),
                          ["승인 필요 · Drive 공유", "받는 사람: partner@example.net", "내용: Before 공유(보기)",
                           "✅ 실행 · ⛔ 취소"])
-        self.assertEqual(self.thread_names[-1], "🔐 Drive 공유 · Before 공유(보기)")
+        self.assertEqual(self.thread_names[-1], "🔔 🔐 Drive 공유 · Before 공유(보기)")
 
     async def test_owner_approval_executes_once_and_notifies(self):
         self.approval()
@@ -655,7 +815,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_decided_card_titles_and_archives_its_own_thread(self):
         # Owner 2026-10-19 16:44 KST: the approval result shows in the thread title.
-        for emoji, status, title in (("⛔", 200, "⛔ 취소"), ("✅", 200, "✅ 완료"), ("✅", 500, "❗ 실패")):
+        for emoji, status, title in (("⛔", 200, "⛔"), ("✅", 200, "✅"), ("✅", 500, "❗")):
             self.thread_meta.clear()
             self.thread_patches.clear()
             self.response_status = status
@@ -663,8 +823,16 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]})
             entry = self.approve(emoji=emoji)
             await self.service.poll_approvals()
-            self.assertEqual(self.thread_patches, [(entry["thread"], {"name": f"{title} · 🔐 일정 초대 · Invite",
+            self.assertEqual(self.thread_patches, [(entry["thread"], {"name": f"{title} 🔐 일정 초대 · Invite",
                                                                      "archived": True})], emoji + str(status))
+
+    def test_a_name_keeps_exactly_one_leading_mark(self):
+        # Owner 2026-11-03: "메일 스레드에 완료 표시랑 다른 표시랑 중복되는 현상도 같이 고쳐줘".
+        for name in ("✅ ❗ 실패 · 🔐 묶음 승인 · x", "⛔ 취소 · 🔄 🔐 x", "✅ ⛔ 취소 · 🔐 x", "🔄 완료 · 🔐 x", "🔔 🔐 x", "❗ 🔐 x"):
+            self.assertTrue(gate.bare_thread_name(name).startswith("🔐 "), name)
+            self.assertEqual(gate.bare_thread_name(name).count("🔐"), 1, name)
+        self.assertTrue(gate.decided_name("💤 🔐 x") and gate.decided_name("⛔ 취소 · ✉️ x"))
+        self.assertFalse(gate.decided_name("🔔 🔐 x") or gate.decided_name("형의 요청"))
 
     async def test_an_expired_card_titles_its_thread_expired(self):
         self.approval()
@@ -673,7 +841,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         entry["ts"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
         gate.private_write(self.state / "pending" / (entry["id"] + ".json"), gate.json_bytes(entry))
         await self.service.poll_approvals()
-        self.assertEqual(self.thread_patches[-1][1]["name"], "⌛ 만료 · 🔐 일정 초대 · Invite")
+        self.assertEqual(self.thread_patches[-1][1]["name"], "💤 🔐 일정 초대 · Invite")
 
     async def test_the_owners_own_thread_and_a_thread_with_an_open_card_keep_their_title(self):
         self.approval()
@@ -742,8 +910,46 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                            origin="30/100")
         self.assertEqual(self.thread_patches, [])
         await self.service.close_decided_threads()
-        self.assertEqual(self.thread_patches, [("100", {"name": "⛔ 취소 · 🔐 일정 초대 · Old",
+        self.assertEqual(self.thread_patches, [("100", {"name": "⛔ 🔐 일정 초대 · Old",
                                                          "archived": True})])
+
+    async def test_the_start_sweep_leaves_a_reopened_decided_thread_alone(self):
+        self.approval()
+        await self.request(data={"summary": "Old", "attendees": [{"email": "outside@example.net"}]})
+        self.approve(emoji="⛔")
+        with patch.object(self.service, "close_card_thread", lambda *a: asyncio.sleep(0)):
+            await self.service.poll_approvals()
+        self.thread_meta["100"] = {**self.thread_meta.get("100", {}), "name": "⛔ 🔐 일정 초대 · Old"}
+        await self.service.close_decided_threads()
+        self.assertEqual(self.thread_patches, [])
+
+    async def test_grants_to_two_people_in_one_thread_both_wait_and_a_repeat_replaces(self):
+        # Two cards from one message in the approval channel share its thread: a grant to another person is other work.
+        self.approval()
+        for who in ("partner@example.net", "second@example.net", "second@example.net"):
+            status, _ = await self.request(path="/www.googleapis.com/drive/v3/files/f/permissions",
+                                           data={"type": "user", "role": "reader", "emailAddress": who})
+            self.assertEqual(status, 202)
+        self.assertEqual(sorted(json.loads(base64.b64decode(e["body"]))["emailAddress"] for e in self.service.pending()),
+                         ["partner@example.net", "second@example.net"])
+
+    async def test_a_repeat_grant_replaces_every_undecided_card_for_the_same_person(self):
+        self.approval()
+        grant = {"type": "user", "role": "reader", "emailAddress": "partner@example.net"}
+        await self.request(path="/www.googleapis.com/drive/v3/files/f/permissions", data=grant)
+        first = self.service.pending()[0]
+        # a second undecided card for the same grant (one an owner reaction had kept from being replaced)
+        twin = {**first, "id": first["id"] + "-twin"}
+        gate.private_write(self.state / "pending" / (twin["id"] + ".json"), gate.json_bytes(twin))
+        await self.request(path="/www.googleapis.com/drive/v3/files/f/permissions", data=grant)
+        self.assertEqual(len(self.service.pending()), 1)
+
+    async def test_calendar_acl_grants_to_two_people_in_one_thread_both_wait(self):
+        self.approval()
+        for who in ("partner@example.net", "second@example.net"):
+            await self.request(path="/www.googleapis.com/calendar/v3/calendars/primary/acl",
+                               data={"role": "reader", "scope": {"type": "user", "value": who}})
+        self.assertEqual(len(self.service.pending()), 2)
 
     async def test_tampered_card_never_executes_or_edits(self):
         self.approval()
@@ -916,6 +1122,88 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         status, _ = await self.request(path="/docs.googleapis.com/v1/documents/d:batchUpdate",
                                        data={"requests": [{"insertInlineImage": {"uri": "https://outside.example/i"}}]})
         self.assertEqual(status, 202)
+        self.assertFalse(self.writes())
+
+    def forms_seen(self):
+        return [r for r in self.seen if urlsplit(r[1]).path.startswith("/v1/forms")]
+
+    async def test_an_own_form_reads_and_edits_without_a_card_even_open_to_responders(self):
+        self.approval()
+        self.file_mime, self.file_published = gate.FORM_MIME, True
+        status, body = await self.request("GET", "/forms.googleapis.com/v1/forms/f", proof=False,
+                                          headers={"authorization": "Bearer caller-secret"})
+        self.assertEqual((status, json.loads(body)["formId"]), (200, "f"))
+        self.assertEqual(self.seen[-1][2]["authorization"], "Bearer access-secret")
+        self.assertFalse(self.changes())
+        edits = {"requests": [{"deleteItem": {"location": {"index": 0}}},
+                              {"updateFormInfo": {"info": {"description": ""}, "updateMask": "description"}}]}
+        status, _ = await self.request(path="/forms.googleapis.com/v1/forms/f:batchUpdate", data=edits)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.seen[-1][:2], ("POST", "/v1/forms/f:batchUpdate"))
+        self.assertFalse(self.service.pending())
+        self.assertFalse([m for m in self.cards.values() if "승인 필요" in m])
+        row = self.changes()[0]
+        self.assertEqual((row["api"], row["op"], row["owner_message"], row["restorable"]),
+                         ("forms", "forms.batchUpdate", "https://discord.com/channels/10/20/100", False))
+        self.assertEqual(row["resource"], {"id": "f", "title": "Seminar", "name": "Changed",
+                                           "link": "https://docs.google.com/forms/d/f/edit"})
+        self.assertEqual(json.loads((self.state / row["snapshot"]).read_text())["items"][0]["itemId"], "qr")
+
+    async def test_a_form_edit_needs_the_owners_message(self):
+        self.file_mime = gate.FORM_MIME
+        status, _ = await self.request(path="/forms.googleapis.com/v1/forms/f:batchUpdate", proof=False,
+                                       data={"requests": [{"deleteItem": {"location": {"index": 0}}}]})
+        self.assertEqual(status, 403)
+        self.assertFalse(self.forms_seen())
+        self.assertFalse(self.changes())
+
+    async def test_a_form_that_is_not_the_owners_alone_is_refused_read_and_write_without_a_card(self):
+        self.approval()
+        edit = {"requests": [{"deleteItem": {"location": {"index": 0}}}]}
+        for attribute, value, reason in [("file_owned", False, "drive-not-owned"), ("shared_drive", True, "drive-not-owned"),
+                                         ("file_public", True, "public-drive-target"), ("file_mime", "text/plain", "not-a-form")]:
+            before = getattr(self, attribute)
+            self.file_mime = gate.FORM_MIME
+            setattr(self, attribute, value)
+            for method, route, data in [("GET", "", None), ("POST", ":batchUpdate", edit)]:
+                with self.subTest(attribute=attribute, method=method):
+                    status, body = await self.request(method, "/forms.googleapis.com/v1/forms/f" + route, data=data)
+                    self.assertEqual((status, json.loads(body)["error"]), (403, reason))
+            setattr(self, attribute, before)
+        self.assertFalse(self.forms_seen())
+        self.assertFalse(self.service.pending())
+
+    async def test_form_responses_sharing_publishing_and_other_routes_are_refused_before_google(self):
+        self.approval()
+        self.file_mime = gate.FORM_MIME
+        for method, route in [("GET", "v1/forms/f/responses"), ("GET", "v1/forms/f/responses/r"),
+                              ("GET", "v1/forms/f%2Fresponses"), ("DELETE", "v1/forms/f/responses/r"),
+                              ("GET", "v1/forms/f/watches"), ("POST", "v1/forms/f/watches"),
+                              ("POST", "v1/forms/f:setPublishSettings"), ("POST", "v1/forms"), ("GET", "v1/forms"),
+                              ("DELETE", "v1/forms/f"), ("PATCH", "v1/forms/f"), ("POST", "v1/forms/f"),
+                              ("HEAD", "v1/forms/f"), ("GET", "v1/forms/f:batchUpdate"),
+                              ("PUT", "v1/forms/f:batchUpdate"), ("GET", "v1beta/forms/f")]:
+            status, body = await self.request(method, "/forms.googleapis.com/" + route)
+            self.assertEqual(status, 403, (method, route))
+            if method != "HEAD":
+                self.assertEqual(json.loads(body)["error"], "forms-route-not-allowed", (method, route))
+        for requests in [[{"setPublishSettings": {}}], [{"deleteItem": {}, "share": {}}], ["deleteItem"], {"deleteItem": {}}, None]:
+            status, body = await self.request(path="/forms.googleapis.com/v1/forms/f:batchUpdate", data={"requests": requests})
+            self.assertEqual((status, json.loads(body)["error"]), (403, "forms-request-not-allowed"), requests)
+        self.assertFalse(self.forms_seen())
+        self.assertFalse(self.writes())
+        self.assertFalse(self.service.pending())
+
+    async def test_a_form_write_over_a_configured_limit_cards_the_form_not_its_option_text(self):
+        self.approval()
+        self.file_mime = gate.FORM_MIME
+        self.config["limits"] = {"writes_per_owner_message": 0}
+        status, _ = await self.request(path="/forms.googleapis.com/v1/forms/f:batchUpdate", data={"requests": [
+            {"createItem": {"item": {"questionItem": {"question": {"choiceQuestion": {"options": [{"value": "옵션글"}]}}}}}}]})
+        self.assertEqual(status, 202)
+        card = [m for m in self.cards.values() if "승인 필요" in m][0]
+        self.assertIn("Seminar", card)
+        self.assertNotIn("옵션글", card)
         self.assertFalse(self.writes())
 
     async def test_docs_owned_update_records_revision_and_refuses_restore(self):

@@ -3,7 +3,8 @@
 // set the automation parameters from what happened. A proposal never switches anything: the lead decides (--approved-by
 // lead:<reason and signal>) and the owner is told afterwards; handover.autoRollover (off by default) is the only path that
 // runs one without a person's decision.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 
 import type { Question } from "./messenger/discord-cards.ts";
@@ -11,6 +12,7 @@ import type { FixAttempt, Lane } from "./registry.ts";
 import type { DoriConfig } from "./config.ts";
 import { flat } from "./restatement.ts";
 import { parseWatchLine } from "./watch-log.ts";
+import type { Runner } from "./run.ts";
 
 // stuck: the highest rung of the stuck ladder the lane reached in its current session (rung 4 makes a rollover due);
 // repeats: written by older versions (the most attempts of one same fix), still shown by rollover-stats
@@ -76,7 +78,59 @@ export type RolloverEntry =
       // the old lead frozen at the commit: how many processes, and when freshness closes it (null: by hand)
       readonly frozen?: { readonly pids: number; readonly closeAt: string | null };
       readonly sizes?: Sizes;
-    };
+    }
+  // what a lane moved for being stuck (rung 4) did after the move, written once when it ends: its done claim's one line
+  // (resolved, or not when the lane says the move did not solve it) or the lead's close note when it closed without a
+  // claim (resolved absent: unknown, since a lane is also closed when the owner drops or changes the work); rolloverAt
+  // names the rollover
+  | { readonly kind: "outcome"; readonly at: string; readonly key: string; readonly rolloverAt: string; readonly resolved?: boolean; readonly line: string; readonly by: "claim-done" | "close" };
+
+type Rollover = Extract<RolloverEntry, { kind: "rollover" }>;
+type Outcome = Extract<RolloverEntry, { kind: "outcome" }>;
+
+// A lane rollover that committed while the lane stood at rung 4 of the stuck ladder (whoever decided it).
+const stuckMove = (e: RolloverEntry): e is Rollover => e.kind === "rollover" && e.who === "lane" && e.result.startsWith("done") && (e.signals.stuck?.rung ?? 0) >= 4;
+
+// The move that started the lane's current session, when it was a stuck one with no outcome yet: what its done claim or
+// close is asked to describe. An earlier stuck move followed by any other committed move is not asked about (rollover-stats
+// shows it as moved again), so the last session's result is never credited to it.
+export const pendingStuck = (entries: readonly RolloverEntry[], key: string): Rollover | undefined => {
+  const last = entries.findLast((e): e is Rollover => e.kind === "rollover" && e.who === "lane" && e.key === key && e.result.startsWith("done"));
+  if (!last || !stuckMove(last)) return undefined;
+  return entries.some((e) => e.kind === "outcome" && e.key === key && e.rolloverAt === last.at) ? undefined : last;
+};
+
+// The one line a lane gives at its done claim (or the lead's close note): one line, at most 300 characters.
+export const outcomeLine = (text: string): string => text.replace(/\s+/g, " ").trim().slice(0, 300);
+
+// The ask when a stuck-moved lane claims done without its line (asked only then, never while it works).
+export const outcomeMissing = (key: string, r: Rollover): string =>
+  `ROLLOVER_OUTCOME_MISSING ${key}: this lane moved to a new session at ${r.at} while stuck on ${JSON.stringify(r.signals.stuck?.metric ?? "?")} (${r.signals.stuck?.n ?? "?"} attempts); claim again with --rollover-outcome "<one line: what this session did differently after the move, and whether that solved it>"`;
+
+const minutesBetween = (from: string, to: string): number => Math.round((Date.parse(to) - Date.parse(from)) / 60_000);
+
+// Each stuck rollover of a Dori's log and what came of it: the summary line (n moved, m resolved by a done claim) and one
+// line each with the lane's own words. A rollover with no outcome is "moved again" when the lane rolled over later, else
+// the lane is still open or closed before outcomes were kept; both count as unknown.
+export const stuckOutcomeLines = (entries: readonly RolloverEntry[], who = "here"): string[] => {
+  const moves = entries.filter(stuckMove);
+  const outcomes = new Map<string, Outcome>();
+  for (const e of entries) if (e.kind === "outcome") outcomes.set(`${e.key}\n${e.rolloverAt}`, e);
+  const lines = moves.map((r) => {
+    const o = outcomes.get(`${r.key}\n${r.at}`);
+    const later = entries.find((e): e is Rollover => e.kind === "rollover" && e.who === "lane" && e.key === r.key && e.at > r.at && e.result.startsWith("done"));
+    const what = o
+      ? `${o.resolved === true ? "resolved" : o.resolved === false ? "not resolved" : "unknown"} ${minutesBetween(r.at, o.at)} min after (${o.by}): ${o.line}`
+      : later
+        ? `moved again at ${later.at}, no line`
+        : "no line yet (open, or closed before outcomes were recorded)";
+    return `STUCK_ROLLOVER ${who} ${r.key} ${r.at} by ${r.decidedBy ?? "-"} on ${JSON.stringify(r.signals.stuck?.metric ?? "?")} (${r.signals.stuck?.n ?? "?"}x) -> ${what}`;
+  });
+  const count = (v: boolean) => moves.filter((r) => outcomes.get(`${r.key}\n${r.at}`)?.resolved === v).length;
+  const auto = moves.filter((r) => r.decidedBy === "auto").length;
+  // unknown: closed by the lead without a claim, moved again, still open, or logged before outcomes were kept
+  return [`STUCK_OUTCOMES ${who} stuck_rollovers=${moves.length} (auto ${auto}) resolved=${count(true)} not_resolved=${count(false)} unknown=${moves.length - count(true) - count(false)}`, ...lines];
+};
 
 // afterCompactK: thousands of tokens the session still held right after its last compaction (0 or absent is off)
 export type Limits = { readonly contextPct: number; readonly compactions: number; readonly ageH: number; readonly afterCompactK?: number };
@@ -223,6 +277,53 @@ export const limitsFor = (who: Who, h: DoriConfig["handover"]): Limits =>
 // the reason the owner reads after an automatic rollover: what the session crossed when it moved
 export const autoReason = (who: Who, signals: Signals, h: DoriConfig["handover"]): string => `automatic (handover.autoRollover${who === "lane" ? "Lanes" : "Lead"}): ${dueReasons(signals, limitsFor(who, h)).join(", ") || "a threshold was crossed"}`;
 
+// An auto:<key> approval holds only for a run freshness started (the owner's Q470, 2026-11-03: two hand-runs passed the
+// string after an owner link was refused). freshness writes a one-use grant <stateDir>/handover/auto-grants/<token>.json
+// for the side and key it starts and hands the run the token (DORI_HANDOVER_AUTO_GRANT); the handover takes it back once,
+// within AUTO_GRANT_MS, for that same side and key. A grant is not something a hand-run can name: the token is random,
+// lives only until its run takes it, and the string alone holds nothing.
+export const AUTO_GRANT_ENV = "DORI_HANDOVER_AUTO_GRANT";
+export const AUTO_GRANT_MS = 5 * 60_000;
+const grantDir = (stateDir: string): string => join(stateDir, "handover", "auto-grants");
+export const mintAutoGrant = (stateDir: string, who: Who, key: string, now: number): string => {
+  const dir = grantDir(stateDir);
+  mkdirSync(dir, { recursive: true });
+  // grants no run took (a start that failed) are dropped once stale
+  for (const f of readdirSync(dir)) {
+    let at: unknown;
+    try {
+      at = (JSON.parse(readFileSync(join(dir, f), "utf8")) as { at?: unknown }).at;
+    } catch {
+      at = undefined;
+    }
+    if (typeof at !== "number" || now - at > AUTO_GRANT_MS) rmSync(join(dir, f), { force: true });
+  }
+  const token = randomBytes(16).toString("hex");
+  writeFileSync(join(dir, `${token}.json`), `${JSON.stringify({ who, key, at: now })}\n`, { flag: "wx", mode: 0o600 });
+  return token;
+};
+// true when token names a grant for this side and key minted within AUTO_GRANT_MS; the grant is gone afterwards either way
+export const takeAutoGrant = (stateDir: string, who: Who, key: string, token: string | undefined, now: number): boolean => {
+  if (!token || !/^[0-9a-f]{32}$/.test(token)) return false;
+  // claimed by a rename first: of runs that present one token at once, only one rename succeeds
+  const file = join(grantDir(stateDir), `${token}.json`);
+  const claimed = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.taken`;
+  try {
+    renameSync(file, claimed);
+  } catch {
+    return false;
+  }
+  let grant: { who?: unknown; key?: unknown; at?: unknown } | undefined;
+  try {
+    grant = JSON.parse(readFileSync(claimed, "utf8")) as typeof grant;
+  } catch {
+    return false;
+  } finally {
+    rmSync(claimed, { force: true });
+  }
+  return grant?.who === who && grant.key === key && typeof grant.at === "number" && now >= grant.at && now - grant.at <= AUTO_GRANT_MS;
+};
+
 export const decidedBy = (ref: string): DecidedBy => (ref.startsWith(LEAD_PREFIX) ? "lead" : ref.startsWith(AUTO_PREFIX) ? "auto" : "owner");
 
 // A new session (lane or lead) does nothing but re-arm monitors and ack the probe until it gets this line: before it the
@@ -287,10 +388,12 @@ const ownerRefProblem = (m: RegExpExecArray, owner: OwnerMessages): string | und
 // <the id or link of the owner's message that asked for it>" (the message must be the owner's in the inbox; the owner decided the lead
 // rolls over and is told afterwards: canReport says the handover can post that message), a question card (Qn) the owner
 // answered with its first option, a link to the owner's Discord message, or "auto:..." when the automation key for that
-// side is on. A card counts only when it was posted as a rollover proposal for this key and for the session it runs in now
+// side is on and the run is one freshness started (auto.granted: it took that run's one-use grant, takeAutoGrant); typed
+// by hand the automatic string is refused (APPROVAL_BORROWED). A card counts only when it was posted as a rollover proposal for this key and for the session it runs in now
 // (the rollover log says so), so a yes on another lane's card, on any other question, or on a card about an earlier session
 // moves nothing. Undefined when the reference holds.
-export const approvalProblem = (ref: string | undefined, card: (id: string) => Question | undefined, auto: { readonly on: boolean; readonly key: string }, key: string, pane: string, proposals: readonly RolloverEntry[], canReport = false, owner: OwnerMessages = NO_OWNER_MESSAGES): string | undefined => {
+export const APPROVAL_BORROWED = "HANDOVER_APPROVAL";
+export const approvalProblem = (ref: string | undefined, card: (id: string) => Question | undefined, auto: { readonly on: boolean; readonly key: string; readonly granted?: boolean }, key: string, pane: string, proposals: readonly RolloverEntry[], canReport = false, owner: OwnerMessages = NO_OWNER_MESSAGES): string | undefined => {
   const r = ref?.trim() ?? "";
   if (!r) return `no approval: pass --approved-by "${LEAD_PREFIX}<your reason and the signal behind it>" or "${LEAD_PREFIX}<your reason>, owner <id or link of the owner's message that asked for it>" (or the owner's answered rollover card Qn, or the link to their Discord message)`;
   if (r.startsWith(LEAD_PREFIX)) {
@@ -305,6 +408,7 @@ export const approvalProblem = (ref: string | undefined, card: (id: string) => Q
   }
   if (r.startsWith(AUTO_PREFIX)) {
     if (r !== `${AUTO_PREFIX}${auto.key}`) return `${r} is not the automatic approval of this side; only ${AUTO_PREFIX}${auto.key} is`;
+    if (!auto.granted) return `${APPROVAL_BORROWED} ${r} is the approval of a run freshness starts by itself and holds for no run started by hand: pass --approved-by "${LEAD_PREFIX}<reason and the signal behind it>" or "${LEAD_PREFIX}<reason>, owner <link of the owner's message that asked for it>" (or the owner's answered rollover card Qn, or that link alone)`;
     if (!auto.on) return `${r} is an automatic approval, but the automation key is off (the owner turns it on)`;
     // an automatic rollover tells the owner afterwards too
     return canReport ? undefined : "an automatic rollover needs a way to tell the owner afterwards: set DORI_DISCORD_TOKEN and DORI_DISCORD_CHANNEL (or give the lane a discord:<id> thread)";
@@ -481,15 +585,35 @@ export const appendRollover = (stateDir: string, entry: RolloverEntry): void => 
 
 export const readRollovers = (stateDir: string): RolloverEntry[] => {
   const file = rolloverLog(stateDir);
-  if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8").split("\n").flatMap((l) => {
+  return existsSync(file) ? parseRollovers(readFileSync(file, "utf8")) : [];
+};
+
+// The stuck rollovers of each other Dori on this host (handover.statsPeers "<user>:<absolute path>"), read as that
+// account; a log that cannot be read is one STUCK_OUTCOMES <user> UNREADABLE line, never a silent zero.
+export const peerStuckLines = async (run: Runner, peers: readonly string[]): Promise<string[]> => {
+  const out: string[] = [];
+  for (const peer of peers) {
+    const m = /^([a-z_][a-z0-9_-]*):(\/\S+)$/.exec(peer);
+    if (!m) {
+      out.push(`STUCK_OUTCOMES ${peer} UNREADABLE: give <user>:<absolute path of its rollover-log.jsonl>`);
+      continue;
+    }
+    const [, user = "", path = ""] = m;
+    const r = await run(["sudo", "-n", "-u", user, "cat", path], { timeoutMs: 15_000 });
+    if (r.code === 0) out.push(...stuckOutcomeLines(parseRollovers(r.out), user));
+    else out.push(`STUCK_OUTCOMES ${user} UNREADABLE: ${(r.err || r.out || `exit ${r.code}`).replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+  return out;
+};
+
+export const parseRollovers = (text: string): RolloverEntry[] =>
+  text.split("\n").flatMap((l) => {
     try {
       return l.trim() ? [JSON.parse(l) as RolloverEntry] : [];
     } catch {
       return [];
     }
   });
-};
 
 export const lastProposal = (entries: readonly RolloverEntry[], key: string): Extract<RolloverEntry, { kind: "proposal" }> | undefined =>
   entries.findLast((e): e is Extract<RolloverEntry, { kind: "proposal" }> => e.kind === "proposal" && e.key === key);
@@ -553,7 +677,7 @@ export const rolloverStats = (entries: readonly RolloverEntry[], watchLines: rea
     out.push(`ROLLOVER ${r.who} ${r.key} ${r.at} ${r.result} ${r.from} -> ${r.to ?? "-"} ${fmtSignals(r.signals)}; approval ${r.approvalMin ?? "-"} min (by ${r.approvedBy ?? "-"})${fmtDecision(r)}; steps ${r.steps.map((s) => `${s.step} ${Math.round(s.ms / 1000)}s${s.ok ? "" : " FAIL"}`).join(", ") || "-"}${r.reasons.length ? `; reasons: ${r.reasons.join("; ")}` : ""}${r.accounts && r.accounts.from !== r.accounts.to ? `; account ${r.accounts.from || "?"} -> ${r.accounts.to || "?"}` : ""}${r.supplementRounds ? `; supplements ${r.supplementRounds} (${(r.supplements ?? []).map((s) => s.items.length).join("+")} items)` : ""}${fmtSizes(r, now, readK)}`);
     out.push(`QUALITY ${r.key} ${r.at} before ${windowH}h: ${fmtCounts(countsIn(watchLines, r.key, at - span, at))} | after ${afterH}h: ${fmtCounts(countsIn(watchLines, r.key, at, at + span))}`);
   }
-  return out;
+  return [...out, ...stuckOutcomeLines(entries)];
 };
 
 // The owner's own messages a lane handover note carries, since the lane's last handover: those in the lane's thread and

@@ -30,6 +30,8 @@ Then open your agent inside herdr, or inside an aoe session for the aoe backend,
 
 ## Requirements
 
+For native Windows installation, skill registration and `dori serve`, follow the [Windows setup guide](skills/dori-mode/setups/windows/README.md).
+
 - [bun](https://bun.sh) 1.3 or newer, and git
 - either [herdr](https://herdr.dev) for lane tabs, or [agent-of-empires (aoe)](https://github.com/njbrake/agent-of-empires) and `tmux` for lane sessions
 - a coding agent that loads skills (built for [OmO](https://github.com/code-yeongyu/oh-my-openagent); the agent command is configurable)
@@ -105,7 +107,7 @@ The footer tells lanes to send `[REPORT] <key> | <milestone|blocker|question|don
 ["tmux", "send-keys", "-t", "=aoe_Dori_0a1b2c3d:", "Enter"]
 ```
 
-`dori freshness` reads reports from the lead first, then the lane screen. A new report resets the silence timer; by default it nudges after 15 minutes and after 20 posts a short status line in the owner's words (`discord.quietText`) through `hooks.threadReply`, once per silence. The lane's report itself goes to the lead pane for the lead to retell in plain words; `discord.postRawReports: true` posts the report as before.
+`dori freshness` reads reports from the lead first, then the lane screen. A new report resets the silence timer; by default it nudges after 15 minutes and after 20 posts a short status line in the owner's words (`discord.quietText`) through `hooks.threadReply`, once per silence. The lane's report itself goes to the lead pane for the lead to retell in plain words; `discord.postRawReports: true` posts the report as before. It also checks lane caps and hung calls (`supervision`; the caps are off by default): at a cap, or a call that looks hung, it tells the lead once and never stops or types into the lane. `close` prints the lane's `COST`.
 
 With aoe, `dori watch` emits `LANE_BLOCKED <key> <waiting|error|question|idle> <pane>` when a working or not-done lane stops for a human. It combines `aoe ps --json` with the screen: no blocked event during a running turn; idle must last 45 seconds, and a monitor, wake source or active/scheduled goal is not idle, nor is a lane whose session still waits on a detached eval cell, background bash session or background task it started (a quiet `BG_WAITING` log line; `LANE_BLOCKED` after `blockedWaitMin`, 60 minutes). Closing stops the aoe session and moves it to trash, never purges it.
 
@@ -176,6 +178,7 @@ The watcher runs each check itself when it closes the lane, with no shell, and n
 | `dori guard [--loop MIN]` | alert on load, memory, disk and pane count |
 | `dori fix-attempt <key> --metric M --hypothesis H` | count a fix you asked a lane for; lanes tag such reports `(fix: M / H)`, and from the third attempt on one metric with one hypothesis `SAME_FIX_3` tells you to switch the lane to a root-cause hunt; it first prints the hypotheses already tried on that metric (`PRIOR_FIX`) |
 | `dori checkpoint <key> --step ID --result TEXT --evidence PATH [--remote-effect RECEIPT]...` / `dori checkpoints <key>` | a lane records each finished step once, with the receipts of the remote effects it did (a push, a merge), and reads them back before resuming, so a restarted lane does not repeat a push or a merge; the same step with other data, or a receipt another step already has, is refused |
+| `dori caps <key> [--wall-minutes N\|none] [--token-limit N\|none] [--cost-limit N\|none]` | a lane's caps on wall minutes, tokens and cost (off by default; `launch` takes the same flags); at a cap `freshness` tells the lead once (`LANE_CAP`) and never stops the lane; with flags, set the lane's own |
 | `dori signals [--lane K \| --cwd DIR \| --tag T]` | what earlier lanes in one area tried and how it went: numbered fix attempts and the switch to a root-cause hunt (also read back from `[REPORT]` lines and your re-instructions), tagged fixes by metric, rejected done claims with reasons, re-sends, nudges, outcome, the area's rejection rate and rework, warnings. Read it before you re-instruct a lane |
 | `dori scorecard [--date D] [--post]` | the day's token scorecard from records, no model call: cost per verified completion beside the claim rejection rate, the lanes with most rework, first-reply median/p90, the lead's context tax; saved to `<stateDir>/scorecard/<date>.json` and `latest.md` for the lead to read, `--post` also sends it to Discord (off by default; a daily systemd timer that saves it is in the Discord + aoe setup) |
 | `dori heavy <label> [--mem 70G] -- <cmd>` | run a build, test suite or GPU job when load is low, in its own memory-capped scope (over it only the job dies, never the lane); beside running ones only when GPU, memory and CPU each keep 10% free with it |
@@ -225,7 +228,7 @@ Each of 1–9 options appears in full beside a short `Pick N` button; put the re
 
 With `--thread`, the card is posted inside that work thread and marks it waiting. The answer folds into the record right there, with no separate record line; the thread returns to working once no other question in it is open. `dori reopen` restores the buttons and marks the thread waiting again. Without `--thread`, new cards go to the configured channel. Older channel cards associated with a thread still leave a silent answer record in that thread. `dori resolve` removes the tracked question after its follow-up is done; the folded card remains in chat. Resolving a card that was never answered also returns its thread to working once no other question in it is open, so a dropped question never leaves the thread waiting.
 
-`discord.statusStyle: "emoji"` uses 🔄 working, ⏸️ waiting and ✅ done at the start of thread names, and 📌 for a thread kept open on purpose (`dori thread set <ref> standing`; `unstanding` releases it), whatever its status; the default `"words"` uses `[working]`, `[waiting]`, `[done]`. Only threads get a mark: a text channel, forum or category given as a thread (for example the channel id in `dori ask --thread`) keeps its name, and that status is dropped with `THREAD_STATUS_DROPPED <id> ... is not a thread`. `dori thread reply` / `wait` / `done` set these states; done archives, and reply/wait unarchive. An owner message in a done thread makes the listener reopen it as working. See the [Discord + aoe setup](skills/dori-mode/setups/discord-aoe/README.md) for services and localized card wording.
+`discord.statusStyle: "emoji"` uses 🔄 working, 🔔 the owner's answer needed and ✅ done at the start of thread names (⛔ cancelled, 💤 replaced or withdrawn, ❗ failed for a Yoodori request), and 📌 for a thread kept open on purpose (`dori thread set <ref> standing`; `unstanding` releases it), whatever its status; the default `"words"` uses `[working]`, `[waiting]`, `[done]`. Only threads get a mark: a text channel, forum or category given as a thread (for example the channel id in `dori ask --thread`) keeps its name, and that status is dropped with `THREAD_STATUS_DROPPED <id> ... is not a thread`. `dori thread reply` / `wait` / `done` set these states; done archives, and reply/wait unarchive. An owner message in a done thread, or in one that showed his turn (🔔 with no card left, ❗), makes the listener mark it working again. See the [Discord + aoe setup](skills/dori-mode/setups/discord-aoe/README.md) for services and localized card wording.
 
 ### Voice requests from an iPhone Shortcut
 
@@ -233,7 +236,7 @@ The Discord iOS app can't be driven by Shortcuts, so a one-button voice request 
 
 ## Tests
 
-There's no CI. Run the tests locally:
+There are no automatic GitHub checks: the fork's review/merge gate requires PRs without CI. Run the full suite locally:
 
 ```sh
 cd skills/dori-mode/scripts
@@ -243,6 +246,14 @@ bunx tsc --noEmit  # typecheck
 ```
 
 The tests cover both backends, launch/report delivery, freshness, blocked lanes, done flow and Discord cards/status. External tools and Discord HTTP/gateway are faked; no real pane, repo, GitHub or Discord account is touched.
+
+The Windows subset in `.github/workflows/windows.yml` is run by hand, not on pushes or pull requests:
+
+```sh
+gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref <branch>
+```
+
+The workflow runs the native process/session, freeze/thaw and PowerShell-literal tests plus the supervisor, installer, launcher, skill-discovery and registered-task tests. Windows lead and lane handovers freeze with NtSuspendProcess and thaw with NtResumeProcess. Process discovery reports an agent whose threads are all suspended as stopped, so messaging sends neither text nor Enter during a handover, even before its replacement record exists. The native regression freezes a real child, attempts a send against its stale running-turn screen, and thaws it through the CLI from a separate invocation. Suites built on POSIX shell, process-table and launch-world fixtures stay in the Linux suite.
 
 ## License
 

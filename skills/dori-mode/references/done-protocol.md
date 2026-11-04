@@ -15,6 +15,8 @@ The evidence is for the lead; the summary is what the owner reads in your work t
 
 The key is in your brief's lane footer. If you leave it out, the lane registered for your pane is used.
 
+If your lane was moved to a new session because it was stuck (rung 4 of the stuck ladder), add one line on what you did differently after the move: `--rollover-outcome "<what changed, and whether that solved it>"`, plus `--rollover-unresolved` when the move did not solve it and you finished another way. Without it the claim is refused once (`ROLLOVER_OUTCOME_MISSING`, nothing recorded); claim again with the line.
+
 ## What happens next
 
 1. The Dori gets a `LANE_DONE_CLAIMED` event, and you get a `[LEAD]` line saying when the lane closes.
@@ -26,7 +28,7 @@ If the lead has paused your lane (`dori pause`, e.g. while it waits on the owner
 
 ## What you learned
 
-Before you claim, put each thing where it belongs, once: a standing instruction of the owner that the lane met goes to the lead in a `[REPORT]` for the directive ledger (not only into memory); a lesson, a fact or how the work went goes into your omo memory with the report's path; the report itself stays in `~/.dori/qa` as the record.
+Before you claim, put each thing where it belongs, once: a standing instruction of the owner that the lane met goes to the lead in a `[REPORT]` for the directive ledger (not only into memory); a lesson, a fact or how the work went goes into your omo memory with the report's path; a trap of this repo the next lane here would hit again goes into the `[REPORT]` too, as one line per trap that the lead keeps with `dori close --lesson`, one `--lesson` for each (or you with `dori lesson add <key> --rule ... --evidence <path>`), so the next brief in this repo carries it; the report itself stays in `~/.dori/qa` as the record.
 
 ## Reporting honestly
 

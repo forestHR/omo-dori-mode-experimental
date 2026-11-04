@@ -80,9 +80,13 @@ Then edit `~/.dori/config.json`: at least `leadPane` (your own herdr pane, from 
 
 Arm these as persistent monitors in your own session:
 
+<!-- Inbound rows per platform: agent-messenger has no watch command (dori-superagent issue #74, https://github.com/sisyphuslabs/dori-superagent/issues/74). -->
+
 | Monitor | Command | Filter |
 |---|---|---|
-| inbound messages | your messenger's watch command | new owner messages |
+| inbound messages (Discord) | `tail -n 0 -F <stateDir>/discord/inbox.jsonl` (`DORI_DISCORD_INBOX` if set), the inbox `dori inbound discord` writes; keep that listener running as a service (`dori-inbound` unit, or `dori serve --only inbound`: a bare `dori serve` also runs `dori watch` and the other loops below, which would then run twice) | every new row |
+| inbound messages (Slack) | the two Slack rows below | as there |
+| inbound messages (Telegram) | none yet: neither agent-messenger nor `dori` has a Telegram watch command (`dori inbound` takes only `slack` and `discord`), so a Telegram Dori needs its own `getUpdates` poller until one ships | — |
 | done flow (and `LANE_BLOCKED` with aoe) | `dori watch` | `^LANE_` |
 | dead panes | `dori dead-panes --loop 3` | `^(DEAD\|UNRECOGNISED)_PANE` |
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |

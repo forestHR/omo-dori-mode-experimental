@@ -2,13 +2,21 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const file = process.env.DORI_TEST_HTTP ?? "";
-type State = { name: string; archived: boolean; calls: { method: string; path: string; body: Record<string, unknown> }[] };
+type State = { name: string; archived: boolean; calls: { method: string; path: string; body: Record<string, unknown>; files?: { field: string; name: string; type: string; text: string }[] }[] };
 globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const state: State = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : { name: "", archived: false, calls: [] };
   const path = String(input).replace("https://discord.com/api/v10", "");
   const method = init?.method ?? "GET";
-  const body: Record<string, unknown> = JSON.parse(String(init?.body ?? "{}"));
-  state.calls.push({ method, path, body });
+  // a message with attachments is multipart: its payload_json is the body, each files[n] part is kept as written
+  const form = init?.body instanceof FormData ? init.body : undefined;
+  const body: Record<string, unknown> = JSON.parse(form ? String(form.get("payload_json")) : String(init?.body ?? "{}"));
+  const files = form ? await Promise.all([...form.entries()].filter(([k]) => k !== "payload_json").map(async ([field, v]) => {
+    const part: unknown = v;
+    if (!(part instanceof File)) throw new Error(`multipart part ${field} is not a file`);
+    return { field, name: part.name, type: part.type, text: await part.text() };
+  })) : undefined;
+  if (form && new Headers(init?.headers).has("content-type")) throw new Error("a multipart request must let fetch set its own content-type (with the boundary)");
+  state.calls.push({ method, path, body, ...(files ? { files } : {}) });
   // <file>.auth: the Authorization header of each request, in order (which bot token went out)
   const auth = `${file}.auth`;
   writeFileSync(auth, JSON.stringify([...(existsSync(auth) ? (JSON.parse(readFileSync(auth, "utf8")) as string[]) : []), new Headers(init?.headers).get("authorization") ?? ""]));

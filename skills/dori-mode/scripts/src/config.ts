@@ -6,6 +6,7 @@ import { run } from "./run.ts";
 import type { RelatedSettings } from "./related-thread.ts";
 import type { BackupSettings } from "./state-backup.ts";
 import type { StateGitSettings } from "./state-git.ts";
+import { defaultSupervision, type SupervisionSettings, supervisionProblem } from "./supervision.ts";
 
 // stateGit.backup defaults (src/state-backup.ts); here so loading the config does not load git or the backup code
 export const BACKUP_DEFAULTS: BackupSettings = {
@@ -100,7 +101,7 @@ export type GuardThresholds = {
 
 export type Backend = "herdr" | "aoe";
 
-// "words" marks status as [working] / [waiting] / [done] / [standing]; "emoji" uses 🔄 / ⏸️ / ✅ / 📌 (and ⏳ / ✅ in progress text).
+// "words" marks status as [working] / [waiting] / [done] / [standing]; "emoji" uses 🔄 / 🔔 / ✅ / 📌 (and ⏳ / ✅ in progress text).
 export type StatusStyle = "words" | "emoji";
 
 // The speech this Dori uses with its owner in his channel and threads, which a lane's summary for him has to match (the
@@ -237,7 +238,8 @@ export type Reviewers = { readonly models: readonly string[]; readonly allowSame
 // dori review / dori merge (src/merge-gate.ts). repos: "<owner>/<repo>" -> ISO time; claim-done refuses a lane whose done
 // signal names a PR of that repo merged at or after that time without dori merge (empty: no repo is checked). testCommand
 // runs in <checkout>/<testDir> for a PR with no GitHub checks, at most testMinutes.
-export type MergeGate = { readonly repos: Readonly<Record<string, string>>; readonly testCommand: readonly string[]; readonly testDir: string; readonly testMinutes: number };
+// identities: "<owner>/<repo>" (any case) -> the name and email every PR commit's author and committer must have (dori review)
+export type MergeGate = { readonly repos: Readonly<Record<string, string>>; readonly identities: Readonly<Record<string, { readonly name: string; readonly email: string }>>; readonly testCommand: readonly string[]; readonly testDir: string; readonly testMinutes: number };
 
 // dori scorecard: where the day's numbers come from and how the card reads. Empty paths leave that line as n/a.
 export type Scorecard = {
@@ -354,6 +356,8 @@ export type AutoSignals = {
 // handovers committed at most auditWindowH hours ago (0 turns it off); the lead's instructions of the old session's last
 // auditLeadH hours are read with the owner's quoted words; auditSummaryAt ("Mon 08:30" in scorecard.timeZone; empty: off)
 // is when the week's summary goes to the lead's inbox.
+// statsPeers: "<user>:<absolute path of that Dori's rollover-log.jsonl>" per other Dori on this host, read as that account
+// (sudo -n -u <user> cat) by dori rollover-stats --stuck so one command shows each Dori's stuck rollovers (empty: this one).
 export type HandoverWatcher = { readonly name: string; readonly check: readonly string[]; readonly arm?: string };
 
 export type Handover = {
@@ -388,6 +392,7 @@ export type Handover = {
   readonly auditWindowH: number;
   readonly auditLeadH: number;
   readonly auditSummaryAt: string;
+  readonly statsPeers: readonly string[];
 };
 
 // dori backlog: the list the dori-lanes freshness loop starts lanes from (src/backlog.ts); off unless a Dori turns it on
@@ -440,8 +445,9 @@ export type DoriConfig = {
   // pushes the links of its local ledger to (dori directives links --push, and freshness when the local ledger changed)
   // memory: the lead's omo memory repo dori directive-audit reads for directives kept twice (DIRECTIVE_DUPLICATE; empty:
   // the repo of a session in handover.cwd, else defaultCwd; "off": no check); dailyAudit false: the freshness loop does not
-  // run the daily directive audit (another Dori audits this one, e.g. the SooDori timer soodori-daily-audit for ZzangDori)
-  readonly directives: { readonly common: string; readonly local: string; readonly links?: string; readonly linkPeers?: readonly string[]; readonly memory?: string; readonly dailyAudit?: boolean };
+  // run the daily directive audit (another Dori audits this one, e.g. the SooDori timer soodori-daily-audit for ZzangDori);
+  // pickModel: the small model dori launch asks which non-fixed entries a brief needs (empty: the scope rules decide)
+  readonly directives: { readonly common: string; readonly local: string; readonly links?: string; readonly linkPeers?: readonly string[]; readonly memory?: string; readonly dailyAudit?: boolean; readonly pickModel?: string };
   readonly sessionsDir: string;
   readonly nudgeAfterMin: number;
   // dori watch: an idle lane waiting on background work it started (BG_WAITING) is LANE_BLOCKED idle after this long
@@ -491,6 +497,8 @@ export type DoriConfig = {
   // dori state-git: this Dori's state in local git, committed by dori-lanes (src/state-git.ts)
   readonly stateGit: StateGitSettings;
   readonly backlog: BacklogSettings;
+  // lane caps, hung calls and the cost record (src/supervision.ts): caps off by default, a cap or a hung call is told to the lead
+  readonly supervision: SupervisionSettings;
   readonly instances: readonly InstanceRef[];
 };
 
@@ -515,7 +523,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   defaultModel: "anthropic/claude-opus-5-5",
   launchKeywords: "ulw set goal and work",
   launchEnv: {},
-  directives: { common: join(import.meta.dir, "../../references/directives.json"), local: "", links: "", linkPeers: [], memory: "", dailyAudit: true },
+  directives: { common: join(import.meta.dir, "../../references/directives.json"), local: "", links: "", linkPeers: [], memory: "", dailyAudit: true, pickModel: "anthropic-subscription/claude-haiku-5-5" },
   sessionsDir: join(home, ".omo", "agent", "sessions"),
   nudgeAfterMin: 15,
   blockedWaitMin: 60,
@@ -597,11 +605,12 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   },
   handover: { prompt: "Dori mode", title: "", model: "", services: [], timers: "remind", verifyMin: 15, inbox: "", cwd: "", watchers: [], readyMin: 30,
     laneContextPct: 0, laneCompactions: 0, laneAgeH: 0, laneAfterCompactK: 0, leadContextPct: 0, leadCompactions: 0, leadAgeH: 0, leadAfterCompactK: 0, autoRolloverLanes: false, autoRolloverLead: false, autoRetryMin: 30, autoWaitMin: 20,
-    trainingTags: ["training"], trainingWatch: "chain[_-]?watch|_chain_|\\btrain(ing)?\\b|learning iteration|/runs/|run[_-]?dir|\\bdori heavy\\b|(^|[^a-z])(eval|replay)([^a-z]|$)", supplementRounds: 2, frozenCloseH: 24, auditAfterMin: 10, auditWindowH: 24, auditLeadH: 6, auditSummaryAt: "Mon 08:30",
+    trainingTags: ["training"], trainingWatch: "chain[_-]?watch|_chain_|\\btrain(ing)?\\b|learning iteration|/runs/|run[_-]?dir|\\bdori heavy\\b|(^|[^a-z])(eval|replay)([^a-z]|$)", supplementRounds: 2, frozenCloseH: 24, auditAfterMin: 10, auditWindowH: 24, auditLeadH: 6, auditSummaryAt: "Mon 08:30", statsPeers: [],
     proposalText: "Move {who} to a new session? {signals}. The handover note it would get: {note}{blockers}" },
   stateGit: { dirs: [], everyMin: 10, maxFileKb: 512, timeoutSec: 60, timeZone: "", backup: BACKUP_DEFAULTS },
-  mergeGate: { repos: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
+  mergeGate: { repos: {}, identities: {}, testCommand: ["bun", "test"], testDir: "skills/dori-mode/scripts", testMinutes: 20 },
   backlog: { enabled: false, everyMin: 60, maxLanes: 2, maxStarts: 1, hostMaxLanes: 3, hostDir: "/tmp/dori-backlog", pairRepairPattern: "", intakeDone: "file {stateDir}/backlog/reports/{id}.md", writeNeedsOwnerLink: false, feedCommand: [], orderKinds: [], dayReportAt: "", timeZone: "UTC" },
+  supervision: defaultSupervision(),
   instances: [],
 });
 
@@ -768,8 +777,10 @@ export const loadConfig = async (path = configPath(), home = homedir(), warn: (l
   const migrated = migrateOldKeys((await file.exists()) ? ((await file.json()) as Raw) : {});
   for (const w of migrated.warnings) warn(`${w} (${path})`);
   const raw = migrated.raw as Partial<DoriConfig>;
-  const merged: DoriConfig = { ...base, ...raw, update: { ...base.update, ...raw.update }, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, discord: { ...base.discord, ...raw.discord }, stuck: { ...base.stuck, ...raw.stuck }, reviewers: { ...base.reviewers, ...raw.reviewers }, mergeGate: { ...base.mergeGate, ...raw.mergeGate }, scorecard: { ...base.scorecard, ...raw.scorecard }, signals: { ...base.signals, ...raw.signals }, explore: { ...base.explore, ...raw.explore }, autoSignals: { ...base.autoSignals, ...raw.autoSignals, intentCheck: { ...base.autoSignals.intentCheck, ...raw.autoSignals?.intentCheck } }, handover: { ...base.handover, ...raw.handover }, related: { ...base.related, ...raw.related }, stateGit: { ...base.stateGit, ...raw.stateGit, backup: { ...base.stateGit.backup, ...raw.stateGit?.backup } }, heavyQueue: { ...base.heavyQueue, ...raw.heavyQueue }, backlog: { ...base.backlog, ...raw.backlog } };
+  const merged: DoriConfig = { ...base, ...raw, update: { ...base.update, ...raw.update }, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, discord: { ...base.discord, ...raw.discord }, stuck: { ...base.stuck, ...raw.stuck }, reviewers: { ...base.reviewers, ...raw.reviewers }, mergeGate: { ...base.mergeGate, ...raw.mergeGate }, scorecard: { ...base.scorecard, ...raw.scorecard }, signals: { ...base.signals, ...raw.signals }, explore: { ...base.explore, ...raw.explore }, autoSignals: { ...base.autoSignals, ...raw.autoSignals, intentCheck: { ...base.autoSignals.intentCheck, ...raw.autoSignals?.intentCheck } }, handover: { ...base.handover, ...raw.handover }, supervision: { ...base.supervision, ...raw.supervision }, related: { ...base.related, ...raw.related }, stateGit: { ...base.stateGit, ...raw.stateGit, backup: { ...base.stateGit.backup, ...raw.stateGit?.backup } }, heavyQueue: { ...base.heavyQueue, ...raw.heavyQueue }, backlog: { ...base.backlog, ...raw.backlog } };
   if (merged.backlog.pairRepairPattern && merged.backlog.writeNeedsOwnerLink) warn(`CONFIG_BACKLOG_REPAIR_EXEMPT backlog.pairRepairPattern and backlog.writeNeedsOwnerLink are both on: #dori-pair repair requests start without an owner message link, because the owner's standing rule that faults of the Dori base go to the maintenance Dori is their approval (${path})`);
+  const supervisionBad = supervisionProblem((raw as { supervision?: unknown }).supervision);
+  if (supervisionBad) throw new ConfigError(`${path}: invalid ${supervisionBad}`);
   const heavyProblem = heavyQueueProblem(merged.heavyQueue);
   if (heavyProblem) throw new ConfigError(`${path}: ${heavyProblem}`);
   if (!OWNER_SPEECHES.includes(merged.discord.ownerSpeech)) throw new ConfigError(`${path}: discord.ownerSpeech must be "" (follow discord.locale), "casual" or "polite", not ${JSON.stringify(merged.discord.ownerSpeech)}`);
@@ -787,7 +798,7 @@ export const loadConfig = async (path = configPath(), home = homedir(), warn: (l
     watchLog: expandHome(raw.watchLog ?? join(stateDir, "lanes.log"), home),
     update: { ...merged.update, repo, alertPane: raw.update?.alertPane ?? leadPane, services: merged.update.services.map((s) => ({ ...s, paths: s.paths ?? ["skills/dori-mode/scripts/src/"], log: expandHome(s.log ?? "", home), ready: s.ready ?? "" })) },
     defaultCwd: expandHome(merged.defaultCwd, home),
-    directives: { common: expandHome(raw.directives?.common ?? base.directives.common, home), local: expandHome(raw.directives?.local ?? "", home), links: expandHome(raw.directives?.links ?? "", home), linkPeers: raw.directives?.linkPeers ?? [], memory: expandHome(raw.directives?.memory ?? "", home), dailyAudit: raw.directives?.dailyAudit !== false },
+    directives: { common: expandHome(raw.directives?.common ?? base.directives.common, home), local: expandHome(raw.directives?.local ?? "", home), links: expandHome(raw.directives?.links ?? "", home), linkPeers: raw.directives?.linkPeers ?? [], memory: expandHome(raw.directives?.memory ?? "", home), dailyAudit: raw.directives?.dailyAudit !== false , pickModel: raw.directives?.pickModel ?? base.directives.pickModel},
     sessionsDir: expandHome(merged.sessionsDir, home),
     scorecard: { ...merged.scorecard, sessions: expandHome(merged.scorecard.sessions || merged.sessionsDir, home), lanesLog: expandHome(merged.scorecard.lanesLog || (raw.watchLog ?? join(stateDir, "lanes.log")), home), leadSessions: expandHome(merged.scorecard.leadSessions, home), inbox: expandHome(merged.scorecard.inbox, home) },
     handover: { ...merged.handover, inbox: expandHome(merged.handover.inbox, home), cwd: expandHome(merged.handover.cwd, home) },

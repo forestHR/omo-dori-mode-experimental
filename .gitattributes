@@ -1,0 +1,2 @@
+# Markdown code blocks are consumed as machine-readable templates.
+*.md text eol=lf

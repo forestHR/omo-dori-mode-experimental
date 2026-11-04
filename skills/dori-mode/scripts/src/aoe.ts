@@ -151,7 +151,8 @@ export const forwardEnv = async (run: Runner, names: readonly string[]): Promise
 export const envMismatch = async (run: Runner, pane: string, env: Readonly<Record<string, string | undefined>>): Promise<string[]> => {
   const out: string[] = [];
   if (isHerdrPane(pane)) {
-    if (!Object.keys(env).length) return out;
+    // Windows shows no process's environment to another; launchEnv (the GPU guard of a training node) is a Linux setting
+    if (!Object.keys(env).length || process.platform === "win32") return out;
     const pid = await herdrAgentPid(run, pane);
     const have = pid ? procEnv(pid) : new Map<string, string>();
     for (const [name, want] of Object.entries(env)) if (have.get(name) !== want) out.push(`${name}=${want ?? "(unset)"}(${have.get(name) ?? "unset"})`);
@@ -237,6 +238,8 @@ export const withPi = (path: string, tool: string): string => {
 // herdr opener puts it on the agent's command line: a herdr pane takes the server's environment, not this caller's.
 export const agentPath = (tool: string): string => {
   const callerPath = process.env.PATH ?? "";
+  // Native Windows runs omo.exe, not the Unix node shebang; preserve its semicolon-separated PATH.
+  if (process.platform === "win32") return callerPath;
   const nvmDir = process.env.NVM_DIR || join(process.env.HOME ?? "", ".nvm");
   const node = sessionPath(callerPath, nvmDir);
   if (node === undefined) throw new AoeError(`NO_NODE no node on PATH (${callerPath}) or in ${nvmDir}: the session's senpi task model probe and omo hooks run #!/usr/bin/env node and would exit 127; install node with nvm or put it on the caller's PATH`);

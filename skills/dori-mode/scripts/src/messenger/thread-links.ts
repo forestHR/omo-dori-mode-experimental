@@ -10,7 +10,7 @@ const LINK = new RegExp(String.raw`(?<![(<\w/])(?:<${HOST}>|${HOST})(?![\w/>])|<
 // code spans and blocks stay as written
 const CODE = /```[\s\S]*?```|`[^`\n]*`/g;
 
-const STATUS = /^(?:\[[^\]]{1,20}\]|(?:🔄|⏸|✅|⏳)\uFE0F?)\s*/u;
+const STATUS = /^(?:\[[^\]]{1,20}\]|(?:🔄|🔔|⏸|✅|⏳|⛔|💤|❗|⌛)\uFE0F?)\s*/u;
 const STATUS_WORD = /^[^\s·]{1,8}(?: [^\s·]{1,8})?\s*·\s*/u;
 
 // "✅ 완료 · 🏷️ 릴리스 v2.6.18" -> "릴리스 v2.6.18"; a name with no status mark keeps everything but its emoji.

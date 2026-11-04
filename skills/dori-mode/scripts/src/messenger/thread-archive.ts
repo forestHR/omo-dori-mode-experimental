@@ -44,7 +44,7 @@ const errText = (e: unknown): string => (e instanceof Error ? e.message : String
 // A done (✅) thread that is still open in the owner's channel: dori close archives the thread, but anything posted in it
 // afterwards (the lead's summary a second later, a reply) unarchives it again and the ✅ name stays. Each freshness tick
 // archives such a thread once it has been quiet for afterMin minutes and nothing still holds it: an open lane, an open
-// question card, a pending status rename. A working or waiting (🔄 / ⏸️) thread is never touched, nor is any channel
+// question card, a pending status rename. A working or waiting (🔄 / 🔔) thread is never touched, nor is any channel
 // (only threads come back from threads/active), and nothing is renamed. The owner writing in it later reopens it as
 // before (the listener marks it working).
 export const archiveDoneThreads = async (d: ArchiveDeps): Promise<string[]> => {

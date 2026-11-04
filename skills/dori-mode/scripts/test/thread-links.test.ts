@@ -61,7 +61,7 @@ test("a text channel and a message in it, a masked link, code, and a thread the 
 });
 
 test("the link label drops status marks, a status word after them, emoji and brackets", () => {
-  expect(["✅ 완료 · 🏷️ 릴리스 v2.6.18", "🔄 ⏸️ x 고치기", "[진행 중] 로그 [v2] 정리", "🏷️ 릴리스 · 노트", "정리 · 2단계"].map(linkLabel)).toEqual([
+  expect(["✅ 완료 · 🏷️ 릴리스 v2.6.18", "🔄 🔔 x 고치기", "[진행 중] 로그 [v2] 정리", "🏷️ 릴리스 · 노트", "정리 · 2단계"].map(linkLabel)).toEqual([
     "릴리스 v2.6.18", "x 고치기", "로그 v2 정리", "릴리스 · 노트", "정리 · 2단계",
   ]);
 });

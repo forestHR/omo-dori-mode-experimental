@@ -4,20 +4,25 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
 import { isHerdrPane } from "./herdr.ts";
 import { reviveHerdr } from "./herdr-sessions.ts";
+import { fileLog, installTaskRefusal, serve, serveLoops, spawnLoop, TASK_NAME, taskArgv } from "./serve.ts";
+import { winSignal } from "./win-suspend.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { CheckpointError, Checkpoints } from "./checkpoints.ts";
+import { isLessonOutcome, LessonError, Lessons } from "./lessons.ts";
+import { type BudgetLimits, laneLimits } from "./supervision.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
-import { ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers } from "./handover.ts";
+import { accountHome, ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers, windowsDetachRefusal } from "./handover.ts";
 import { laneHandover, type LaneHandoverDeps, markReady, paneSignals, SUMMARY_TEMPLATE } from "./lane-handover.ts";
 import { auditHandover, auditSummary, type Committed, findCommitted, markerFile, reportGap, sendAuditSummary, summaryWeek } from "./rollover-audit.ts";
-import { appendRollover, dueReasons, holdTyped, LEAD_PREFIX, limitsFor, quietReason, readRollovers, type RolloverRequest, rolloverStats, sessionStart } from "./rollover.ts";
+import { appendRollover, AUTO_GRANT_ENV, decidedBy, dueReasons, holdTyped, LEAD_PREFIX, limitsFor, mintAutoGrant, outcomeLine, peerStuckLines, pendingStuck, quietReason, readRollovers, type RolloverRequest, rolloverStats, sessionStart, stuckOutcomeLines } from "./rollover.ts";
 import { procTable, resolveSession } from "./session-id.ts";
 import { restartService } from "./update-ready.ts";
 import { ConfigError, configPath, envFilePath, fill, loadConfig, loadEnvFile, resolveInstance } from "./config.ts";
@@ -29,7 +34,7 @@ import { retryLaneTells } from "./lane-tells.ts";
 import { applyUpdate } from "./update.ts";
 import { announceChange } from "./update-announce.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
-import { claimDone, closeLane, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
+import { claimDone, closeLane, closeLessons, type FlowDeps, GoalUnverifiedError, LaneStateError, objectDone, pauseLane, recordThreadPost, resumeLane, typeIntoPane, watchTick } from "./done-flow.ts";
 import { ownerSpeechProblem, plainSummaryProblem } from "./close-summary.ts";
 import { literalNewlineProblem } from "./messenger/literal-newline.ts";
 import { autoReadyLine, freshnessTick, resumeArgs } from "./freshness.ts";
@@ -61,7 +66,7 @@ import { computeScorecard, dayWindow, formatScorecard, saveScorecard, ScorecardE
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { clearEyes, Slack, slackRowIds, slackUnreact } from "./messenger/slack.ts";
 import type { UploadFile } from "./messenger/slack.ts";
-import { readUploads, UploadRefused } from "./messenger/upload-files.ts";
+import { type DiscordFile, discordMessageProblem, filesKey, readDiscordFiles, readUploads, UploadRefused } from "./messenger/upload-files.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -81,11 +86,18 @@ const USAGE = `dori <command> [options]
 
   lead                                 print the live lead as "<aoe-id> <tmux-session>" (herdr: "<omo session id> <pane>"),
                                        " stopped" after it when its session or agent is not running
+  serve [--log FILE] [--only TAG ...] [--install-task]
+                                       keep this Dori's loops running in one process where there is no systemd (native
+                                       Windows): watch, freshness, dead-panes, guard, state-git, inbound discord and the
+                                       session watcher, each started again when it exits, every line stamped and tagged in
+                                       --log (default <stateDir>/serve.log); --install-task registers it with the Windows
+                                       Task Scheduler to start at logon with no execution time limit
   revive <herdr pane> [--text TEXT]    start the omo session recorded for a herdr pane whose agent is gone again in that
                                        pane (omo --session-id), wait for its prompt and type TEXT; REVIVE_OK or REVIVE_FAIL;
                                        a pane whose agent runs is left alone (REVIVE_ALREADY_RUNNING)
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" --thread REF|new [--why-new "<reason>"] | --no-thread "<reason>" [--model M] [--cwd DIR] [--tag T ...] [--done-weak-ok]
          [--goal "owner words"] [--challenge-before STEP ...] [--use-gpu] [--ui] [--dry-run]
+         [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none] [--activity-path FILE ...]
                                        every lane opens with a work thread (the owner's long work gets one): --thread REF
                                        for the open thread the work continues in, --thread new to open one named T in this
                                        Dori's own channel (DORI_DISCORD_CHANNEL; THREAD_OPENED, then the lane's first
@@ -180,13 +192,20 @@ const USAGE = `dori <command> [options]
                                        the same step again with the same data is a no-op, with other data it is refused;
                                        one --remote-effect per receipt (a push, a merge), each recorded under one step only
   checkpoints <key>                    print the lane's finished steps (JSON); read them before resuming remote work
-  claim-done [<key>] --evidence TEXT [--summary TEXT] [--posted ID|LINK] [--post-summary]
+  caps <key> [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none]
+                                       print the lane's caps (supervision.defaults, then supervision.lanes.<key>, then its own);
+                                       with flags, set its own (none: off). At a cap freshness tells the lead once (LANE_CAP);
+                                       the lane is never stopped or told
+  claim-done [<key>] --evidence TEXT [--summary TEXT] [--posted ID|LINK] [--post-summary] [--rollover-outcome TEXT [--rollover-unresolved]]
                                        key defaults to the lane registered for this pane (the tmux session it runs in, else
                                        $HERDR_PANE_ID); --summary: 2 to 5 plain lines for the owner's thread in his language.
                                        The result reaches the thread once: when this lane's session posted in its work thread
                                        (dori send, dori thread) in the last 30 minutes, or --posted names that message, it is
                                        the result (RESULT_ALREADY_POSTED) and the close posts no summary; --post-summary: that
-                                       post was not the result, post the summary anyway
+                                       post was not the result, post the summary anyway. A lane moved to a new session at
+                                       rung 4 of the stuck ladder gives --rollover-outcome: one line on what it did
+                                       differently after the move (--rollover-unresolved: the move did not solve it); without
+                                       it the claim is ROLLOVER_OUTCOME_MISSING, exit 2, nothing recorded
                                        (what changed, what is left, when it reaches where it is used), posted before the close
                                        marks the thread done; paths, commit hashes, backticks or report heads are refused
                                        (SUMMARY_REFUSED, exit 2). Without it the close has a model write one from the lane's
@@ -221,9 +240,12 @@ const USAGE = `dori <command> [options]
                                        order (best GPT, Claude, Grok); the first that writes a review wins, --all asks one
                                        of each family in turn. Ids this host cannot call are skipped before any call
   challenge --check [<key>]            each reviewer id: REVIEWER_OK (and the id it is called as) or REVIEWER_SKIP and why
-  review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K]
+  review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K] [--no-test "<reason>"]
                                        a review receipt pinned to the PR's head commit: CHECKOUT (default: here) must be
-                                       that head with no changes; mergeGate.testCommand runs there first (TESTS_OK, or
+                                       that head with no changes; the commit checks run first (REVIEW_CHECKS_FAILED: a
+                                       commit's author or committer is not mergeGate.identities[repo], or a fix: commit
+                                       changes source and no commit adds or changes a test; --no-test waives only the
+                                       test rule, its reason kept in the tests receipt); mergeGate.testCommand next (TESTS_OK, or
                                        REVIEW_TESTS_FAILED and no review); then a fresh reviewer of another family than
                                        the lane's model reads the diff and the code and ends with VERDICT: CLEAR|BLOCK
                                        (exit 1 on BLOCK). For repos without CI: a PR with GitHub checks or auto-merge is
@@ -268,7 +290,13 @@ const USAGE = `dori <command> [options]
                                        what earlier lanes tried and how it went: numbered fix attempts and the root-cause
                                        switch, tagged fixes by metric, rejected done claims, re-sends, nudges, outcome,
                                        warnings; no option = one SIGNALS line per open lane. Read it before re-instructing
-  close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK]
+  lesson add <key> --rule TEXT --evidence PATH [--cwd DIR]
+                                       keep a rule the lane learned about its repo (the lane's cwd); the next launch there
+                                       puts it in the brief under "Lessons for this repo"
+  lesson list [--cwd DIR]              current lessons, newest first; a damaged journal line is a LESSON_WARNING
+  lesson mark <id> --outcome pending|helped|no-effect|harmful|encoded
+                                       only pending and helped ones reach new briefs
+  close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK] [--lesson TEXT [--evidence PATH]]...
                                        close now (Done signals must read back live); a lane with a work thread first posts
                                        its summary for the owner there (--summary, the claim's, else one a model writes from
                                        its last report and REPORT.md): none is CLOSE_SUMMARY_MISSING, a post that failed is
@@ -276,7 +304,8 @@ const USAGE = `dori <command> [options]
                                        done and archived when DORI_DISCORD_TOKEN is set; a thread another open lane or an
                                        open card uses only gets the summary posted. With the result already in the thread
                                        (the claim's RESULT_ALREADY_POSTED, or --posted for one the lead relayed) and no
-                                       --summary, nothing is posted: CLOSE_SUMMARY_SKIPPED
+                                       --summary, nothing is posted: CLOSE_SUMMARY_SKIPPED. A lane moved for being stuck that
+                                       closes with no outcome line gets the --note as one, counted unknown (ROLLOVER_OUTCOME)
   watch                                long-running: emits LANE_* lines every 30 s
   update [--pull] [--dry-run]           apply changed scripts to configured services and report unset new config keys
   notify-change --summary TEXT [--file PATH ...]
@@ -333,12 +362,16 @@ const USAGE = `dori <command> [options]
                                        be undone; loop is what dori-lanes runs every stateGit.everyMin minutes
   send <slack|telegram|discord> --to TARGET --text TEXT | --text-file FILE [--thread ID] [--edit ID] [--status working|done] [--no-typing] [--ping USER_ID] [--reply ID] [--again]
   send slack --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread TS]
+  send discord --to CHANNEL --file PATH [--file PATH ...] [--text TEXT | --text-file FILE] [--thread ID] [--reply ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN);
                                        --file (slack, up to 10, 1 GB each) uploads the files and shares them as one message
                                        with the text, in the thread with --thread (SENT <file ids>); a missing, empty or too
                                        big file is refused before anything is sent (SEND_FILE_MISSING|REFUSED|TOO_BIG, exit 2);
                                        shared once per call, never retried or repeat-checked: a failure exits non-zero;
                                        the watcher's eyes stay on (a text answer takes them off)
+                                       --file (discord, up to 10, 20 MiB each, 25 MiB a message; also thread reply|wait|done) posts the text
+                                       and the files as one message (SENT <id>; same refusals before anything is sent); a
+                                       repeat needs the same files too (sha256), --again sends it anyway
                                        --text-file posts the file's text (real line breaks) the same way as --text. A text
                                        with a literal \n and no real line break outside code is refused before anything is
                                        sent (SEND_LITERAL_NEWLINE, exit 2; also thread reply|wait|done|open --first, ask,
@@ -433,8 +466,12 @@ const USAGE = `dori <command> [options]
                                        writes (ROLLOVER_PROPOSAL), logged to <stateDir>/rollover-log.jsonl; then run the
                                        handover with --approved-by "lead:<reason and signal>" (or "lead:<reason>,
                                        owner <message id>" when the owner asked for it: checked against the inbox)
-  rollover-stats [--window H]          proposals and rollovers from the log: signal values, approval time, each step's time
-                                       and result, and the lane's watch-log quality signals H hours (24) before and after
+  rollover-stats [--window H] [--stuck]
+                                       proposals and rollovers from the log: signal values, approval time, each step's time
+                                       and result, and the lane's watch-log quality signals H hours (24) before and after;
+                                       then STUCK_OUTCOMES: stuck (rung 4) rollovers, resolved / not resolved / unknown, and
+                                       one STUCK_ROLLOVER line each with the lane's own words. --stuck prints only that, for
+                                       this Dori and each handover.statsPeers Dori
   handover ready [<key>] --note FILE   run by a lane in its own pane at a safe point: the local chains running now may end
                                        with the old session; FILE is the lane's conversation summary (its headings: handover
                                        ready --template) and goes into the note (valid handover.readyMin minutes)
@@ -447,7 +484,7 @@ const USAGE = `dori <command> [options]
   thread list                          print mapped thread ids, sessions and titles
   thread set discord:<id> working|waiting|done|standing|unstanding [--open-card]
                                        queue its status; done archives it and removes its mapping
-  thread <reply|wait|done> discord:<id> <text> | --text-file FILE
+  thread <reply|wait|done> discord:<id> <text> | --text-file FILE [--file PATH ...]
                                        post in a work thread and set its status (working, waiting, done); done archives it
                                        (Discord env: DORI_DISCORD_TOKEN, DORI_DISCORD_GUILD, DORI_DISCORD_CHANNEL, DORI_DISCORD_OWNER)`;
 
@@ -527,7 +564,7 @@ const flags = parseArgs({
   strict: false,
   options: {
     title: { type: "string" }, brief: { type: "string" }, done: { type: "string" }, thread: { type: "string" },
-    model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string" },
+    model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string", multiple: true },
     reason: { type: "string", multiple: true }, note: { type: "string" }, write: { type: "boolean" }, loop: { type: "string" },
     to: { type: "string" }, text: { type: "string" }, edit: { type: "string" }, status: { type: "string" }, "no-typing": { type: "boolean" }, ping: { type: "string" },
     option: { type: "string", multiple: true }, session: { type: "string" }, tmux: { type: "string" }, open: { type: "boolean" },
@@ -543,10 +580,12 @@ const flags = parseArgs({
     answer: { type: "string" }, repo: { type: "string", multiple: true }, since: { type: "string" }, until: { type: "string" }, backtest: { type: "boolean" },
     static: { type: "boolean" }, dir: { type: "string", multiple: true }, "no-thread": { type: "string" }, "why-new": { type: "string" },
     remote: { type: "string" }, url: { type: "string" }, by: { type: "string" }, "history-ok": { type: "string", multiple: true }, clock: { type: "string" },
+    rule: { type: "string" }, outcome: { type: "string" }, lesson: { type: "string", multiple: true },
     job: { type: "string" }, in: { type: "string", multiple: true }, out: { type: "string" }, rl: { type: "boolean" }, mem: { type: "string" }, want: { type: "string" }, sync: { type: "string", multiple: true }, env: { type: "string", multiple: true }, caller: { type: "string" },
-    reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" },
+    reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" }, "rollover-outcome": { type: "string" }, "rollover-unresolved": { type: "boolean" }, stuck: { type: "boolean" },
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
-    "delete-branch": { type: "boolean" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
+    "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
+    "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -581,6 +620,10 @@ const onlyOptions = (what: string, allowed: readonly string[], positionals: numb
 };
 const tags = (): string[] => ((flags.values.tag as string[] | undefined) ?? []).map((t) => t.trim()).filter(Boolean);
 const many = (name: string): string[] => ((flags.values[name] as string[] | undefined) ?? []).map((t) => t.trim()).filter(Boolean);
+// every --evidence, trimmed, an empty one kept (close pairs them with --lesson by place); the other commands take the
+// last one, as they did when --evidence was a single option
+const evidences = (): string[] => ((flags.values.evidence as string[] | undefined) ?? []).map((t) => t.trim());
+const evidence = (): string => evidences().at(-1) || die("--evidence is required");
 
 // `dori <command> --help`: that command's lines of USAGE
 const helpFor = (cmd: string): string => {
@@ -598,6 +641,20 @@ if (flags.values.help) {
   console.log(helpFor(command));
   process.exit(0);
 }
+// --wall-minutes N|none, --token-limit N|none, --cost-limit N|none: a number >= 0 is a cap, none turns it off, an absent
+// flag leaves the cap below it; a bad value is refused, so a typo cannot turn a cap off
+const budgetOpts = (): BudgetLimits => {
+  const out: Record<string, number | null> = {};
+  for (const [flag, name] of [["wall-minutes", "wallMinutes"], ["token-limit", "tokens"], ["cost-limit", "costUsd"]] as const) {
+    const v = flags.values[flag];
+    if (v === undefined) continue;
+    const text = typeof v === "string" ? v.trim() : "";
+    if (text === "none") out[name] = null;
+    else if (text !== "" && Number.isFinite(Number(text)) && Number(text) >= 0) out[name] = Number(text);
+    else die(`--${flag} takes a number >= 0 or none, not ${JSON.stringify(v)}`, 2);
+  }
+  return out;
+};
 const loopMin = Number(opt("loop") ?? 0);
 const heavyDeps = (load: () => Promise<number>): SlotDeps => ({
   dir: `${config.stateDir}/heavy`,
@@ -629,6 +686,7 @@ const reportOwner = discordToken && process.env.DORI_DISCORD_CHANNEL?.trim()
   : {};
 const sessionOfPane = async (pane: string, cwd: string): Promise<string> => (await resolveSession(pane, cwd, await procTable(run), { run, sessionsDir: config.sessionsDir, backend: config.backend })).id;
 const sendSignal: HandoverDeps["signal"] = (pid, sig) => {
+  if (process.platform === "win32" && (sig === "SIGSTOP" || sig === "SIGCONT")) return winSignal(pid, sig);
   try {
     process.kill(pid, sig);
     return true;
@@ -640,7 +698,7 @@ const freezeDeps = { run, procs: () => procTable(run), signal: sendSignal };
 const laneDepsFor = (print: (line: string) => void = (line) => console.log(line)): LaneHandoverDeps => ({
   ...deps,
   cardDir: cardDir(),
-  home: process.env.HOME ?? "",
+  home: accountHome(),
   sessionOf: sessionOfPane,
   procs: () => procTable(run),
   envOf: (pid) => {
@@ -665,7 +723,7 @@ const leadDepsFor = (print: (line: string) => void): HandoverDeps => ({
   envPath: envFilePath(),
   cardDir: cardDir(),
   inbox: config.handover.inbox || process.env.DORI_DISCORD_INBOX?.trim() || join(config.stateDir, "discord", "inbox.jsonl"),
-  home: process.env.HOME ?? "",
+  home: accountHome(),
   sessionOf: sessionOfPane,
   routedPane: async () => (await loadConfig()).leadPane,
   envLeadPane: process.env.DORI_LEAD_PANE?.trim() ?? "",
@@ -705,6 +763,7 @@ const notePost = async (thread: string, id: string, text: string): Promise<void>
   const here = await currentTmuxSession(run).catch(() => "");
   await recordThreadPost(deps.registry, here, thread, id, text, new Date().toISOString()).catch((e: unknown) => console.error(`THREAD_POST_NOT_RECORDED discord:${thread} ${id}: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`));
 };
+const withFileNames = (text: string, files: readonly DiscordFile[]): string => [text, ...files.map((f) => `[file] ${f.filename}`)].filter(Boolean).join("\n");
 // --posted: a message id or its Discord link
 const postedId = (): string | undefined => {
   const raw = opt("posted")?.trim();
@@ -936,7 +995,7 @@ try {
       process.exitCode = await applyUpdate({ config, configPath: configPath(), git: run, systemctl: run, clock: realClock, send: (pane, text) => sendVerified(run, realClock, config, pane, text), print: (line) => console.log(line) }, { pull: Boolean(flags.values.pull), dryRun: Boolean(flags.values["dry-run"]) }) ? 0 : 1;
       break;
     case "launch": {
-      const input = { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: threadOpt(), noThread: noThreadOpt(), whyNew: whyNewOpt(), model: opt("model"), cwd: opt("cwd"), tags: tags(), doneWeakOk: Boolean(flags.values["done-weak-ok"]), goal: opt("goal"), challengeBefore: many("challenge-before"), useGpu: Boolean(flags.values["use-gpu"]), ui: Boolean(flags.values.ui), waive };
+      const input = { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: threadOpt(), noThread: noThreadOpt(), whyNew: whyNewOpt(), model: opt("model"), cwd: opt("cwd"), tags: tags(), doneWeakOk: Boolean(flags.values["done-weak-ok"]), goal: opt("goal"), challengeBefore: many("challenge-before"), useGpu: Boolean(flags.values["use-gpu"]), ui: Boolean(flags.values.ui), waive, budget: budgetOpts(), activityPaths: many("activity-path") };
       const noGoal = goalWarning(input);
       if (noGoal) console.log(noGoal);
       // LAUNCH_NO_THREAD / LAUNCH_THREAD_IS_CHANNEL / LAUNCH_RELATED_THREAD: nothing opened, exit 4 like a missing directive
@@ -1037,7 +1096,11 @@ try {
       if (summary !== undefined) postable(summary, `claim-done --summary ${l.key}`);
       const bad = summary === undefined ? undefined : plainSummaryProblem(summary, config.discord.locale, config.discord.ownerSpeech);
       if (bad) die(`SUMMARY_REFUSED ${l.key}: ${bad}; write it for the owner in plain words`, 2);
-      console.log(await claimDone(deps, l, need("evidence"), summary, { posted: postedId(), postSummary: Boolean(flags.values["post-summary"]) }));
+      const outcome = opt("rollover-outcome");
+      if (flags.values["rollover-unresolved"] && outcome === undefined) die("--rollover-unresolved goes with --rollover-outcome \"<one line>\"", 2);
+      const claimed = await claimDone(deps, l, evidence(), summary, { posted: postedId(), postSummary: Boolean(flags.values["post-summary"]), ...(outcome !== undefined ? { rolloverOutcome: { line: outcome, resolved: !flags.values["rollover-unresolved"] } } : {}) });
+      if (claimed.startsWith("ROLLOVER_OUTCOME_MISSING ")) die(claimed, 2);
+      console.log(claimed);
       break;
     }
     case "object-done": {
@@ -1132,11 +1195,12 @@ try {
       break;
     }
     case "review": {
-      const pr = parsePr(key ?? die("usage: dori review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K]"));
+      const pr = parsePr(key ?? die('usage: dori review <owner/repo#N> [--dir CHECKOUT] [--model M] [--lane K] [--no-test "<reason>"]'));
+      const noTest = flags.values["no-test"] === undefined ? undefined : opt("no-test") || die('--no-test needs a reason: --no-test "<why this fix has no test>"');
       const laneKey = opt("lane");
       const here = laneKey ? "" : await currentTmuxSession(run).catch(() => "");
       const owner = laneKey ? await lane(laneKey) : here ? await deps.registry.byPane(here) : null;
-      const out = await reviewPr(deps, pr, { dir: resolve(many("dir")[0] ?? process.cwd()), model: opt("model"), lane: owner });
+      const out = await reviewPr(deps, pr, { dir: resolve(many("dir")[0] ?? process.cwd()), model: opt("model"), lane: owner, ...(noTest ? { noTest } : {}) });
       for (const line of out) console.log(line);
       if (/ verdict=BLOCK /.test(out.at(-1) ?? "")) process.exit(1);
       break;
@@ -1258,8 +1322,22 @@ try {
       if (summary !== undefined) postable(summary, `close --summary ${key ?? ""}`);
       const bad = summary === undefined ? undefined : plainSummaryProblem(summary, config.discord.locale, config.discord.ownerSpeech);
       if (bad) die(`SUMMARY_REFUSED ${key ?? ""}: ${bad}; write it for the owner in plain words`, 2);
-      const r = await closeLane(deps, await lane(key ?? die("close needs a lane key")), opt("note") ?? "closed by the lead", summary, postedId());
+      const target = await lane(key ?? die("close needs a lane key"));
+      // --lesson, any number of times: kept after a successful close, each with the --evidence in its place, one --evidence
+      // for all, or the Done line; never blocks the close. Evidence that pairs with no lesson is refused before anything.
+      const paired = closeLessons(((flags.values.lesson as string[] | undefined) ?? []).map((t) => t.trim()), evidences(), target.done);
+      const lessons = typeof paired === "string" ? die(`LESSON_EVIDENCE_MISMATCH ${target.key}: ${paired}; nothing was closed`, 2) : paired;
+      const note = opt("note") ?? "closed by the lead";
+      const r = await closeLane(deps, target, note, summary, postedId(), lessons);
       for (const line of r.lines) console.log(line);
+      // a lane moved for being stuck that closes without its outcome line: the lead's note stands in, counted unknown (the
+      // owner may have dropped or changed the work), so rollover-stats still lists it
+      const stuck = r.closed ? pendingStuck(readRollovers(config.stateDir), target.key) : undefined;
+      if (stuck) {
+        const line = outcomeLine(note);
+        appendRollover(config.stateDir, { kind: "outcome", at: new Date().toISOString(), key: target.key, rolloverAt: stuck.at, line, by: "close" });
+        console.log(`ROLLOVER_OUTCOME ${target.key} unknown (rollover ${stuck.at}): ${line}`);
+      }
       process.exit(r.closed ? 0 : 2);
     }
     case "watch":
@@ -1317,23 +1395,32 @@ try {
           signals: (pane: string, model: string) => paneSignals(laneDeps, pane, model),
           // automatic rollover (handover.autoRolloverLanes / autoRolloverLead): a detached run, approved as auto:<key>
           auto: async (who: "lead" | "lane", k: string) => {
+            const refused = windowsDetachRefusal();
+            if (refused) return `could not start: ${refused}`;
             const unit = `dori-rollover-${k}-${Date.now()}`;
             const log = join(config.stateDir, "handover", "run.log");
             mkdirSync(join(config.stateDir, "handover"), { recursive: true });
-            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", ...(who === "lane" ? ["--lane", k, "--wait-idle", String(config.handover.autoWaitMin)] : []), "--approved-by", `auto:handover.autoRollover${who === "lane" ? "Lanes" : "Lead"}`]);
+            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", `--setenv=${AUTO_GRANT_ENV}=${mintAutoGrant(config.stateDir, who, who === "lane" ? k : "lead", Date.now())}`, ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", ...(who === "lane" ? ["--lane", k, "--wait-idle", String(config.handover.autoWaitMin)] : []), "--approved-by", `auto:handover.autoRollover${who === "lane" ? "Lanes" : "Lead"}`]);
             return r.code === 0 ? `started unit=${unit} log=${log}` : `could not start: ${(r.err || r.out).trim().slice(0, 160)}`;
           },
           // a lead's lane handover refused while the lane was busy, started again once the lane marked ready: a detached run
           // with the same approval and options that waits for the lane's idle moment like an automatic one
           resume: async (k: string, approvedBy: string, request: RolloverRequest) => {
+            const refused = windowsDetachRefusal();
+            if (refused) return { started: false, line: `could not start: ${refused}` };
             const unit = `dori-rollover-${k}-${Date.now()}`;
             const log = join(config.stateDir, "handover", "run.log");
             mkdirSync(join(config.stateDir, "handover"), { recursive: true });
-            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "--lane", k, "--wait-idle", String(config.handover.autoWaitMin), "--approved-by", approvedBy, ...resumeArgs(request)]);
+            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...(decidedBy(approvedBy) === "auto" ? [`--setenv=${AUTO_GRANT_ENV}=${mintAutoGrant(config.stateDir, "lane", k, Date.now())}`] : []), ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "--lane", k, "--wait-idle", String(config.handover.autoWaitMin), "--approved-by", approvedBy, ...resumeArgs(request)]);
             return r.code === 0 ? { started: true, line: `unit=${unit} log=${log}` } : { started: false, line: `could not start: ${(r.err || r.out).trim().slice(0, 160)}` };
           },
           // the audit after a committed handover: a detached run, so its supplement round does not hold up the sweep
           audit: async (c: Committed) => {
+            const refused = windowsDetachRefusal();
+            if (refused) {
+              rmSync(markerFile(c.note), { force: true });
+              return `could not start: ${refused}`;
+            }
             const unit = `dori-handover-audit-${c.key}-${Date.now()}`;
             const log = join(config.stateDir, "handover", "run.log");
             const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "audit", c.note]);
@@ -1345,7 +1432,7 @@ try {
           directiveAudit: dailyAuditHook(config, async (since: string) => (await auditOrReport(deps, { since, inbox: auditInbox(), owner: process.env.DORI_DISCORD_OWNER?.trim() ?? "", threads: threads(cardDir()), memory: leadMemoryRepo() })).lines),
           directiveLinks: async () => (await pushLinks(deps)).lines,
         };
-        for (const a of await freshnessTick(deps, process.env.HOME ?? "", hooks)) console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);
+        for (const a of await freshnessTick(deps, accountHome(), hooks)) console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);
         // a done thread that a post after its close opened again goes back to the archive once quiet (discord.autoArchiveMin)
         if (discordToken) {
           const statusFile = join(cardDir(), "thread-status.json");
@@ -1501,7 +1588,7 @@ try {
         now: clockAt === undefined ? () => Date.now() : () => clockAt,
         backup: bk,
         stateDir: config.stateDir,
-        home: process.env.HOME ?? "",
+        home: accountHome(),
         visibility: (repo) => backupVisibility(repo, { run, fetch }),
         remoteUrl: backupRemoteUrl,
         secrets: async () => {
@@ -1673,19 +1760,24 @@ try {
       const edit = opt("edit");
       const filePaths = ((flags.values.file as (string | boolean)[] | undefined) ?? []).map((p) => (typeof p === "string" ? p.trim() : ""));
       if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);
-      if (filePaths.length && platform !== "slack") die(`SEND_FILE_REFUSED --file is only supported for slack, not ${platform}; nothing was sent`, 2);
+      if (filePaths.length && platform !== "slack" && platform !== "discord") die(`SEND_FILE_REFUSED --file is only supported for slack and discord, not ${platform}; nothing was sent`, 2);
       if (filePaths.length && edit) die("SEND_FILE_REFUSED --file is for a new message, not --edit; nothing was sent", 2);
-      if (filePaths.length && flags.values.again) die("SEND_FILE_REFUSED --again is for a text post; a --file send is never checked for repeats; nothing was sent", 2);
+      if (filePaths.length && platform === "slack" && flags.values.again) die("SEND_FILE_REFUSED --again is for a text post; a slack --file send is never checked for repeats; nothing was sent", 2);
       let uploads: UploadFile[] = [];
+      // discord: the files go in the message's own request and their sha256 into its repeat check
+      let discordFiles: DiscordFile[] = [];
       try {
-        uploads = filePaths.length ? readUploads(filePaths) : [];
+        if (filePaths.length && platform === "slack") uploads = readUploads(filePaths);
+        if (filePaths.length && platform === "discord") discordFiles = await readDiscordFiles(filePaths);
       } catch (e) {
         if (!(e instanceof UploadRefused)) throw e;
         die(e.message, 2);
       }
-      // with --file the text is optional: it goes out as the files' message (initial_comment)
-      const body = uploads.length && !opt("text") && !opt("text-file") ? "" : postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE (or --file PATH, slack)"), "send");
+      // with --file the text is optional: it goes out as the files' message (Slack initial_comment, Discord content)
+      const body = filePaths.length && !opt("text") && !opt("text-file") ? "" : postable(await textOrFile(opt("text"), "send needs --text TEXT or --text-file FILE (or --file PATH, slack or discord)"), "send");
       const text = status === "working" || status === "done" ? progressText(status, body, config.discord) : body;
+      const tooBig = discordMessageProblem(discordFiles, text);
+      if (tooBig) die(tooBig, 2);
       const rawPing = flags.values.ping;
       if (rawPing !== undefined && (typeof rawPing !== "string" || rawPing.length === 0 || /[^0-9]/.test(rawPing))) die("--ping takes a digits-only user id");
       const ping = typeof rawPing === "string" ? rawPing : undefined;
@@ -1697,7 +1789,7 @@ try {
       const token = (name: string) => process.env[name] ?? die(`${name} is not set`);
       // a new message goes out once per place, reply target, ping and text in SEND_DEDUPE_MS (src/send-dedupe.ts)
       const once = async (post: () => Promise<string>) => {
-        const r = await sendOnce(join(config.stateDir, "sent"), sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, text]), post, { again: Boolean(flags.values.again) });
+        const r = await sendOnce(join(config.stateDir, "sent"), sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, text, ...filesKey(discordFiles)]), post, { again: Boolean(flags.values.again) });
         console.log(r.duplicate ? duplicateLine(r) : `SENT ${r.id}`);
         return r;
       };
@@ -1731,8 +1823,8 @@ try {
         await ownerSpeech(body, "send", () => ownerPlace(dc, edit ? to : (thread ?? to)));
         if (edit) await dc.edit(to, edit, text);
         else {
-          const r = await once(() => dc.send(thread ?? to, text, !flags.values["no-typing"], ping, reply));
-          if (!r.duplicate) await notePost(thread ?? to, r.id, body);
+          const r = await once(() => dc.send(thread ?? to, text, !flags.values["no-typing"], ping, reply, discordFiles));
+          if (!r.duplicate) await notePost(thread ?? to, r.id, withFileNames(body, discordFiles));
         }
       } else die(`unknown platform ${platform}`);
       break;
@@ -1873,6 +1965,25 @@ try {
     case "lead":
       console.log(await findLead(run, config));
       break;
+    case "serve": {
+      const cli = fileURLToPath(import.meta.url);
+      const sessionWatch = fileURLToPath(new URL("../../setups/discord-aoe/session-watch.ts", import.meta.url));
+      if (flags.values["install-task"]) {
+        const refused = installTaskRefusal((Array.isArray(flags.values.only) ? flags.values.only : []).map(String), opt("log"));
+        if (refused) die(refused);
+        const argv = taskArgv(process.execPath, cli, config.stateDir);
+        const r = await run(argv);
+        console.log(r.code === 0 ? `SERVE_TASK_INSTALLED "${TASK_NAME}" at logon` : `SERVE_TASK_FAIL ${(r.err || r.out).slice(0, 200)}`);
+        if (r.code !== 0) process.exitCode = 1;
+        break;
+      }
+      const only = new Set(Array.isArray(flags.values.only) ? flags.values.only : []);
+      const loops = serveLoops(process.execPath, cli, sessionWatch).filter((l) => !only.size || only.has(l.tag));
+      const log = opt("log") ?? join(config.stateDir, "serve.log");
+      console.log(`SERVE_READY ${loops.map((l) => l.tag).join(",")} log ${log}`);
+      await serve(loops, { start: spawnLoop, log: fileLog(log, realClock), clock: realClock });
+      break;
+    }
     case "revive": {
       const pane = key ?? die("usage: dori revive <herdr pane> [--text TEXT]");
       if (!isHerdrPane(pane)) die("revive takes a herdr pane id (an aoe session restarts with self-restart.sh)");
@@ -1965,19 +2076,30 @@ try {
         break;
       }
       if ((verb !== "reply" && verb !== "wait" && verb !== "done") || !ref) die("usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE");
-      onlyOptions(`thread ${verb}`, ["text-file", "force", "lane", "again"], 3);
-      const body = postable(await textOrFile(text?.trim(), "usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE"), `thread ${verb}`);
+      onlyOptions(`thread ${verb}`, ["text-file", "force", "lane", "again", "file"], 3);
+      const filePaths = ((flags.values.file as (string | boolean)[] | undefined) ?? []).map((p) => (typeof p === "string" ? p.trim() : ""));
+      if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);
+      let files: DiscordFile[] = [];
+      try {
+        files = await readDiscordFiles(filePaths);
+      } catch (e) {
+        if (!(e instanceof UploadRefused)) throw e;
+        die(e.message, 2);
+      }
+      const body = files.length && !text?.trim() && !opt("text-file") ? "" : postable(await textOrFile(text?.trim(), "usage: dori thread <reply|wait|done> discord:<thread id> <text> | --text-file FILE (or --file PATH)"), `thread ${verb}`);
+      const tooBig = discordMessageProblem(files, body);
+      if (tooBig) die(tooBig, 2);
       const dc = discordClient();
       await ownerSpeech(body, `thread ${verb}`, () => ownerPlace(dc, discordThreadId(ref ?? "")));
       // the same key as `dori send discord --to <thread id>`, so the two commands do not post one text twice either
-      const threadOnce = (post: () => Promise<string>) => sendOnce(join(config.stateDir, "sent"), sendKey(["discord", discordThreadId(ref ?? ""), undefined, undefined, body]), post, { again: Boolean(flags.values.again) });
+      const threadOnce = (post: () => Promise<string>) => sendOnce(join(config.stateDir, "sent"), sendKey(["discord", discordThreadId(ref ?? ""), undefined, undefined, body, ...filesKey(files)]), post, { again: Boolean(flags.values.again) });
       if (verb === "done") {
         // the text is posted either way; with users left the thread keeps its mark and stays open
         const thread = `discord:${discordThreadId(ref ?? "")}`;
         const holders = await holdersOf(thread);
         if (holders && !flags.values.force) {
-          const r = await threadOnce(() => postInThread(dc, ref ?? "", body));
-          if (!r.duplicate) await notePost(discordThreadId(ref ?? ""), r.id, body);
+          const r = await threadOnce(() => postInThread(dc, ref ?? "", body, files));
+          if (!r.duplicate) await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
           console.log(`${r.duplicate ? duplicateLine(r) : `POSTED ${r.id}`} THREAD_LEFT_OPEN ${thread}: ${holders}; not marked done (--force marks it done anyway)`);
           break;
         }
@@ -1990,14 +2112,17 @@ try {
         return statuses.request(t, s);
       };
       // a repeat is not posted, but the status still goes through: a done after a reply with the same words still closes
-      const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark));
+      const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark, files));
       if (r.duplicate) await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);
-      else await notePost(discordThreadId(ref ?? ""), r.id, body);
+      else await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
       console.log(`${r.duplicate ? duplicateLine(r) : `POSTED ${r.id}`}${verb === "done" ? " THREAD_DONE" : verb === "wait" ? " THREAD_WAITING" : ""}`);
       break;
     }
     case "handover": {
       const here = await currentTmuxSession(run);
+      // the one-use grant of a run freshness started (auto hook); kept from the sessions and processes this run starts
+      const autoGrant = process.env[AUTO_GRANT_ENV];
+      delete process.env[AUTO_GRANT_ENV];
       if (key === "ack") {
         console.log(ackHandover(opt("state") ? resolve(opt("state") ?? "") : config.stateDir, flags.positionals[1]?.trim() || die("usage: dori handover ack <id> [--state DIR]"), here, new Date().toISOString()));
         break;
@@ -2064,7 +2189,7 @@ try {
         if (minutes !== undefined && !(minutes > 0)) die("--minutes must be a positive number");
         const waitIdle = opt("wait-idle") ? Number(opt("wait-idle")) : undefined;
         if (waitIdle !== undefined && !(waitIdle > 0)) die("--wait-idle must be a positive number of minutes");
-        const r = await laneHandover(laneDeps, opt("lane") ?? "", here, { approvedBy: opt("approved-by"), note: opt("note"), model: opt("model"), thinking: opt("thinking"), force: Boolean(flags.values.force), keepOld: Boolean(flags.values["keep-old"]), dryRun: Boolean(flags.values["dry-run"]), verifyMin: minutes, ...(waitIdle ? { waitIdleMin: waitIdle } : {}) });
+        const r = await laneHandover(laneDeps, opt("lane") ?? "", here, { approvedBy: opt("approved-by"), ...(autoGrant ? { autoGrant } : {}), note: opt("note"), model: opt("model"), thinking: opt("thinking"), force: Boolean(flags.values.force), keepOld: Boolean(flags.values["keep-old"]), dryRun: Boolean(flags.values["dry-run"]), verifyMin: minutes, ...(waitIdle ? { waitIdleMin: waitIdle } : {}) });
         process.exit(r.code);
       }
       if (flags.values.template) {
@@ -2074,6 +2199,8 @@ try {
       // closing the old lead ends every process in its tmux session, so a handover started there continues as a user unit
       // and since the old lead is frozen at the commit (--keep-old too), it must not run under the agent it stops
       if (here && here === config.leadPane && !flags.values["dry-run"] && !process.env.DORI_HANDOVER_DETACHED) {
+        const refused = windowsDetachRefusal();
+        if (refused) die(refused);
         const unit = `dori-handover-${Date.now()}`;
         const log = join(config.stateDir, "handover", "run.log");
         mkdirSync(join(config.stateDir, "handover"), { recursive: true });
@@ -2085,7 +2212,7 @@ try {
       }
       const minutes = opt("minutes") ? Number(opt("minutes")) : undefined;
       if (minutes !== undefined && !(minutes > 0)) die("--minutes must be a positive number");
-      const r = await handover(leadDepsFor((line) => console.log(line)), { approvedBy: opt("approved-by"), note: opt("note"), title: opt("title"), model: opt("model"), keepOld: Boolean(flags.values["keep-old"]), dryRun: Boolean(flags.values["dry-run"]), noMonitors: Boolean(flags.values["no-monitors"]), verifyMin: minutes });
+      const r = await handover(leadDepsFor((line) => console.log(line)), { approvedBy: opt("approved-by"), ...(autoGrant ? { autoGrant } : {}), note: opt("note"), title: opt("title"), model: opt("model"), keepOld: Boolean(flags.values["keep-old"]), dryRun: Boolean(flags.values["dry-run"]), noMonitors: Boolean(flags.values["no-monitors"]), verifyMin: minutes });
       process.exit(r.code);
     }
     case "rollover-propose": {
@@ -2114,6 +2241,10 @@ try {
     case "rollover-stats": {
       const window = opt("window") ? Number(opt("window")) : 24;
       if (!(window > 0)) die("--window must be a positive number of hours");
+      if (flags.values.stuck) {
+        for (const line of [...stuckOutcomeLines(readRollovers(config.stateDir)), ...(await peerStuckLines(run, config.handover.statsPeers))]) console.log(line);
+        break;
+      }
       const watch = existsSync(config.watchLog) ? readFileSync(config.watchLog, "utf8").split("\n") : [];
       for (const line of rolloverStats(readRollovers(config.stateDir), watch, Date.now(), window)) console.log(line);
       break;
@@ -2175,15 +2306,54 @@ try {
       if (r.failed) process.exit(1);
       break;
     }
+    case "lesson": {
+      const lessons = new Lessons(config.stateDir);
+      switch (key) {
+        case "add": {
+          const laneKey = flags.positionals[1] ?? die("usage: dori lesson add <key> --rule TEXT --evidence PATH [--cwd DIR]");
+          // a closed lane may still add what it learned, so the registry is read directly, not through lane()
+          const target = (await deps.registry.read(laneKey)) ?? die(`no registered lane "${laneKey}"`);
+          console.log(JSON.stringify(lessons.add({ lane: laneKey, cwd: opt("cwd") ?? target.cwd ?? config.defaultCwd, rule: need("rule"), evidence: evidence() }, realClock.now())));
+          break;
+        }
+        case "list": {
+          const read = lessons.read(opt("cwd"));
+          for (const problem of read.problems) console.error(`LESSON_WARNING ${problem}`);
+          console.log(JSON.stringify(read.lessons, null, 2));
+          break;
+        }
+        case "mark": {
+          const id = flags.positionals[1] ?? die("usage: dori lesson mark <id> --outcome pending|helped|no-effect|harmful|encoded");
+          const outcome = need("outcome");
+          if (isLessonOutcome(outcome)) console.log(JSON.stringify(lessons.mark(id, outcome)));
+          else die("--outcome must be pending, helped, no-effect, harmful or encoded");
+          break;
+        }
+        default:
+          die("usage: dori lesson add|list|mark");
+      }
+      break;
+    }
     case "checkpoint": {
       const target = await lane(key ?? die("checkpoint needs a lane key"));
       // parseArgs takes one value per flag; a second bare receipt would otherwise be dropped and its effect repeated later.
       const stray = flags.positionals.slice(1);
       if (stray.length) die(`checkpoint: unexpected argument ${stray[0]}; give each receipt its own --remote-effect`);
       const result = new Checkpoints(config.stateDir).write(target.key, {
-        step: need("step"), result: need("result"), evidence: [need("evidence")], remoteEffects: many("remote-effect"),
+        step: need("step"), result: need("result"), evidence: [evidence()], remoteEffects: many("remote-effect"),
       }, realClock.now());
       console.log(JSON.stringify(result));
+      break;
+    }
+    case "caps": {
+      const l = (key ? await deps.registry.read(key) : undefined) ?? die(`usage: dori caps <key> [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none]; no registered lane ${JSON.stringify(key ?? "")}`, 2);
+      const set = budgetOpts();
+      if (Object.keys(set).length) await deps.registry.patch(l.key, { budget: { ...l.budget, ...set } });
+      const now = (await deps.registry.read(l.key)) ?? l;
+      const caps = laneLimits(config.supervision, now);
+      const show = (v: number | null): string => (v === null ? "off" : String(v));
+      console.log(`CAPS ${l.key} wallMinutes=${show(caps.wallMinutes)} tokens=${show(caps.tokens)} costUsd=${show(caps.costUsd)} (its own: ${JSON.stringify(now.budget ?? {})})`);
+      if (Object.keys(set).length) console.log(`CAPS_SET ${l.key}: the next freshness sweep reads them; a cap reached tells the lead once, again only after the cap changes`);
       break;
     }
     case "checkpoints": {
@@ -2199,6 +2369,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError) die(e.message);
+  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError || e instanceof LessonError) die(e.message);
   throw e;
 }

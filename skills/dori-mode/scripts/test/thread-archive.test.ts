@@ -64,7 +64,7 @@ test("a quiet done thread in the owner's channel is archived; working, waiting, 
   const { w, dc } = world([
     { id: "301", name: "✅ 도리 상태 파일 깃 관리", lastMin: 40 },
     { id: "302", name: "🔄 완료 스레드 자동 보관", lastMin: 120 },
-    { id: "303", name: "⏸️ HR35 ETH 기준선 대비 개선 실험", lastMin: 3000 },
+    { id: "303", name: "🔔 HR35 ETH 기준선 대비 개선 실험", lastMin: 3000 },
     { id: "304", name: "✅ 방금 닫은 일", lastMin: 10 },
     { id: "305", name: "✅ 완료 · 메일 발신", parent: OTHER_CHANNEL, lastMin: 3000 },
     { id: "306", name: "다이제스트 캘린더", lastMin: 3000 },
@@ -72,6 +72,16 @@ test("a quiet done thread in the owner's channel is archived; working, waiting, 
   const lines = await archiveDoneThreads(deps(dc));
   expect(w.patches).toEqual([{ id: "301", body: { archived: true } }]);
   expect(lines).toEqual(['THREAD_AUTO_ARCHIVED 301 quiet=40m "✅ 도리 상태 파일 깃 관리"']);
+});
+
+test("a quiet Yoodori thread that ended ⛔ or 💤 is archived like a done one; ❗ waits for the owner and stays open", async () => {
+  const { w, dc } = world([
+    { id: "341", name: "⛔ ✉️ 취소한 메일", lastMin: 60 },
+    { id: "342", name: "💤 ✉️ 새 초안으로 바뀐 메일", lastMin: 60 },
+    { id: "343", name: "❗ 🔐 실패한 공유", lastMin: 600 },
+  ]);
+  await archiveDoneThreads(deps(dc));
+  expect(w.patches).toEqual([{ id: "341", body: { archived: true } }, { id: "342", body: { archived: true } }]);
 });
 
 test("a done thread an open lane, an open question card or a pending status rename still holds stays open", async () => {

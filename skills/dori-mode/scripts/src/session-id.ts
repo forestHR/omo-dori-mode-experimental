@@ -1,24 +1,62 @@
 import { readdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import { tmuxPanePid } from "./aoe.ts";
 import type { Backend } from "./config.ts";
 import type { Runner } from "./run.ts";
+import { isAgentCommand } from "./executable.ts";
 
 // stat: the ps state letters ("S", "R+", "Z" for a zombie); absent when the table was built without it
-export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string };
+// sid: the terminal session the process is in (Linux ps sid); absent or 0 when it cannot be told (macOS, Windows)
+export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string; readonly stat?: string; readonly sid?: number; readonly startedAt?: string; readonly executable?: string };
 export type SessionHit = { readonly id: string; readonly via: "argv" | "child-env" | "start-time" | "none"; readonly pid?: number };
 
-export const AGENT = /senpi\/dist\/bundle\/cli\.js|(^|\/)omo(\s|$)/;
+// omo on Linux and macOS (senpi's bundle under bun, or the omo command), and on Windows (the same bundle path with
+// backslashes, or omo.exe / omo-windows-x64.exe, quoted as Win32_Process shows a command line with spaces in its path)
+export const AGENT = { test: isAgentCommand } as const;
 const ENV_ID = /(?:^|\s)PI_SESSION_ID=([0-9a-f-]{36})(?:\s|$)/;
 export const SESSION_FILE = /^(\d{4}-\d\d-\d\dT\d\d)-(\d\d)-(\d\d)-(\d{3})Z_([0-9a-f-]{36})\.jsonl$/;
 const START_WINDOW_MS = 180_000;
 
-export const procTable = async (run: Runner): Promise<Proc[]> =>
-  (await run(["ps", "-A", "-o", "pid=,ppid=,stat=,command="])).out.split("\n").flatMap((line) => {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
-    return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), stat: m[3] ?? "", cmd: m[4] ?? "" }] : [];
+// Win32_Process has no suspension state. NtSuspendProcess puts every thread in Wait/Suspended; query that state too,
+// so a different invocation's pane messaging guard sees a freeze even before handover writes its replacement record.
+// This script is static: no process names, PIDs, paths or arguments are interpolated as PowerShell code.
+export const WIN_PROCS = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "$stopped = @{}; Get-Process | ForEach-Object { try { $threads = @($_.Threads); if ($threads.Count -gt 0 -and @($threads | Where-Object { $_.ThreadState -ne 'Wait' -or $_.WaitReason -ne 'Suspended' }).Count -eq 0) { $stopped[$_.Id] = $true } } catch {} }; Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath,@{Name='StartedAt';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')}}},@{Name='Stat';Expression={if ($stopped.ContainsKey([int]$_.ProcessId)) {'T'} else {''}}} | ConvertTo-Json -Compress"];
+
+export const winProcs = (json: string): Proc[] => {
+  try {
+    const rows: unknown = JSON.parse(json || "[]");
+    const table = (Array.isArray(rows) ? rows : [rows]).flatMap((r: unknown): Proc[] => {
+      if (typeof r !== "object" || r === null || !("ProcessId" in r) || typeof r.ProcessId !== "number" || !r.ProcessId) return [];
+      return [{
+        pid: r.ProcessId,
+        ppid: "ParentProcessId" in r && typeof r.ParentProcessId === "number" ? r.ParentProcessId : 0,
+        cmd: "CommandLine" in r && typeof r.CommandLine === "string" ? r.CommandLine : "",
+        ...("ExecutablePath" in r && typeof r.ExecutablePath === "string" ? { executable: r.ExecutablePath } : {}),
+        ...("StartedAt" in r && typeof r.StartedAt === "string" ? { startedAt: r.StartedAt } : {}),
+        stat: "Stat" in r && r.Stat === "T" ? "T" : "",
+      }];
+    });
+    const byPid = new Map(table.map((p) => [p.pid, p]));
+    // A parent PID can have been reused after the child's original parent exited.
+    return table.map((p) => Date.parse(byPid.get(p.ppid)?.startedAt ?? "") > Date.parse(p.startedAt ?? "") ? { ...p, ppid: 0 } : p);
+  } catch (error) {
+    if (error instanceof SyntaxError) return [];
+    throw error;
+  }
+};
+
+// On Linux the table carries each process's session id too (macOS ps has no sid column): herdr ends every process of a
+// pane's terminal session when it closes the pane, so a job that left the pane's process tree dies with it all the same.
+export const procTable = async (run: Runner, platform: string = process.platform): Promise<Proc[]> => {
+  if (platform === "win32") return winProcs((await run(WIN_PROCS)).out);
+  const linux = platform === "linux";
+  return (await run(["ps", "-A", "-o", linux ? "pid=,ppid=,sid=,stat=,command=" : "pid=,ppid=,stat=,command="])).out.split("\n").flatMap((line) => {
+    // the sid column is optional in what is read: the state letters are never a number
+    const m = /^\s*(\d+)\s+(\d+)\s+(?:(\d+)\s+)?(\S+)\s+(.*)$/.exec(line);
+    return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), ...(m[3] ? { sid: Number(m[3]) } : {}), stat: m[4] ?? "", cmd: m[5] ?? "" }] : [];
   });
+};
 
 // A zombie ("[bash] <defunct>"): it already ended and only waits for its parent to collect it, so no work dies with it.
 export const ended = (p: Proc): boolean => (p.stat ?? "").startsWith("Z") || /<defunct>\s*$/.test(p.cmd);
@@ -28,7 +66,10 @@ export const descendants = (table: readonly Proc[], root: number): Proc[] => {
   for (const p of table) byParent.set(p.ppid, [...(byParent.get(p.ppid) ?? []), p]);
   const out: Proc[] = [];
   const queue = [...(byParent.get(root) ?? [])];
+  const seen = new Set([root]);
   for (let p = queue.shift(); p; p = queue.shift()) {
+    if (seen.has(p.pid)) continue;
+    seen.add(p.pid);
     out.push(p);
     queue.push(...(byParent.get(p.pid) ?? []));
   }
@@ -40,9 +81,38 @@ export const descendants = (table: readonly Proc[], root: number): Proc[] => {
 export const topAgent = (table: readonly Proc[], shell: number): Proc | undefined =>
   shell ? [...table.filter((p) => p.pid === shell), ...descendants(table, shell)].find((p) => AGENT.test(p.cmd) && !ended(p)) : undefined;
 
-export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(sessionsDir, `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`);
+export const sessionDirFor = (sessionsDir: string, cwd: string): string => join(sessionsDir, `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A Windows command line split the way CommandLineToArgvW splits it: quotes group words, 2n backslashes before a quote
+// give n backslashes and toggle quoting, 2n+1 give n and a literal quote, "" inside quotes is a literal quote, and other
+// backslashes are literal.
+export const winArgv = (line: string): string[] => {
+  const out: string[] = [];
+  let word = "";
+  let inWord = false;
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === "\\") {
+      let n = 0;
+      while (line[i] === "\\") { n++; i++; }
+      if (line[i] === '"') { word += "\\".repeat(Math.floor(n / 2)); if (n % 2) word += '"'; else { quoted = !quoted; } }
+      else { word += "\\".repeat(n); i--; }
+      inWord = true;
+    } else if (c === '"') {
+      if (quoted && line[i + 1] === '"') { word += '"'; i++; } else quoted = !quoted;
+      inWord = true;
+    } else if ((c === " " || c === "\t") && !quoted) {
+      if (inWord) out.push(word);
+      word = "";
+      inWord = false;
+    } else { word += c; inWord = true; }
+  }
+  if (inWord) out.push(word);
+  return out;
+};
 
 // The exact session an agent's command line names: --session-id <id> (omo: "use exact project session ID"), or
 // --session <path to the session .jsonl> (the uuid at the end of that file name; aoe resumes a session this way) or a
@@ -51,7 +121,7 @@ export const argvSessionId = (argv: readonly string[]): string => {
   const flagAt = argv.findIndex((a) => a === "--session" || a === "--session-id");
   const value = flagAt >= 0 ? (argv[flagAt + 1] ?? "") : "";
   if (argv[flagAt] === "--session-id") return value;
-  if (value.endsWith(".jsonl")) return SESSION_FILE.exec(basename(value))?.[5] ?? "";
+  if (value.endsWith(".jsonl")) return SESSION_FILE.exec(value.split(/[\\/]/).pop() ?? "")?.[5] ?? "";
   return UUID.test(value) ? value : "";
 };
 
@@ -71,19 +141,19 @@ export const resolveSession = async (pane: string, cwd: string, table: readonly 
   const shellPid = await shellPidOf(pane, deps);
   const agent = topAgent(table, shellPid);
   if (!agent) return { id: "", via: "none" };
-  const argv = agent.cmd.split(/\s+/);
+  const argv = process.platform === "win32" ? winArgv(agent.cmd) : agent.cmd.split(/\s+/);
   const fromFlag = argvSessionId(argv);
   if (fromFlag) return { id: fromFlag, via: "argv", pid: agent.pid };
   // a selector omo resolves itself (a partial --session uuid, --continue, --resume, --fork, --rebind) can open an older
   // session, whose file name is no start time: only a child's exact PI_SESSION_ID may name it, never a nearby new session
   const selected = hasSessionSelector(argv);
-  for (const child of descendants(table, agent.pid).slice(0, 40)) {
+  for (const child of process.platform === "win32" ? [] : descendants(table, agent.pid).slice(0, 40)) {
     const env = await deps.run(["ps", "eww", "-o", "command=", "-p", String(child.pid)]);
     const hit = ENV_ID.exec(env.out);
     if (hit?.[1]) return { id: hit[1], via: "child-env", pid: agent.pid };
   }
   if (selected) return { id: "", via: "none", pid: agent.pid };
-  const started = Date.parse((await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out);
+  const started = Date.parse(process.platform === "win32" ? agent.startedAt ?? "" : (await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out);
   if (Number.isNaN(started)) return { id: "", via: "none", pid: agent.pid };
   const list = deps.listDir ?? ((d: string) => { try { return readdirSync(d); } catch { return []; } });
   const near = list(sessionDirFor(deps.sessionsDir, cwd)).flatMap((name) => {

@@ -1,0 +1,42 @@
+# Manual Windows validation; automatic PR checks block this fork's review/merge gate.
+# Run by hand: gh workflow run windows.yml -R orientpine/omo-dori-mode-experimental --ref <branch>
+name: windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-subset:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: skills/dori-mode/scripts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # These files exercise native Windows or platform-neutral behavior.
+      # POSIX launch worlds, ps/stat fixtures, /tmp paths, shell installers,
+      # systemd, and bash guards remain in the full Linux suite.
+      - name: Native Windows subset
+        run: |
+          bun test `
+            ./test/herdr-backend.test.ts `
+            ./test/herdr-revive.test.ts `
+            ./test/windows-process.test.ts `
+            ./test/windows-powershell.test.ts `
+            ./test/windows-review.test.ts `
+            ./test/windows-shell.test.ts `
+            ./test/windows-executable.test.ts `
+            ./test/windows-freeze.test.ts `
+            ./test/serve.test.ts `
+            ./test/windows-install.test.ts `
+            ./test/windows-skills.test.ts `
+            ./test/windows-serve.test.ts `
+            ./test/windows-lock.test.ts
+          exit $LASTEXITCODE

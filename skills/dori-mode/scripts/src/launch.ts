@@ -1,3 +1,4 @@
+// allow: SIZE_OK - existing launch state machine; native-name recognition is shared without adding another launch path.
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
 
@@ -8,6 +9,7 @@ import { type Backend, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { agentGone, firstTurnRuns, GOAL_WAIT, goalReader, lastLines, noGoalWhy } from "./pending-goal.ts";
 import { AGENT, argvSessionId, descendants, ended, hasSessionSelector, procTable, sessionDirFor, shellPidOf } from "./session-id.ts";
+import { isOmoExecutable } from "./executable.ts";
 import { leadReplies } from "./lead-limit.ts";
 import { omoSession, readScreen, sendVerified } from "./panes.ts";
 import { hasThread, LANE_KEY, type Lane, NO_THREAD, threadRefProblem } from "./registry.ts";
@@ -18,16 +20,23 @@ import { laneArea, loadTree, treeSection } from "./explore.ts";
 import { watchLog } from "./watch-log.ts";
 import { StartRefused } from "./backlog.ts";
 import { relatedLines, relatedThreads, type RelatedThread } from "./related-thread.ts";
-import { addedLine, checkedLedger, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
+import { addedLine, checkedLedger, type DirectivePick, headingAt, type Ledger, mergePicks, missingLines, parsePick, PICK_RUNS, PICK_SYSTEM, pickCandidates, pickPrompt, planDirectives, repoName, type ScopeContext, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
 import { join } from "node:path";
+import type { BudgetLimits } from "./supervision.ts";
+import { Lessons } from "./lessons.ts";
 
 export type LaunchInput = {
+  // what the small model already chose for this launch (a second render with the new thread's ref)
+  readonly pick?: { readonly pick?: DirectivePick; readonly pickFallback?: string };
   readonly key: string;
   readonly title: string;
   readonly brief: string;
   readonly done: string;
   // the work thread: <adapter>:<id> of the thread the work continues in, or NEW_THREAD for one launch opens in this Dori's channel
   readonly thread?: string;
+  // lane caps over the config's (launch --wall-minutes N|none --token-limit N|none --cost-limit N|none) and extra activity files
+  readonly budget?: BudgetLimits;
+  readonly activityPaths?: readonly string[];
   // why the lane has no work thread (dori launch --no-thread "<reason>"): only a lane the owner did not ask for
   readonly noThread?: string;
   // why --thread new opens a new thread though related open threads were shown (dori launch --why-new "<reason>")
@@ -297,6 +306,7 @@ export const footer = (lane: Lane, leadPane: string, backend: Backend = "herdr",
   `- Heavy browser, CPU or build test bundles go through dori heavy <label> --kind browser|cpu --sync <every folder or file the command reads or writes> -- <command>, not a hand-made core lock: the less busy PC runs it and its output, files and exit code come back here (HEAVY_LOCAL <why> means it stayed here; add the path it names to --sync).`,
   ...(lane.goal ? [`- Goal (owner words): "${lane.goal}". At each stage change (a new phase, a pivot, before a big step) run dori intent-check ${lane.key} --direction "<what you do now>" --next "<next step>" (a reviewer model reads it against the owner's words) and say in your report how the step serves this goal.`] : []),
   ...(lane.challengeBefore?.length ? [`- Before ${lane.challengeBefore.map((s) => `"${s}"`).join(" or ")}: write the plan to a file and run dori challenge ${lane.key} --plan <file> (a model of another family reviews it); answer its reasons in your next report. A done claim is refused until a challenge is on record.`] : []),
+  `- After each finished step run dori checkpoint ${lane.key} --step <unique step> --result <result> --evidence <path or link> [--remote-effect <receipt of a push, merge or deploy it did>] (one flag per receipt). On resume run dori checkpoints ${lane.key} before any work and never repeat a recorded remote effect; after a crash between a remote action and its checkpoint, read the live remote state first.`,
   `- What you learn goes to one place: a standing instruction of the owner to the lead in a [REPORT] for the directive ledger, a lesson, fact or how the work went into your omo memory, and the report stays the record (references/done-protocol.md).`,
   ...(gated.length ? [`- A PR in ${gated.join(", ")} merges only through the review gate: in a clean checkout of the PR's head run dori review <repo>#<N> (it runs the tests there first, then a reviewer of another model family; VERDICT: CLEAR is needed; a PR with GitHub checks or auto-merge is refused as unsupported), then dori merge <repo>#<N>, which merges only that exact head (--match-head-commit). A commit pushed after the review needs dori review again; a PR merged with plain gh pr merge makes claim-done refuse (MERGE_GATE_MISSING).`] : []),
   `- When done: dori claim-done ${lane.key} --evidence "<merge SHA, closed issue, version>"${hasThread(lane) ? ` --summary "<2 to 5 plain lines for the owner, in their language: what changed, what is left, when it reaches where it is used; no paths, hashes or codes>" (your one result post: the close posts it in the work thread; if you already posted your result there yourself in the last 30 minutes, the close posts nothing more, so never post it twice; without --summary and a post the close has a model write one from your last report and REPORT.md)` : ""}. See references/done-protocol.md.`,
@@ -322,7 +332,7 @@ export const adoptLane = async (deps: FlowDeps, input: LaunchInput & { readonly 
   return lane;
 };
 
-// A lane put on a thread works there: one left ✅ or ⏸️, or archived (a lane closed in it before), is opened again and
+// A lane put on a thread works there: one left ✅ or 🔔 (or an old ⏸️), or archived (a lane closed in it before), is opened again and
 // marked 🔄, as closeLane and dori resume decide it (a working lane makes its thread working, past an open card). The
 // rename goes through the thread status queue, so Discord's rename limit parks it for the listener instead of failing.
 // A thread already 🔄 and open is only read. Without a Discord token or a discord: ref nothing is done.
@@ -429,13 +439,64 @@ export const treeContext = async (deps: FlowDeps, draft: Lane): Promise<string |
   return treeSection(trees, deps.config.explore.treeLines, `dori tree --lane ${draft.key}`);
 };
 
+// The repo's lessons (src/lessons.ts, dori lesson add / close --lesson): up to 8 current rules earlier lanes in the same cwd
+// learned, newest first. A rule the brief already says word for word (a directive of the ledger, the lead's own text) is
+// left out, so the owner's words are not said twice. A damaged journal line is a LESSON_WARNING, never a stopped launch.
+const LESSONS_HEADING = "## Lessons for this repo (written by dori launch)";
+
+// The lessons block an earlier launch wrote into this brief: its heading line and the lines under it up to a blank line or
+// the next heading (a rule is one line, so the block has no blank line inside).
+export const withoutLessons = (brief: string): string => {
+  let text = brief;
+  for (let at = headingAt(text, LESSONS_HEADING); at >= 0; at = headingAt(text, LESSONS_HEADING)) {
+    const rest = text.slice(at);
+    const end = rest.search(/\n(?:[ \t]*\n|## )/);
+    text = text.slice(0, at) + (end < 0 ? "" : rest.slice(end + 1));
+  }
+  return text;
+};
+
+export const repoLessons = (deps: Pick<FlowDeps, "config">, cwd: string, brief: string): { readonly section?: string; readonly warnings: string[] } => {
+  const { lessons, problems } = new Lessons(deps.config.stateDir).forRepo(cwd);
+  const flat = (s: string): string => s.replace(/\s+/g, " ").trim();
+  const said = flat(brief);
+  const fresh = lessons.filter((l) => !said.includes(flat(l.rule)));
+  const warnings = problems.map((p) => `LESSON_WARNING ${p}`);
+  if (!fresh.length) return { warnings };
+  return {
+    warnings,
+    section: [
+      LESSONS_HEADING,
+      "Rules earlier lanes in this repo learned, newest first. They are lane lessons, not the owner's directives. Follow them; when one helped or got in the way, say so in a report (the lead marks it: dori lesson mark <id> --outcome helped|no-effect|harmful|encoded).",
+      ...fresh.map((l) => `- [${l.outcome}; ${l.lane}; ${l.id}] ${l.rule}`),
+    ].join("\n"),
+  };
+};
+
 const draftLane = (deps: FlowDeps, input: LaunchInput): Lane => ({
   ...(input.noThread?.trim() ? { noThread: input.noThread.trim() } : {}),
   ...(input.whyNew?.trim() ? { whyNew: input.whyNew.trim() } : {}),
   // the brief as an absolute path: the audit, intent-check and freshness read it from another directory than the lead's
   key: input.key, title: input.title, thread: input.thread ?? "none", brief: resolve(input.brief), done: input.done, cwd: input.cwd ?? deps.config.defaultCwd, model: input.model ?? deps.config.defaultModel,
   ...(input.tags?.length ? { tags: input.tags } : {}), ...intentFields(input), openedAt: iso(deps.clock),
+  ...(input.budget && Object.keys(input.budget).length ? { budget: input.budget } : {}), ...(input.activityPaths?.length ? { activityPaths: input.activityPaths } : {}),
 });
+
+type Chosen = { readonly pick?: DirectivePick; readonly pickFallback?: string };
+
+// Which non-fixed entries this brief needs, from the small model; on any failure the scope rules decide and the record says why.
+const pickDirectives = async (deps: FlowDeps, raw: string, ledger: Ledger, ctx: ScopeContext): Promise<Chosen> => {
+  const model = deps.config.directives.pickModel;
+  if (!model) return {};
+  const candidates = pickCandidates(ledger, ctx);
+  const prompt = pickPrompt(raw, candidates);
+  // an argument this long does not reach the model at all
+  if (Buffer.byteLength(prompt) > 120_000) return { pickFallback: "the brief is too long to pass to the model" };
+  const runs = await Promise.all(Array.from({ length: PICK_RUNS }, () => deps.run(fill(deps.config.reviewers.command, { model, system: PICK_SYSTEM, prompt }), { timeoutMs: 60_000 })));
+  const lists = runs.flatMap((r) => (r.code === 0 ? [parsePick(r.out, candidates)] : [])).filter((l) => l !== undefined);
+  if (!lists.length) return { pickFallback: `${model} gave no usable list in ${PICK_RUNS} runs (exit ${runs.map((r) => r.code).join(", ")})` };
+  return { pick: { model, picked: mergePicks(lists), runs: { asked: PICK_RUNS, answered: lists.length }, evaluated: candidates.map((e) => e.id) } };
+};
 
 export type Rendered = {
   readonly draft: Lane;
@@ -448,18 +509,21 @@ export type Rendered = {
 };
 
 // The brief as the lane will read it: the lead's text with the eight steps, the UI steps for UI work and the directives of
-// the ledger in scope it lacks, then Past signals, the hypothesis tree, and the footer.
+// the ledger in scope it lacks, then the repo's lessons, Past signals, the hypothesis tree, and the footer.
 export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<Rendered> => {
   const briefFile = Bun.file(input.brief);
   if (!(await briefFile.exists())) throw new LaunchError(`brief not found: ${input.brief}`);
-  const raw = (await briefFile.text()).replace(/\s*$/, "");
+  // a brief launched before carries the lessons launch wrote then (one maybe retired since): only that block is cut and made
+  // anew; text added after the footer since (backlog's read-only rule, an owner's answer) stays as it is
+  const raw = withoutLessons(await briefFile.text()).replace(/\s*$/, "");
   const cwd = input.cwd ?? deps.config.defaultCwd;
   const ledger = launchLedger(deps);
   const ctx = scopeContext(raw, ledger, { ui: input.ui, repo: ledger.entries.length ? await laneRepo(deps, cwd) : "" });
-  const plan = planDirectives(raw, ledger, ctx, input.waive);
+  const chosen = ledger.entries.length ? (input.pick ?? (await pickDirectives(deps, raw, ledger, ctx))) : { pickFallback: "" };
+  const plan = planDirectives(raw, ledger, ctx, input.waive, chosen.pick);
   const ui = Boolean(input.ui) || plan.blocks.includes("ui-steps");
   const at = iso(deps.clock);
-  const draft: Lane = { ...draftLane(deps, input), ...(ui ? { ui: true } : {}), ...(ledger.entries.length ? { directives: { applied: plan.applied, waived: plan.waived.map(({ e, reason }) => ({ id: e.id, reason, at })) } } : {}) };
+  const draft: Lane = { ...draftLane(deps, input), ...(ui ? { ui: true } : {}), ...(ledger.entries.length ? { directives: { applied: plan.applied, waived: plan.waived.map(({ e, reason }) => ({ id: e.id, reason, at })), ...chosen } } : {}) };
   const past = await pastSignals(deps, input, draft.cwd ?? deps.config.defaultCwd);
   const tree = await treeContext(deps, draft);
   const skipEight = plan.waived.some(({ e }) => e.block === "eight-steps");
@@ -468,8 +532,10 @@ export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<R
   const steps = stepsLine(input.key, eight);
   const hint = uiWarning(input, raw, ledger, ui);
   const added = addedLine(input.key, plan);
-  const lines = [...(hint ? [hint] : []), ...(added ? [added] : []), ...waivedLines(input.key, plan)];
-  return { draft, ...(steps ? { steps } : {}), lines, missing: missingLines(input.key, plan), text: `${ui ? withUiSteps(lead, await uiSteps()) : lead}\n${past ? `${past}\n` : ""}${tree ? `${tree}\n` : ""}${footer(draft, deps.config.leadPane, deps.config.backend, Object.keys(deps.config.mergeGate.repos))}` };
+  const lessons = repoLessons(deps, draft.cwd ?? deps.config.defaultCwd, lead);
+  const picked = chosen.pick ? `LAUNCH_DIRECTIVE_PICKED ${input.key}: ${chosen.pick.model} chose ${chosen.pick.picked.map((p) => p.id).join(", ")} (${chosen.pick.runs?.answered ?? 1} of ${chosen.pick.runs?.asked ?? 1} runs answered)` : chosen.pickFallback ? `LAUNCH_DIRECTIVE_PICK_FALLBACK ${input.key}: the scope rules decide (${chosen.pickFallback})` : undefined;
+  const lines = [...(hint ? [hint] : []), ...(added ? [added] : []), ...(picked ? [picked] : []), ...waivedLines(input.key, plan), ...lessons.warnings];
+  return { draft, ...(steps ? { steps } : {}), lines, missing: missingLines(input.key, plan), text: `${ui ? withUiSteps(lead, await uiSteps()) : lead}\n${lessons.section ? `${lessons.section}\n` : ""}${past ? `${past}\n` : ""}${tree ? `${tree}\n` : ""}${footer(draft, deps.config.leadPane, deps.config.backend, Object.keys(deps.config.mergeGate.repos))}` };
 };
 
 // The first lines of the lead's brief (headings and blank lines left out), for the thread's first message.
@@ -524,7 +590,9 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
     const line = `THREAD_OPENED ${input.key} ${ref}: the lane's work thread, new in this Dori's channel (--thread ${NEW_THREAD})`;
     warn(line);
     watchLog(deps.config.watchLog, deps.clock, { source: "launch", line });
-    ({ draft, text } = await renderBrief(deps, { ...input, thread: ref }));
+    // the same choice, not a second call that may choose otherwise
+    const { pick, pickFallback } = draft.directives ?? {};
+    ({ draft, text } = await renderBrief(deps, { ...input, thread: ref, pick: { ...(pick ? { pick } : {}), ...(pickFallback ? { pickFallback } : {}) } }));
   }
   await Bun.write(input.brief, text);
   const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane; report as the brief's footer says.`;
@@ -603,7 +671,7 @@ type Opened = { readonly pane: string; readonly tab?: string; readonly failure?:
 // A herdr lane's agent picks its own session unless told: an omo agentCommand that names no session of its own gets
 // --session-id <a new id> after the program, so launch knows the lane's session exactly. Any other command is run as it is.
 export const withSessionId = (argv: readonly string[], id: string): string[] =>
-  basename(argv[0] ?? "") === "omo" && !hasSessionSelector(argv) ? [argv[0] ?? "omo", "--session-id", id, ...argv.slice(1)] : [...argv];
+  isOmoExecutable(argv[0] ?? "") && !hasSessionSelector(argv) ? [argv[0] ?? "omo", "--session-id", id, ...argv.slice(1)] : [...argv];
 
 // env: launchEnv for the lane (laneEnv), set on the agent's command line, since a herdr pane takes the server's environment
 const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string, prompt: string, env: Readonly<Record<string, string | undefined>> = {}): Promise<Opened> => {
@@ -613,7 +681,7 @@ const openHerdr = async (deps: FlowDeps, key: string, cwd: string, model: string
   let opened: { readonly pane: string; readonly tab?: string };
   try {
     // omo needs node for its hooks (agentPath); another agent starts with the server's PATH as before
-    const path = basename(argv[0] ?? "") === "omo" ? { PATH: agentPath(argv[0] ?? "omo") } : {};
+    const path = isOmoExecutable(argv[0] ?? "") ? { PATH: agentPath(argv[0] ?? "omo") } : {};
     opened = await openHerdrSession(deps.run, deps.clock, { title: key, cwd, argv, env: { ...env, ...path }, ...(deps.config.laneWorkspace ? { workspace: deps.config.laneWorkspace } : {}) });
   } catch (e) {
     throw new LaunchFailed(e instanceof Error ? e.message : String(e));

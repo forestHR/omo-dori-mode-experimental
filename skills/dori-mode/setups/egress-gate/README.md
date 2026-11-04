@@ -106,6 +106,7 @@ drive and a file that is not the owner's still need one.
 | Drive | Own/private files create/update/copy/trash, spreadsheets and conversions, comments/replies on own files, owner permission, permission removal | Public/shared/non-owned targets/parents, external permission, comments/replies with a mention (`+name`, `@name`, a mail address) or on a non-owned file | Permanent file deletion, emptyTrash, watch, shared-drive management |
 | Docs | Create and owned/private batchUpdate, images and links by URL included | Public/non-owned documents | Other writes |
 | Sheets | Create and writes on owned/private spreadsheets | Public/shared/non-owned spreadsheets, also as a `copyTo` destination | Non-API routes, `copyTo` without a valid destination |
+| Forms (`forms.googleapis.com`) | GET `v1/forms/<id>` and POST `v1/forms/<id>:batchUpdate` (info, settings, item create, move, delete, update) on the owner's own form, also one open to responders; writes need owner proof and keep the whole form as a snapshot, no one-call restore | Never | Other people's, shared-drive and anyone-can-edit forms, also reads (`drive-not-owned`, `public-drive-target`); responses, `setPublishSettings`, watches, `forms.create` (`forms-route-not-allowed`). Responses stay shut because they are other people's data and no owner task needs them. The Drive scope is enough; no `forms.body` consent |
 | Gmail | Reads | Never | Every write; send-capable OAuth scopes |
 | Contacts (`people.googleapis.com`) | GET `people:searchContacts`, `people:batchGet`, `people/<id>`, `people/me/connections`, `otherContacts`, `otherContacts:search` | Never | Every write, contact groups, directory, other paths (`403 contacts-read-only`) |
 | Vault | Owner-initiated Markdown writes | Configured limits only | Delete API, traversal, hidden paths, symlinks |
@@ -203,17 +204,30 @@ add/remove their reactions through the Discord port. On any message, a client ma
 Each card lives in a thread, and its result is written on the card there. A request
 written inside a thread under the approval channel keeps its card in that thread; one
 written in the approval channel gets a thread on that message; anything else opens a new
-thread in the approval channel (any thread failure falls back to the channel). A newer card
+thread in the approval channel (any thread failure falls back to the channel); a new thread is named
+`🔔 🔐 <kind> · <what>` (🔔: a card in it waits on the owner). When the card joins a thread a Dori opened
+first (`dori thread open --from` on the owner's message, or a Dori thread the request was written in), that
+thread is renamed to the same shape with the Dori's title kept: `🔔 정해영 OmO 문의 답장` becomes
+`🔔 🔐 정해영 OmO 문의 답장`, so the decision later marks it like any card thread (2026-11-04). A name
+already in that shape (one mark, then `🔐`, `✉️` or `📬`) and a thread the owner opened himself keep their
+name; a failed rename is logged (`GATE_CARD_THREAD_RENAME_FAILED`) and the card is posted anyway. The cards one owner message asks for
+share one thread (owner Q474, 2026-11-03; one request had made eighteen Drive sharing threads in two
+minutes): a card or a batch card whose owner message already has an undecided card or batch card in a
+thread goes into that thread, in any order and also when they arrive at once. Choosing the thread until the
+card is on record holds the approval lock, so neither another card nor the poller's decisions (which close
+threads) run in between. A thread whose cards were all decided is not reused. A newer card
 for the same work in the same thread (same API, operation and path; for creates, the same
 title) replaces the older undecided card: it is marked `🔁 새 판으로 대체됨` and never runs.
-Once the last card in a thread the gate opened (its name starts `🔐 `) is decided, the thread is
-renamed `✅ 완료 · ` (executed, 2xx), `⛔ 취소 · `, `⌛ 만료 · ` or `❗ 실패 · ` plus its name and archived; the
+Once the last card in a thread the gate opened (its name starts `🔐 ` after any leading mark) is decided,
+the thread gets one leading mark, `✅` (executed, 2xx), `⛔` (cancelled), `💤` (a day with no answer) or `❗`
+(failed), in place of any mark it had (also the older `✅ 완료 · `-style words, so a name never shows two),
+and is archived; the
 owner's own threads and threads with an open card keep their title. At start the gate also titles
 open card threads whose cards were all decided earlier (owner 2026-10-19 "승인 결과를 스레드 제목에
 반영하게 해줘").
 Discord reopens an archived thread on any new message. When a message posted through the
-Discord port goes into a thread that was archived under one of those four titles (the gate's
-own card threads and the node's request threads use the same words), the gate archives it again
+Discord port goes into a thread that was archived under one of those end marks (or an older
+`✅ 완료 · `-style title; the gate's own card threads and the node's request threads use the same marks), the gate archives it again
 right after the post. A decided thread someone else reopened, or one without a status title,
 stays as it is. So does a decided thread that holds a live card: a message newer than the
 thread's last title change that carries both ✅ and ⛔ reactions (a newer card for the same work

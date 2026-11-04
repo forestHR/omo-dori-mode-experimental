@@ -1,14 +1,15 @@
+// allow: SIZE_OK - existing shared handover simulation; the new assertion checks one OS stop per agent.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { pauseLane } from "../src/done-flow.ts";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { autoReadyLine, freshnessTick, resumeArgs } from "../src/freshness.ts";
 import { closeDueFrozen, readFrozen } from "../src/frozen.ts";
 import { ackHandover, manifestPath } from "../src/handover.ts";
-import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
-import { appendRollover, approvalProblem, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
+import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, type LaneHandoverOptions, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark } from "../src/lane-handover.ts";
+import { appendRollover, approvalProblem, AUTO_GRANT_MS, mintAutoGrant, takeAutoGrant, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, peerStuckLines, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
 import { stuckTop, stuckView } from "../src/explore.ts";
 import { recordFix } from "../src/same-fix.ts";
 import { QuestionStore } from "../src/messenger/discord-cards.ts";
@@ -397,6 +398,9 @@ test("moves the lane: same cwd, model and thinking, registry and cards repointed
   expect(sent(w).some((t) => t.startsWith("You are the demo lane in a new session") && t.includes(r.note ?? "?"))).toBe(true);
   const now = await readLane(deps);
   expect(now).toMatchObject({ pane: NEW, session: "new-sid", thread: "discord:12345678", brief: lane().brief });
+  // the outgoing session found in the old pane stays on the lane (the registry had none, as for an adopted lane), so its
+  // cost still counts (supervision.ts laneSessionUsage)
+  expect(now.priorSessions).toEqual(["old-sid"]);
   expect(new QuestionStore(join(state.dir, "discord")).get("Q1")).toMatchObject({ tmux: NEW });
   expect(printed).toContain(`HANDOVER_STATUS_OK ${NEW} claude-opus-5-5 thinking high`);
   expect(printed).toContain(`HANDOVER_MONITORS_OK 2 in ${NEW} (session new-sid)`);
@@ -634,7 +638,7 @@ const killedRun = async (deps: LaneHandoverDeps, pid: number) => {
   await deps.registry.patch("demo", { pane: NEW });
   new QuestionStore(join(state.dir, "discord")).retarget({ tmux: OLD }, { tmux: NEW });
   mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
-  writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid, at: "2026-10-11T16:20:00Z", from: OLD, to: NEW, note: "/x.md", chains: [{ pid: 15, cmd: "bash -c sleep 7200; echo chain-done", pids: [15, 16] }] }));
+  writeFileSync(pendingFile(state.dir, "demo"), JSON.stringify({ key: "demo", pid, at: "2026-10-11T16:20:00Z", from: OLD, to: NEW, note: "/x.md", chains: [{ pid: 15, cmd: "bash -c sleep 7200; echo chain-done", pids: [15, 16] }], fromSession: "old-sid", cwd: CWD }));
 };
 
 test("a run killed midway (crash, reboot) is repaired by the next run: old session alive -> back to it, new one closed", async () => {
@@ -667,6 +671,8 @@ test("a killed run whose old session is already gone keeps the lane on the new o
   // Then
   expect(r.code).toBe(3);
   expect(printed).toContain(`HANDOVER_RECOVERED demo kept on ${NEW}: the old session ${OLD} is gone`);
+  // the recovery records the lane's sessions like a finished move: the new one, and the outgoing one kept for its cost
+  expect(await readLane(deps)).toMatchObject({ session: "new-sid", priorSessions: ["old-sid"] });
   // the new session is released, and told whether the old chains still run (here they do: no restart)
   expect(sent(w).some((t) => t.startsWith(`[LEAD] HANDOVER_COMMITTED: the handover was interrupted after the old session ${OLD} closed`))).toBe(true);
   expect(printed).toContain("HANDOVER_CHAIN_SURVIVED demo 15; the new session was told not to restart them");
@@ -748,7 +754,7 @@ test("an approval is an answered rollover card for this lane's current session, 
   // a link holds only for a message the inbox has from the owner
   const inbox = join(mkdtempSync(join(tmpdir(), "dori-approval-")), "inbox.jsonl");
   writeFileSync(inbox, [{ id: "3", channel_id: "2", author_id: OWNER, content: "roll it over" }, { id: "4", channel_id: "2", author_id: "999", content: "roll it over" }].map((x) => JSON.stringify(x)).join("\n"));
-  const check = (ref: string | undefined, on = false, canReport = false) => approvalProblem(ref, card, { on, key: "handover.autoRolloverLanes" }, "demo", "p1", log, canReport, inboxMessages(inbox, [OWNER]));
+  const check = (ref: string | undefined, on = false, canReport = false, granted = false) => approvalProblem(ref, card, { on, key: "handover.autoRolloverLanes", granted }, "demo", "p1", log, canReport, inboxMessages(inbox, [OWNER]));
   // When / Then
   expect(check("Q1")).toBeUndefined();
   expect(check("q1")).toBeUndefined();
@@ -764,9 +770,12 @@ test("an approval is an answered rollover card for this lane's current session, 
   expect(check("https://discord.com/channels/1/9/3")).toContain("is in channel 2 in the inbox, not in 9");
   for (const words of ["not approved", "owner said yes", "https://discord.com/channels/1/2", "https://example.com/channels/1/2/3"]) expect(check(words)).toContain("neither an answered rollover card");
   expect(check(undefined)).toStartWith("no approval");
-  expect(check("auto:handover.autoRolloverLanes")).toContain("the automation key is off");
-  expect(check("auto:handover.autoRolloverLanes", true)).toContain("an automatic rollover needs a way to tell the owner afterwards");
-  expect(check("auto:handover.autoRolloverLanes", true, true)).toBeUndefined();
+  // the automatic string holds only with the grant of a run freshness started; typed by hand it is refused and says what to use
+  expect(check("auto:handover.autoRolloverLanes", true, true)).toStartWith("HANDOVER_APPROVAL auto:handover.autoRolloverLanes is the approval of a run freshness starts by itself");
+  expect(check("auto:handover.autoRolloverLanes", true, true)).toContain('--approved-by "lead:<reason and the signal behind it>" or "lead:<reason>, owner <link of the owner\'s message that asked for it>"');
+  expect(check("auto:handover.autoRolloverLanes", false, false, true)).toContain("the automation key is off");
+  expect(check("auto:handover.autoRolloverLanes", true, false, true)).toContain("an automatic rollover needs a way to tell the owner afterwards");
+  expect(check("auto:handover.autoRolloverLanes", true, true, true)).toBeUndefined();
   expect(check("auto:anything", true)).toBe("auto:anything is not the automatic approval of this side; only auto:handover.autoRolloverLanes is");
   // the lead decides with a reason and the signal behind it, and only when the owner can be told afterwards
   expect(check("lead:STUCK rung 4 on loss, research did not help", false, true)).toBeUndefined();
@@ -779,6 +788,107 @@ test("an approval is an answered rollover card for this lane's current session, 
   expect(check("lead:\ub2e8\uacc4\ub97c \ud310\ub2e8\ud574 \ubcf4\ub2c8 \uc62e\uae38 \ub54c", false, true)).toContain("does not say the reason");
   expect(check("lead:after the outage 3 h ago it looked off", false, true)).toContain("does not say the reason");
   expect(check("lead:context 85% after 6 compactions", false, true)).toBeUndefined();
+});
+
+test("auto approval borrowing: a hand-run that passes auto:handover.autoRolloverLanes is refused with HANDOVER_APPROVAL, logs no rollover row and opens nothing; the run given freshness's grant moves the lane", async () => {
+  // Given: OkDori herdr-qa (05:09Z) and GongDori e7-beyond-eth (05:50Z, 25 s after an owner link was refused) on 2026-11-03,
+  // hand-runs with the automatic string while the key was on
+  const base = await setup();
+  const deps: LaneHandoverDeps = { ...base, config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } }, reportOwner: async () => "msg-1" };
+  ready(deps, [15]);
+  // When: by hand, with a made-up grant, then as freshness starts it
+  const byHand = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO });
+  const madeUp = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, autoGrant: "0".repeat(32) });
+  const handLines = printed.filter((l) => l.startsWith("HANDOVER_REFUSED demo"));
+  const rows = readRollovers(state.dir).length;
+  const openedByHand = opened();
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
+  // Then
+  expect([byHand.code, madeUp.code]).toEqual([2, 2]);
+  expect(handLines).toHaveLength(2);
+  for (const l of handLines) expect(l).toContain(": HANDOVER_APPROVAL auto:handover.autoRolloverLanes is the approval of a run freshness starts by itself");
+  expect(rows).toBe(0);
+  expect(openedByHand).toBe(false);
+  expect(r.code).toBe(0);
+  expect(printed).toContain(`HANDOVER_COMMITTED demo ${NEW}`);
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", decidedBy: "auto" });
+});
+
+test("an automatic grant is taken once, only for the side and key it was minted for, within AUTO_GRANT_MS", () => {
+  // Given
+  const dir = mkdtempSync(join(tmpdir(), "dori-grant-"));
+  const t0 = Date.parse("2026-11-03T12:00:00Z");
+  const g = mintAutoGrant(dir, "lane", "demo", t0);
+  // When / Then: once, then never again
+  expect(takeAutoGrant(dir, "lane", "demo", g, t0 + 1_000)).toBe(true);
+  expect(takeAutoGrant(dir, "lane", "demo", g, t0 + 2_000)).toBe(false);
+  // another lane's or the lead's grant, a stale one, and anything that is no token hold nothing
+  expect(takeAutoGrant(dir, "lane", "other", mintAutoGrant(dir, "lane", "demo", t0), t0)).toBe(false);
+  expect(takeAutoGrant(dir, "lead", "demo", mintAutoGrant(dir, "lane", "demo", t0), t0)).toBe(false);
+  expect(takeAutoGrant(dir, "lane", "demo", mintAutoGrant(dir, "lane", "demo", t0), t0 + AUTO_GRANT_MS + 1)).toBe(false);
+  for (const bad of [undefined, "", "../../registry", AUTO]) expect(takeAutoGrant(dir, "lane", "demo", bad, t0)).toBe(false);
+  // a grant no run took is dropped by the next mint once stale
+  mintAutoGrant(dir, "lane", "demo", t0);
+  mintAutoGrant(dir, "lane", "demo", t0 + AUTO_GRANT_MS + 1);
+  expect(readdirSync(join(dir, "handover", "auto-grants"))).toHaveLength(1);
+});
+
+test("a borrowed auto: approval is refused with HANDOVER_APPROVAL before any other refusal, and no early refusal logs it as an automatic run (review 312)", async () => {
+  // Given: a hand-run whose --note does not exist would be refused before the approval was read, and logged as auto:
+  const base = await setup();
+  const deps: LaneHandoverDeps = { ...base, config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } }, reportOwner: async () => "msg-1" };
+  // When
+  const missingNote = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, note: join(state.dir, "no-such-note.md") });
+  const noLane = await laneHandover(deps, "nope", "aoe_lead_x", { approvedBy: AUTO });
+  const otherSide = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLead" });
+  // Then
+  expect([missingNote.code, noLane.code, otherSide.code]).toEqual([2, 2, 2]);
+  const lines = printed.filter((l) => l.startsWith("HANDOVER_REFUSED"));
+  expect(lines[0]).toContain("demo: a lane moves to a new session only with an approval: HANDOVER_APPROVAL");
+  expect(lines[1]).toContain("nope: a lane moves to a new session only with an approval: HANDOVER_APPROVAL");
+  expect(lines[2]).toContain("is not the automatic approval of this side");
+  // a hand-run with --wait-idle while another run holds the lane's lock: the approval refusal, not the lock's
+  live.add(4242);
+  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
+  writeFileSync(join(state.dir, "handover", "lanes", "demo.lock"), JSON.stringify({ pid: 4242, at: "2026-10-11T16:30:00Z" }));
+  const locked = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  expect(locked.code).toBe(2);
+  expect(printed.filter((l) => l.startsWith("HANDOVER_REFUSED")).at(-1)).toContain("demo: a lane moves to a new session only with an approval: HANDOVER_APPROVAL");
+  expect(existsSync(join(state.dir, "handover", "lanes", "demo.lock"))).toBe(true);
+  expect(readRollovers(state.dir)).toEqual([]);
+});
+
+test("two processes that present one grant at once: exactly one takes it (review 312)", async () => {
+  // Given
+  const dir = mkdtempSync(join(tmpdir(), "dori-grant-race-"));
+  const token = mintAutoGrant(dir, "lane", "demo", Date.now());
+  const code = `import { takeAutoGrant } from ${JSON.stringify(join(import.meta.dir, "../src/rollover.ts"))}; console.log(takeAutoGrant(${JSON.stringify(dir)}, "lane", "demo", ${JSON.stringify(token)}, Date.now()));`;
+  // When: 12 separate processes, started together
+  const procs = Array.from({ length: 12 }, () => Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "pipe" }));
+  const outs = await Promise.all(procs.map(async (p) => { await p.exited; return (await new Response(p.stdout).text()).trim(); }));
+  // Then
+  expect(outs.filter((o) => o === "true")).toHaveLength(1);
+  expect(outs.filter((o) => o === "false")).toHaveLength(11);
+  expect(readdirSync(join(dir, "handover", "auto-grants"))).toEqual([]);
+});
+
+test("the ready mark's start again of a lead's refused handover goes through the real handover with the lead's approval and needs no grant", async () => {
+  // Given: a lead's handover refused for the lane's chain 15
+  const base: LaneHandoverDeps = { ...(await setup()), reportOwner: async () => "msg-1" };
+  const LEAD_OK = "lead:STUCK rung 4 on loss after research";
+  await laneHandover(base, "demo", "aoe_lead_x", { approvedBy: LEAD_OK });
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "refused", blocked: "work" });
+  ready(base, [15], new Date(base.clock.now() + 1_000).toISOString());
+  // When: freshness starts it again, the hook running the real lane handover with what it is given
+  const codes: number[] = [];
+  await freshnessTick(base, "/home/test", { signals: async () => ({}), alive: () => false, resume: async (key, approvedBy, request) => {
+    codes.push((await laneHandover(base, key, "aoe_lead_x", { approvedBy, ...request })).code);
+    return { started: true, line: "unit=u" };
+  } });
+  // Then
+  expect(codes).toEqual([0]);
+  expect(printed).toContain(`HANDOVER_COMMITTED demo ${NEW}`);
+  expect(readRollovers(state.dir).at(-1)).toMatchObject({ result: "done", decidedBy: "lead", approvedBy: LEAD_OK });
 });
 
 test("a dry run checks a given approval the same way and says so, writing nothing to the rollover log", async () => {
@@ -874,6 +984,43 @@ test("rollover-stats gives counts, approval time, step times and the lane's qual
   const lead = rolloverStats([{ ...entries[1], approvedBy: "lead:STUCK rung 4", decidedBy: "lead", reason: "STUCK rung 4", ownerReport: { message: "m1" } }, { ...entries[1], decidedBy: "lead", ownerReport: { error: "429" } }] as never, [], Date.parse("2026-10-11T12:30:00Z"));
   expect(lead[2]).toContain("; decided by the lead (STUCK rung 4), owner told: m1");
   expect(lead[4]).toContain("owner told: MISSING (429)");
+});
+
+test("rollover-stats ends with each stuck rollover and what came of it: resolved, not resolved or unknown, in the lane's words", async () => {
+  // Given: four stuck moves (one moved again, one closed by the lead without a line), a context move, and a refused stuck run
+  const move = (key: string, at: string, extra: object = {}) => ({ kind: "rollover", who: "lane", at, key, from: OLD, to: NEW, decidedBy: "auto", signals: { stuck: { metric: "review", n: 4, rung: 4 } }, steps: [], result: "done", reasons: [], ...extra });
+  const entries = [
+    move("a", "2026-10-11T10:00:00Z"),
+    { kind: "outcome", at: "2026-10-11T10:19:00Z", key: "a", rolloverAt: "2026-10-11T10:00:00Z", resolved: true, line: "read the reviewer's diff instead of the summary", by: "claim-done" },
+    move("b", "2026-10-11T11:00:00Z", { decidedBy: "lead" }),
+    { kind: "outcome", at: "2026-10-11T12:00:00Z", key: "b", rolloverAt: "2026-10-11T11:00:00Z", resolved: false, line: "same wall", by: "claim-done" },
+    move("c", "2026-10-11T12:00:00Z"),
+    { kind: "outcome", at: "2026-10-11T12:30:00Z", key: "c", rolloverAt: "2026-10-11T12:00:00Z", line: "owner dropped it", by: "close" },
+    move("d", "2026-10-11T13:00:00Z"),
+    move("d", "2026-10-11T14:00:00Z", { signals: { contextPct: 90 } }),
+    move("e", "2026-10-11T15:00:00Z", { result: "refused" }),
+  ];
+  // When
+  const out = rolloverStats(entries as never, [], Date.parse("2026-10-11T16:00:00Z"));
+  // Then
+  const at = out.findIndex((l) => l.startsWith("STUCK_OUTCOMES "));
+  expect(out.slice(at)).toEqual([
+    "STUCK_OUTCOMES here stuck_rollovers=4 (auto 3) resolved=1 not_resolved=1 unknown=2",
+    `STUCK_ROLLOVER here a 2026-10-11T10:00:00Z by auto on "review" (4x) -> resolved 19 min after (claim-done): read the reviewer's diff instead of the summary`,
+    `STUCK_ROLLOVER here b 2026-10-11T11:00:00Z by lead on "review" (4x) -> not resolved 60 min after (claim-done): same wall`,
+    `STUCK_ROLLOVER here c 2026-10-11T12:00:00Z by auto on "review" (4x) -> unknown 30 min after (close): owner dropped it`,
+    `STUCK_ROLLOVER here d 2026-10-11T13:00:00Z by auto on "review" (4x) -> moved again at 2026-10-11T14:00:00Z, no line`,
+  ]);
+  // and each other Dori's log is read as its account; one that cannot be read says so
+  const log = entries.map((e) => JSON.stringify(e)).join("\n");
+  const calls: string[][] = [];
+  const peers = await peerStuckLines(async (argv) => {
+    calls.push([...argv]);
+    return argv[3] === "soodori" ? { code: 0, out: log, err: "" } : { code: 1, out: "", err: "sudo: a password is required" };
+  }, ["soodori:/home/soodori/.soodori/state/rollover-log.jsonl", "okdori:/home/okdori/.okdori/state/rollover-log.jsonl", "bad"]);
+  expect(calls[0]).toEqual(["sudo", "-n", "-u", "soodori", "cat", "/home/soodori/.soodori/state/rollover-log.jsonl"]);
+  expect(peers[0]).toBe("STUCK_OUTCOMES soodori stuck_rollovers=4 (auto 3) resolved=1 not_resolved=1 unknown=2");
+  expect(peers.slice(-2)).toEqual(["STUCK_OUTCOMES okdori UNREADABLE: sudo: a password is required", "STUCK_OUTCOMES bad UNREADABLE: give <user>:<absolute path of its rollover-log.jsonl>"]);
 });
 
 test("compactions are counted from the session log, reading only what was added since the last count", () => {
@@ -1155,7 +1302,7 @@ test("an automatic rollover never moves a lane that watches a training chain: re
   table = [...aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 18, ppid: 11, cmd: WATCH }];
   await deps.registry.patch("demo", { rolloverDue: { pane: OLD, at: "2026-10-11T16:00:00Z", crossed: ["context after compaction 330k >= 300k"], autoAt: "2026-10-11T16:30:00Z", tries: 1 } });
   // When
-  const auto = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  const auto = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
   const byHand = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
   // Then
   expect(auto.code).toBe(2);
@@ -1174,7 +1321,7 @@ test("a lane tagged training is left to the lead as well; ordinary monitors and 
   await deps.registry.patch("demo", { tags: ["rl", "training"] });
   ready(deps, [15]);
   // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
   // Then
   expect(r.code).toBe(2);
   expect(printed[0]).toContain("a training or eval chain (tag training)");
@@ -1203,6 +1350,8 @@ test("a ready mark covers chains only: a turn that started after it still refuse
 });
 
 const AUTO = "auto:handover.autoRolloverLanes";
+// what freshness gives the run it starts (cli.ts auto hook): the automatic approval and a one-use grant for this lane
+const autoRun = (deps: LaneHandoverDeps, extra: Partial<LaneHandoverOptions> = {}, key = "demo"): LaneHandoverOptions => ({ approvedBy: AUTO, autoGrant: mintAutoGrant(deps.config.stateDir, "lane", key, deps.clock.now()), ...extra });
 const BUSY = `${HIGH}\n • Working (esc to interrupt)`;
 
 test("an automatic start waits for the lane's idle moment and freezes it right then, before the new session opens; a turn that slips in is thawed and waited for again", async () => {
@@ -1227,7 +1376,7 @@ test("an automatic start waits for the lane's idle moment and freezes it right t
   table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
   w.screens[OLD] = BUSY;
   // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   // Then
   expect(r.code).toBe(0);
   expect(printed.filter((l) => l.startsWith("HANDOVER_WAIT_IDLE demo"))).toHaveLength(1);
@@ -1251,11 +1400,11 @@ test("an automatic start whose lane stays busy for the whole wait is refused as 
   table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
   w.screens[OLD] = BUSY;
   // When
-  const busy = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  const busy = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   const waited = sleeps;
   table = aoeTable();
   w.screens[OLD] = HIGH;
-  const work = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  const work = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   // Then
   expect([busy.code, work.code]).toEqual([2, 2]);
   expect(waited).toBe(400);
@@ -1311,7 +1460,7 @@ test("busy mark scope: an automatic start stops waiting once only the status lin
   table = aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16);
   w.screens[OLD] = BORDER_BUSY;
   // When
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: AUTO, waitIdleMin: 20 });
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps, { waitIdleMin: 20 }));
   // Then
   expect(r.code).toBe(0);
   expect(printed.filter((l) => l.startsWith("HANDOVER_WAIT_IDLE demo"))).toHaveLength(1);
@@ -1338,6 +1487,8 @@ test("when the old session ends during the checks, the new one stays the lane in
   expect(r).toMatchObject({ code: 1, to: NEW });
   expect(printed.find((l) => l.startsWith("HANDOVER_OLD_GONE demo"))).toBeDefined();
   expect((await readLane(deps)).pane).toBe(NEW);
+  // the move is committed, so the lane's sessions are too: its cost counts the old session and the new one
+  expect(await readLane(deps)).toMatchObject({ session: "new-sid", priorSessions: ["old-sid"] });
   expect(stoppedIds()).toEqual([]);
   expect(sent(w).some((x) => x.startsWith("[LEAD] HANDOVER_COMMITTED: the old session ended during the checks"))).toBe(true);
 });
@@ -1354,6 +1505,129 @@ test("a job an earlier handover listed (detached, or a chain that outlived its s
   const note = readFileSync(r.note ?? "", "utf8");
   expect(note).toContain("- 41: `sleep 9999`");
   expect(note).not.toContain("- 77:");
+});
+
+// ZzangDori herdr-switch, refused 2026-11-03 09:11:36Z: "2 local chain(s) would die: 726639 .../omo-ai; 727236 .../chrome-headless-"
+const SUPERVISOR = { pid: 726639, ppid: 11, cmd: "/home/oriclaw/.bun/bin/bun /home/oriclaw/.bun/install/global/node_modules/omo-ai/plugin/extensions/memory-run-supervisor.mjs /home/oriclaw/.omo/memory/agents/src-72da2fba/runtime/reflection/runs/reflect-1" };
+const LSP = { pid: 726700, ppid: 11, cmd: "/home/oriclaw/.bun/bin/bun /home/oriclaw/.bun/install/global/node_modules/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js daemon" };
+const BROWSER = { pid: 727236, ppid: 11, cmd: "/home/oriclaw/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell --disable-field-trial-config --headless --remote-debugging-pipe --user-data-dir=/tmp/playwright_chromiumdev_profile-x" };
+// every process of the pane's terminal session (sid 10, the pane's shell) as herdr ends them all when it closes the tab
+const inSession = (t: Proc[]): Proc[] => t.map((p) => ({ ...p, sid: p.pid === 40 ? 40 : p.pid === 41 ? 41 : 10 }));
+
+test("omo-ai's own daemons are no local chains, and a headless browser the agent left is one the ready mark covers: nothing tells an idle browser from a working one", async () => {
+  // Given: ZzangDori herdr-switch 09:11:36Z, refused for the memory run supervisor and a headless chrome
+  const deps = await setup();
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), SUPERVISOR, LSP, BROWSER];
+  // When
+  const refused = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  ready(deps, [BROWSER.pid]);
+  const covered = await laneHandover(deps, "demo", "aoe_lead_x", { dryRun: true });
+  // Then: only the browser holds the move (a driver can still be downloading after its cell returned: review 318 challenge)
+  expect(refused.code).toBe(2);
+  expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 727236 /home/oriclaw/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-");
+  expect(covered.code).toBe(0);
+  const note = readFileSync(covered.note ?? "", "utf8");
+  expect(note).toContain("## Local chains of the old session (1)");
+  expect(note).not.toContain("memory-run-supervisor");
+  expect(note).not.toContain("lsp-daemon");
+});
+
+test("a headless browser a chain started is part of that chain, and a real chain beside the daemons still refuses for itself only", async () => {
+  // Given
+  const deps = await setup();
+  table = [...baseTable(), SUPERVISOR, { ...BROWSER, ppid: 15 }];
+  // When
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // a shell whose command names the browser and then more steps is a chain: the executable decides (review 318)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 70, ppid: 11, cmd: "bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh" }];
+  const wrapped = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // so is a shell that names omo-ai's daemon path, and a browser doing a batch job itself, with no driver (review 318 round 2)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 71, ppid: 11, cmd: "bash -c cat /g/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js; ./long-job.sh" }];
+  const named = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 72, ppid: 11, cmd: "firefox --headless --screenshot /tmp/shot.png https://x" }];
+  const batch = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // a driver flag beside a batch job does not make it idle (review 318 round 3)
+  table = [...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), { pid: 74, ppid: 11, cmd: "firefox --headless --marionette --screenshot /tmp/shot.png https://x" }];
+  const mixed = await laneHandover(deps, "demo", "aoe_lead_x", OK);
+  // Then
+  expect([r.code, wrapped.code, named.code, batch.code, mixed.code]).toEqual([2, 2, 2, 2, 2]);
+  const refused = printed.filter((l) => l.startsWith("HANDOVER_REFUSED"));
+  expect(refused[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 15 bash -c sleep 7200; echo chain-done. ");
+  expect(refused[1]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 70 bash -c chrome-headless-shell --dump-dom https://x; ./postprocess.sh. ");
+  expect(refused[2]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 71 bash -c cat /g/omo-ai/plugin/runtime/lsp-daemon/dist/cli.js; ./long-job.sh. ");
+  expect(refused[3]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 72 firefox --headless --screenshot /tmp/shot.png https://x. ");
+  expect(refused[4]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 74 firefox --headless --marionette --screenshot /tmp/shot.png https://x. ");
+});
+
+test("a job that left the pane's process tree but stays in its terminal session dies with it: it is a local chain the ready mark covers, not a detached job", async () => {
+  // Given: pingpong-analytics 2026-11-03 05:55Z, bun desk/worker.js listed as detached and dead after the close (0/1)
+  const deps = await setup();
+  const WORKER = { pid: 1530711, ppid: 1, cmd: "bun desk/worker.js" };
+  table = inSession([...baseTable().filter((p) => p.pid !== 15 && p.pid !== 16), WORKER]);
+  live.add(WORKER.pid);
+  const env = deps.envOf;
+  const sessionDeps: LaneHandoverDeps = { ...deps, envOf: (pid) => (pid === WORKER.pid ? "PI_SESSION_ID=old-sid" : env(pid)) };
+  // When
+  const refused = await laneHandover(sessionDeps, "demo", "aoe_lead_x", OK);
+  ready(deps, [WORKER.pid]);
+  const covered = await laneHandover(sessionDeps, "demo", "aoe_lead_x", { dryRun: true });
+  // Then
+  expect(refused.code).toBe(2);
+  expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 1530711 bun desk/worker.js. ");
+  expect(covered.code).toBe(0);
+  const note = readFileSync(covered.note ?? "", "utf8");
+  expect(note).toContain("## Local chains of the old session (1)");
+  expect(note).toContain("- 1530711: `bun desk/worker.js`");
+  // the job in a session of its own (setsid) survives the close and stays listed as detached
+  expect(note).toContain("## Detached jobs (1)");
+  expect(note).toContain("- 40: `sleep 7201`");
+  expect(printed.at(-1)).toEndWith("detached jobs left alone: 40");
+});
+
+test("an orphan the eval kernel left is in the kernel's own session, which ends with the old session: a local chain too", async () => {
+  // Given: QA lane qa-hsa 2026-11-03 13:12Z, the py kernel 982058 in a session of its own; its orphan sleep 6100 (ppid 1,
+  // sid 982058) died at the close, a nohup job of omo's bash tool (sid of a session whose leader had ended) survived
+  const deps = await setup();
+  const ORPHAN = { pid: 60, ppid: 1, cmd: "sleep 6100", sid: 30 };
+  const NOHUP = { pid: 61, ppid: 1, cmd: "sleep 6150", sid: 59 };
+  table = [...inSession(aoeTable().filter((p) => p.pid !== 15 && p.pid !== 16)).map((p) => (p.pid === 30 ? { ...p, sid: 30 } : p)), ORPHAN, NOHUP];
+  live.add(60).add(61);
+  const env = deps.envOf;
+  const marked: LaneHandoverDeps = { ...deps, envOf: (pid) => (pid === 60 || pid === 61 ? "PI_SESSION_ID=old-sid" : env(pid)) };
+  // When
+  const r = await laneHandover(marked, "demo", "aoe_lead_x", OK);
+  // Then
+  expect(r.code).toBe(2);
+  expect(printed[0]).toStartWith("HANDOVER_REFUSED demo: 1 local chain(s) would die: 60 sleep 6100. ");
+  ready(deps, [60]);
+  const covered = await laneHandover(marked, "demo", "aoe_lead_x", { dryRun: true });
+  expect(printed.at(-1)).toEndWith("detached jobs left alone: 40,61");
+  expect(covered.code).toBe(0);
+});
+
+test("what carries the lane's session in its environment but belongs to other sessions is no detached job of the lane: the herdr server it started and that server's panes", async () => {
+  // Given: ZzangDori herdr-switch 2026-11-03 09:10Z listed 8 such processes (herdr server, its pane shells, other agents)
+  const deps = await setup();
+  const foreign = [
+    { pid: 50, ppid: 1, cmd: "/home/oriclaw/.local/lib/herdr/herdr server" },
+    { pid: 51, ppid: 50, cmd: "/bin/bash" },
+    { pid: 52, ppid: 51, cmd: "bun /g/senpi/dist/bundle/cli.js --extension /g/omo-ai/plugin --session /x" },
+  ];
+  table = [...baseTable(), ...foreign];
+  const env = deps.envOf;
+  const marked: LaneHandoverDeps = { ...deps, envOf: (pid) => ([50, 51, 52].includes(pid) ? "PI_SESSION_ID=old-sid" : env(pid)) };
+  // an earlier note already took them for the lane's (review 318): they are not carried on either
+  mkdirSync(join(state.dir, "handover", "lanes"), { recursive: true });
+  writeFileSync(join(state.dir, "handover", "lanes", "demo-20261010-120000.json"), JSON.stringify({ detached: foreign.map((p) => ({ pid: p.pid, cmd: p.cmd })), chains: [] }));
+  for (const p of foreign) live.add(p.pid);
+  ready(deps, [15]);
+  // When
+  const r = await laneHandover(marked, "demo", "aoe_lead_x", { dryRun: true });
+  // Then
+  expect(r.code).toBe(0);
+  const note = readFileSync(r.note ?? "", "utf8");
+  expect(note).toContain("## Detached jobs (1)");
+  for (const pid of [50, 51, 52]) expect(note).not.toContain(`- ${pid}: `);
 });
 
 test("a lane whose omo session lives under the real path of a symlinked cwd is still found: monitors, todos and log", async () => {
@@ -1640,10 +1914,10 @@ test("an automatic lane rollover tells the owner afterwards with what it crossed
   const base = await setup();
   const deps: LaneHandoverDeps = { ...base, config: { ...base.config, handover: { ...base.config.handover, autoRolloverLanes: true } }, reportOwner: async (thread, text) => { posted.push([thread, text]); return "msg-2"; } };
   // When: first with the lane's local chain still running (no ready mark), then at a safe point
-  const refused = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  const refused = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
   const postedAfterRefusal = posted.length;
   ready(deps, [15]);
-  const r = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  const r = await laneHandover(deps, "demo", "aoe_lead_x", autoRun(deps));
   // Then
   expect(refused.code).toBe(2);
   expect(printed.some((l) => l.startsWith("HANDOVER_REFUSED") && l.includes("would die"))).toBe(true);
@@ -1872,7 +2146,8 @@ test("e7-leap on 2026-10-24: work a monitor of the old session started keeps run
   expect(live.has(31) && live.has(32)).toBe(true);
   expect(sigs.filter((s) => / 3[0-3]$/.test(s))).toEqual([]);
   expect(sigs).toContain("SIGTERM -14");
-  expect(sigs.indexOf("SIGTERM -14")).toBeLessThan(sigs.lastIndexOf("SIGSTOP 11"));
+  expect(sigs.indexOf("SIGTERM -14")).toBeLessThan(sigs.indexOf("SIGSTOP 12"));
+  expect(sigs.filter((signal) => signal === "SIGSTOP 11")).toHaveLength(1);
   expect(readFrozen(state.dir)[0]?.pids).not.toContain(14);
   expect(sigs.filter((s) => s.endsWith(" 11")).at(-1)).toBe("SIGSTOP 11");
   const note = readFileSync(r.note ?? "", "utf8");
@@ -1966,7 +2241,7 @@ test("an automatic start held by the old session's running tasks never moves the
   const hooks = {
     signals: async (pane: string) => (pane === OLD ? { contextPct: 85 } : {}),
     alive: (pid: number) => live.has(pid),
-    auto: async (_who: "lead" | "lane", key: string) => `code ${(await laneHandover(deps, key, "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" })).code}`,
+    auto: async (_who: "lead" | "lane", key: string) => `code ${(await laneHandover(deps, key, "aoe_lead_x", autoRun(deps, {}, key))).code}`,
   };
   const tick = async (min: number): Promise<string[]> => {
     clock.at = T0 + min * 60_000;

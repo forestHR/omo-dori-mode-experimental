@@ -7,10 +7,12 @@ import type { FlowDeps } from "./done-flow.ts";
 import { stuckContext } from "./explore.ts";
 import { sendVerified } from "./panes.ts";
 import type { Lane } from "./registry.ts";
+import { exitNote, keepReviewerOutput } from "./reviewer-output.ts";
 import { iso } from "./run.ts";
 import { watchLog } from "./watch-log.ts";
 import { blockTexts, laneDirectiveWords } from "./directive-audit.ts";
 import { launchLedger } from "./launch.ts";
+import { beforeGenerated } from "./directives.ts";
 import { leadSessionFiles } from "./lead-sessions.ts";
 
 // dori intent-check: at each stage change a lane states its direction and next step, and a model of another family than
@@ -38,8 +40,8 @@ const MAX_ITEM = 1_500;
 
 const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)} [cut]` : s);
 
-// the sections dori launch appends (past signals, the tree, the footer) are not the owner's words
-export const briefForCheck = (brief: string): string => cut(brief.split(/\n## (?:Past signals|Hypothesis tree|Lane footer) \(written by dori launch\)/)[0] ?? brief, MAX_BRIEF);
+// the sections dori launch appends (lessons, past signals, the tree, the footer) are not the owner's words
+export const briefForCheck = (brief: string): string => cut(beforeGenerated(brief), MAX_BRIEF);
 
 const OWNER_WORDS = /discord(?:app)?\.com\/channels\/\d+\/\d+\/\d+|원문|verbatim/i;
 
@@ -355,7 +357,7 @@ export const runIntentCheck = async (deps: FlowDeps, lane: Lane, opts: { readonl
     const r = await deps.run(fill(rev.command, { model: c.call, prompt, system: OWNER_SYSTEM }), { timeoutMs: rev.minutes * 60_000 });
     const answer = r.code === 0 ? parseOwnerReply(r.out, `${ownerSource}\n${brief}`, reportSource)?.map((f) => claimCheck(f, lane)) : undefined;
     if (!answer) {
-      failures.push(`${c.call}: ${r.code !== 0 ? `exit ${r.code} ${r.err.split("\n").find((l) => l.trim())?.slice(0, 120) ?? ""}` : `no VERDICT line in "${r.out.trim().slice(0, 80)}"`}`);
+      failures.push(`${c.call}: ${r.code !== 0 ? exitNote(r) : "no VERDICT line"}; ${keepReviewerOutput(deps.config.stateDir, `intent-check-${lane.key}`, r.out)}`);
       continue;
     }
     const { kept: findings, dropped } = groundFindings(answer, ground);

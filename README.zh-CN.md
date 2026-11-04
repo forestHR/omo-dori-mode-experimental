@@ -104,7 +104,7 @@ footer 要求 lane 向 lead 发送 `[REPORT] <key> | <milestone|blocker|question
 ["tmux", "send-keys", "-t", "=aoe_Dori_0a1b2c3d:", "Enter"]
 ```
 
-`dori freshness` 先从 lead 屏幕读取报告，再看 lane 屏幕。新报告会重置静默计时；默认 15 分钟后提醒，20 分钟后通过 `hooks.threadReply` 发布一行用所有者语言写的简短状态(`discord.quietText`)，每段静默期各执行一次。lane 的报告原文发到 lead 屏幕，由 lead 用人话转述；`discord.postRawReports: true` 时照旧发布原文。
+`dori freshness` 先从 lead 屏幕读取报告，再看 lane 屏幕。新报告会重置静默计时；默认 15 分钟后提醒，20 分钟后通过 `hooks.threadReply` 发布一行用所有者语言写的简短状态(`discord.quietText`)，每段静默期各执行一次。lane 的报告原文发到 lead 屏幕，由 lead 用人话转述；`discord.postRawReports: true` 时照旧发布原文。 它也检查 lane 上限和看起来卡住的调用(`supervision`,上限默认关闭)。到达上限或调用看起来卡住时，只通知 lead 一次，不会停止 lane,也不向 lane 输入。`close` 会输出 lane 的 `COST`。
 
 aoe 下，working 或 not-done 的 lane 停下来等人时，`dori watch` 输出 `LANE_BLOCKED <key> <waiting|error|question|idle> <pane>`。它结合 `aoe ps --json` 和屏幕判断：回合运行中不会输出，idle 必须持续 45 秒，等待 monitor、wake source 或正在执行/已安排的 goal 不算 idle。等待会话自己启动的已分离 eval 单元、后台 bash 会话或后台 task 也不算 idle：监控日志只留一行安静的 `BG_WAITING`，超过 `blockedWaitMin`(默认 60 分钟)后才输出 `LANE_BLOCKED`。关闭时会停止 aoe 会话并移入回收站，绝不永久删除。
 
@@ -174,6 +174,7 @@ Done = command ["bun","test"] stdout~" 0 fail"; file qa/report.json json:.passed
 | `dori guard [--loop MIN]` | 负载、内存、磁盘和 pane 数量告警 |
 | `dori fix-attempt <key> --metric M --hypothesis H` | 记一次你让 lane 做的修复;lane 在这类汇报里加 `(fix: M / H)`,同一指标、同一假设到第三次时,`SAME_FIX_3` 提醒你让 lane 转去查根因;记录之前先列出该指标上已经试过的假设(`PRIOR_FIX`) |
 | `dori checkpoint <key> --step ID --result TEXT --evidence PATH [--remote-effect RECEIPT]...` / `dori checkpoints <key>` | lane 把完成的每一步记一次，连同它做过的远程操作(push、merge)的回执，恢复前先读回来，重启的 lane 不会重复 push 或 merge;同一步写入不同内容，或写入另一步已有的回执，会被拒绝 |
+| `dori caps <key> [--wall-minutes N\|none] [--token-limit N\|none] [--cost-limit N\|none]` | lane 的运行时长(分钟)、token 和费用上限(默认关闭,`launch` 也接受同样的参数);到达上限时 `freshness` 通知 lead 一次(`LANE_CAP`),不会停止 lane;带参数时设置该 lane 自己的上限 |
 | `dori signals [--lane K \| --cwd DIR \| --tag T]` | 同一工作领域里以前的 lane 试过什么、结果如何:编号的修复尝试和转去查根因的时刻(也从 `[REPORT]` 行和 lead 的重新指示里读取)、按指标的标记修复、带理由的完成声明驳回、重发和催促次数、结果、该领域的驳回率和返工、警告。重新指示 lane 之前先看它 |
 | `dori scorecard [--date D] [--post]` | 只用记录算出的每日 token 成绩单(不调用模型):每个验证完成的成本和完成声明的驳回率并排，返工最多的 lane、首次回复中位数/p90、lead 的上下文税;保存到 `<stateDir>/scorecard/<日期>.json` 和 `latest.md` 供 lead 查看,`--post` 也发到 Discord(默认关闭;每天保存的 systemd timer 在 Discord + aoe 配置里) |
 | `dori heavy <label> [--mem 70G] -- <cmd>` | 负载低时在带内存上限的独立 scope 中运行构建、测试或 GPU 任务(超出时只停该任务,lane 不受影响);已有任务在跑时,只有 GPU、内存、CPU 各自仍剩 10% 以上才同时运行 |
@@ -223,7 +224,7 @@ dori resolve Q1
 
 带 `--thread` 时，卡片发布在对应工作线程内，并把线程标为等待。回答就在原处折叠成记录，不另发记录行；该线程没有其他未回答问题时回到工作中。`dori reopen` 恢复按钮并再次把线程标为等待。不带 `--thread` 时，新卡片发布到配置的频道。以前发布在频道且关联线程的卡片，仍会在该线程留下不发通知的答案记录。后续工作完成后，`dori resolve` 从跟踪列表移除问题，折叠后的卡片仍留在聊天中。用 resolve 移除一张未回答的卡片时，如果该线程没有其他未回答问题，线程同样回到工作中，不会因为放弃的问题一直停在等待。
 
-`discord.statusStyle: "emoji"` 在线程名开头使用 🔄 工作中、⏸️ 等待、✅ 完成，有意保持开启的线程(`dori thread set <ref> standing`，解除用 `unstanding`)无论状态如何都用 📌；默认 `"words"` 使用 `[working]`、`[waiting]`、`[done]`。标记只加在线程上：把文字频道、论坛或分类当作线程传入(例如 `dori ask --thread` 用了频道 id)时名称保持不变，该状态以 `THREAD_STATUS_DROPPED <id> ... is not a thread` 丢弃。`dori thread reply` / `wait` / `done` 设置这些状态；done 归档，reply/wait 取消归档。所有者在完成线程发消息时，监听器会把它重新打开并标为工作中。服务及卡片文字本地化设置见 [Discord + aoe 设置](skills/dori-mode/setups/discord-aoe/README.md)。
+`discord.statusStyle: "emoji"` 在线程名开头使用 🔄 工作中、🔔 需要所有者回复、✅ 完成(Yoodori 请求另有 ⛔ 取消、💤 被新版本取代或撤回、❗ 失败)，有意保持开启的线程(`dori thread set <ref> standing`，解除用 `unstanding`)无论状态如何都用 📌；默认 `"words"` 使用 `[working]`、`[waiting]`、`[done]`。标记只加在线程上：把文字频道、论坛或分类当作线程传入(例如 `dori ask --thread` 用了频道 id)时名称保持不变，该状态以 `THREAD_STATUS_DROPPED <id> ... is not a thread` 丢弃。`dori thread reply` / `wait` / `done` 设置这些状态；done 归档，reply/wait 取消归档。所有者在完成线程发消息时，监听器会把它重新打开并标为工作中。服务及卡片文字本地化设置见 [Discord + aoe 设置](skills/dori-mode/setups/discord-aoe/README.md)。
 
 ### 用 iPhone 快捷指令发语音指令
 

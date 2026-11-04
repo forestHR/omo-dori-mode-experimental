@@ -35,6 +35,19 @@ export type FreezeDeps = {
   readonly signal: (pid: number, sig: Sig) => boolean;
 };
 
+// One transaction may stop the agent before expanding the freeze to its children.
+// Native Windows stop counts stack, so only the first successful stop reaches the OS.
+export const freezeSignal = <S extends string>(signal: (pid: number, sig: S) => boolean): ((pid: number, sig: S) => boolean) => {
+  const suspended = new Set<number>();
+  return (pid, sig) => {
+    if (sig === "SIGSTOP" && suspended.has(pid)) return true;
+    const sent = signal(pid, sig);
+    if (sent && sig === "SIGSTOP") suspended.add(pid);
+    if (sent && sig === "SIGCONT") suspended.delete(pid);
+    return sent;
+  };
+};
+
 const frozenDir = (stateDir: string): string => join(stateDir, "handover", "frozen");
 export const frozenFile = (stateDir: string, pane: string): string => join(frozenDir(stateDir), `${pane.replace(/[^\w.-]/g, "_")}.json`);
 
@@ -93,7 +106,7 @@ export const freezePane = async (deps: FreezeDeps, pane: string, self: number, s
 };
 
 // Resumes in reverse order: the children before the agent, so the agent finds them running.
-const resume = (deps: Pick<FreezeDeps, "signal">, rec: FrozenRecord): number => [...rec.pids].reverse().filter((p) => deps.signal(p, "SIGCONT")).length;
+const resume = (deps: Pick<FreezeDeps, "signal">, rec: FrozenRecord): number => [...new Set(rec.pids)].reverse().filter((p) => deps.signal(p, "SIGCONT")).length;
 
 export const thawFrozen = (deps: Pick<FreezeDeps, "signal">, stateDir: string, pane: string): string => {
   // Thaw does not restore ended monitors: the new lead already owns their replacements.
@@ -101,7 +114,7 @@ export const thawFrozen = (deps: Pick<FreezeDeps, "signal">, stateDir: string, p
   if (!rec) return `FROZEN_NONE ${pane}: no frozen session recorded for this pane (dori handover frozen lists them)`;
   const n = resume(deps, rec);
   rmSync(frozenFile(stateDir, pane), { force: true });
-  return `HANDOVER_OLD_THAWED ${pane}: ${n}/${rec.pids.length} processes resumed (agent ${rec.agentPid})`;
+  return `HANDOVER_OLD_THAWED ${pane}: ${n}/${new Set(rec.pids).size} processes resumed (agent ${rec.agentPid})`;
 };
 
 // Closes a frozen session: resumed first (a stopped process does not act on the hangup), then stopped and trashed with

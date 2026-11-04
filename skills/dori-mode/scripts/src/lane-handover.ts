@@ -1,3 +1,4 @@
+// allow: SIZE_OK - existing lane-handover state machine; the signal wrapper is per transaction.
 // dori handover --lane <key>: move a lane whose conversation grew long to a new agent session.
 // Order: refuse while work would die with the old session (a local chain, a background eval cell, a running turn, an
 // open question) unless the
@@ -14,7 +15,7 @@ import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./backgrou
 import { captureTmux, closeAoeSession, envMismatch, inputLine, isClosedLine, laneEnv, liveSessions, openAoeSession, paneLife, QUESTION_MARK, sessionFor, tmuxPanePid } from "./aoe.ts";
 import { turnRunning } from "./submit.ts";
 import type { FlowDeps } from "./done-flow.ts";
-import { freezePane, writeFrozen } from "./frozen.ts";
+import { freezePane, freezeSignal, writeFrozen } from "./frozen.ts";
 import { endOldMonitors } from "./handover-monitors.ts";
 import { ackFile, endStrayTasks, type HandoverDeps, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
 import { awaitPrompt } from "./launch.ts";
@@ -25,7 +26,8 @@ import { hasSessionSelector } from "./session-id.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
-import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, userLines } from "./rollover.ts";
+import { commandExecutable } from "./executable.ts";
+import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section, seedRestatement, wholeBullet } from "./restatement.ts";
 import { watchLog } from "./watch-log.ts";
@@ -57,6 +59,8 @@ export type LaneHandoverDeps = FlowDeps & {
 export type LaneHandoverOptions = {
   // the approval: lead:<reason and signal>, the owner's answered card Qn, a message link or their words (rollover.ts approvalProblem); --dry-run needs none
   readonly approvedBy?: string;
+  // the one-use grant freshness wrote for the run it started (DORI_HANDOVER_AUTO_GRANT): an auto: approval holds only with it
+  readonly autoGrant?: string;
   readonly note?: string;
   readonly model?: string;
   readonly thinking?: string;
@@ -186,15 +190,39 @@ const logOf = (dir: string, session: string): string | undefined => {
 
 // Written once the new session exists and removed when the run ends either way: a run killed in between (crash, reboot,
 // SIGKILL) leaves it behind, and the next dori handover --lane for that lane repairs the state from it first.
-export type Pending = { readonly key: string; readonly pid: number; readonly at: string; readonly from: string; readonly to: string; readonly note: string; readonly chains?: readonly Job[]; readonly agentPid?: number };
+// fromSession and cwd: the outgoing session and where the new one opens, so a recovery records the lane's sessions too
+export type Pending = { readonly key: string; readonly pid: number; readonly at: string; readonly from: string; readonly to: string; readonly note: string; readonly chains?: readonly Job[]; readonly agentPid?: number; readonly fromSession?: string; readonly cwd?: string };
 
 const POLL_MS = 5_000;
 const THINKING = /^(.*):(off|minimal|low|medium|high|xhigh|max)$/;
-// processes every omo session runs besides the work: MCP servers, the subagent RPC host, the provider's own CLI
+// processes every omo session runs besides the work: MCP servers, the subagent RPC host, the provider's own CLI, and the
+// omo-ai plugin's own daemons (its memory run supervisor under plugin/extensions, its LSP daemon under plugin/runtime),
+// which refused ZzangDori's herdr-switch move twice on 2026-11-03 as "local chains"
 const INFRA = /\bmcp\b|--internal-rpc-host-supervisor|--mode rpc|claude-agent-sdk/;
+// a command line's first words, quotes kept together (a quoted Windows path is one word)
+const words = (cmd: string, n: number): string[] => {
+  const out: string[] = [];
+  for (let rest = cmd; out.length < n; ) {
+    const w = commandExecutable(rest);
+    if (!w) break;
+    out.push(w);
+    rest = rest.slice(rest.indexOf(w) + w.length + 1);
+  }
+  return out;
+};
+// the omo-ai daemon itself: bun or node running a script of the plugin, never a command line that only names that path
+const omoDaemon = (cmd: string): boolean => {
+  const [exe = "", script = ""] = words(cmd, 2);
+  return /^(?:bun|node)(?:\.exe)?$/i.test(exe.split(/[\\/]/).pop() ?? "") && /omo-ai[\\/]plugin[\\/](?:extensions|runtime)[\\/]/.test(script);
+};
+const infra = (cmd: string): boolean => INFRA.test(cmd) || omoDaemon(cmd);
+// another session's processes: an agent, the herdr server (started from a lane, it carries that lane's environment) and
+// everything under them
+const HERDR_SERVER = /(?:^|[\\/\s])herdr(?:\.exe)?\s+server\b/;
 // omo's eval kernel (python3 -u .../senpi-codemode/src/kernels/py/prelude.py): the session's own interpreter, alive once
 // the lane used it. Not work itself; what a cell started under it is, and a cell running in it is read from the log.
-const KERNEL = /senpi-codemode\/src\/kernels\/[\w-]+\/prelude\.\w+/;
+// either path separator: a native Windows command line names the kernel with backslashes
+const KERNEL = /senpi-codemode[\\/]src[\\/]kernels[\\/][\w-]+[\\/]prelude\.\w+/;
 const CONTEXT = /\b\d+(?:\.\d+)?[KMG]?\/\d+(?:\.\d+)?[KMG]?\s+\((\d+(?:\.\d+)?)%\)/;
 
 export const splitModel = (model: string): { readonly base: string; readonly thinking?: string } => {
@@ -241,6 +269,17 @@ export const compactionStuckOn = (screen: string): number => {
 // The session itself is not a chain: the shells that launched the agent (aoe runs it from /bin/bash /dev/fd/4 under the
 // pane's shell) and omo's eval kernel. What runs under them is. A zombie (an ended process its parent has not collected,
 // "[bash] <defunct>") is no work either: it refused 5 automatic moves of yoodori-gate-gaps on 2026-10-19.
+// When the agent started: native Windows has no ps, and its process table carries the start time (as resolveSession reads it)
+export const agentStartOf = async (run: Runner, agent: Proc, platform: string = process.platform): Promise<number> =>
+  Date.parse(platform === "win32" ? agent.startedAt ?? "" : (await run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out.trim());
+
+// A job that left the pane's process tree (its parent ended, or nohup ... &) but not a terminal session of a process still
+// in that tree dies with the pane all the same: herdr ends every process of the pane's session when it closes the tab, and
+// omo ends its eval kernel's, which runs in a session of its own (measured 2026-11-03 on herdr 0.9.5: sleep & disown,
+// nohup sleep & and an orphaned bash -c 'sleep &' of the pane's shell ended, and so did an orphan the py kernel left;
+// setsid sleep, and a nohup job of omo's bash tool, whose session leader had already ended, survived). Those jobs count as
+// local chains too: 27 of 27 "detached jobs" the notes said would keep running were dead after the close. Only a job in
+// another session survives and stays a detached job. The session is known only where the process table has it (Linux).
 export const localChains = (table: readonly Proc[], shellPid: number, monitorPids: readonly number[], exclude: ReadonlySet<number> = new Set()): { readonly agent?: Proc; readonly chains: Job[]; readonly tree: Set<number> } => {
   const tree = descendants(table, shellPid);
   const agent = tree.find((p) => AGENT.test(p.cmd) && !ended(p));
@@ -248,11 +287,14 @@ export const localChains = (table: readonly Proc[], shellPid: number, monitorPid
   if (!agent) return { chains: [], tree: ids };
   const session = new Set([...ancestors(table, agent.pid)].filter((pid) => ids.has(pid)));
   const kernels = new Set(table.filter((p) => p.ppid === agent.pid && KERNEL.test(p.cmd)).map((p) => p.pid));
-  // the children of the agent, of its kernel and of the shells that launched it (jobs started from the pane die with it too)
-  const chains = table
-    .filter((p) => (session.has(p.ppid) || kernels.has(p.ppid)) && !session.has(p.pid) && !kernels.has(p.pid) && !ended(p) && !INFRA.test(p.cmd) && !monitorPids.includes(p.pid) && !exclude.has(p.pid))
+  const sids = new Set(table.filter((p) => ids.has(p.pid) && (p.sid ?? 0) > 0).map((p) => p.sid));
+  const stray = new Set(table.filter((p) => sids.has(p.sid) && !ids.has(p.pid) && p.pid !== process.pid).map((p) => p.pid));
+  // the children of the agent, of its kernel and of the shells that launched it (jobs started from the pane die with it too),
+  // and the topmost of the jobs that left the tree but not the pane's session
+  const roots = table.filter((p) => ((session.has(p.ppid) || kernels.has(p.ppid)) && !session.has(p.pid) && !kernels.has(p.pid)) || (stray.has(p.pid) && !stray.has(p.ppid)))
+    .filter((p) => !ended(p) && !infra(p.cmd) && !monitorPids.includes(p.pid) && !exclude.has(p.pid))
     .map((p) => ({ pid: p.pid, cmd: p.cmd, pids: [p.pid, ...descendants(table, p.pid).filter((d) => !ended(d)).map((d) => d.pid)] }));
-  return { agent, chains, tree: ids };
+  return { agent, chains: roots, tree: new Set([...ids, ...stray]) };
 };
 
 // Why an automatic rollover leaves a lane to the lead: a tag in handover.trainingTags, or a live monitor watching a training
@@ -272,10 +314,16 @@ export const trainingMark = (lane: Lane, monitors: readonly MonitorSpec[], h: { 
 export const detachedJobs = (table: readonly Proc[], tree: ReadonlySet<number>, session: string, aoeId: string, envOf: (pid: number) => string): Job[] => {
   const marks = [...(session ? [`PI_SESSION_ID=${session}`] : []), ...(aoeId ? [`/${aoeId}/session_id`] : [])];
   if (!marks.length) return [];
-  return table.filter((p) => !tree.has(p.pid) && p.pid !== process.pid).flatMap((p) => {
+  const foreign = foreignPids(table, tree);
+  return table.filter((p) => !tree.has(p.pid) && !foreign.has(p.pid) && p.pid !== process.pid).flatMap((p) => {
     const env = envOf(p.pid);
     return env && marks.some((m) => env.split("\n").some((line) => line === m || line.endsWith(m))) ? [{ pid: p.pid, cmd: p.cmd }] : [];
   });
+};
+
+export const foreignPids = (table: readonly Proc[], tree: ReadonlySet<number>): Set<number> => {
+  const others = table.filter((p) => !tree.has(p.pid) && (AGENT.test(p.cmd) || HERDR_SERVER.test(p.cmd)));
+  return new Set([...others.map((p) => p.pid), ...others.flatMap((p) => descendants(table, p.pid).map((d) => d.pid))]);
 };
 
 // Jobs an earlier handover of the lane listed (detached, or chains that outlived their session) that still run: their
@@ -390,7 +438,7 @@ export const renderLaneNote = (f: LaneFacts, at: string, stateDir: string): stri
     ? [`## Work the old session's monitors started (${f.work.length})`, "It runs under a monitor of the old session (marked LAUNCHES_WORK under Monitors), so the handover keeps that session frozen instead of closing it, its monitors left running, and closes it once this work ended. Do not start it again; follow it with the watch-only monitors of step 1.", ...f.work.map((j) => `- monitor ${j.pid} "${j.cmd.slice(0, 120)}": ${(j.pids ?? []).join(", ")}`), ""]
     : []),
   `## Detached jobs (${f.detached.length})`,
-  ...(f.detached.length ? ["They run outside the old session and keep running; the handover does not touch them. Check on them, do not start them twice.", ...f.detached.map(job)] : ["none"]),
+  ...(f.detached.length ? ["They run in a terminal session of their own, outside the old pane, so closing it does not end them; the handover does not touch them. Check on them, do not start them twice.", ...f.detached.map(job)] : ["none"]),
   "",
   `## Background tasks of the old session (${f.tasks?.length ?? 0})`,
   ...(f.tasks?.length
@@ -437,7 +485,7 @@ const ackedBy = (stateDir: string, id: string): string | undefined => {
 
 const titleFor = (old: string, stamp: string): string => `${old.replace(/-\d{8}$/, "")}-${stamp.slice(4, 8)}${stamp.slice(9, 13)}`;
 
-const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions): Promise<LaneHandoverResult> => {
+const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions, granted: boolean): Promise<LaneHandoverResult> => {
   const { config } = deps;
   const at = iso(deps.clock);
   const stamp = at.replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
@@ -447,14 +495,19 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     if (!opts.dryRun) watchLog(config.watchLog, deps.clock, { source: "handover", line });
   };
   let fromPane = "";
+  // an auto: approval without the grant of a run freshness started is borrowed: refused first, and never logged, since a
+  // row approved auto: is read by freshness as its own run's result (lastAuto) and ends a lead's waiting request
+  const borrowed = decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && !granted;
   const refuse = (why: string, held?: { readonly blocked: Blocked; readonly pids?: readonly number[]; readonly tasks?: readonly string[] }): LaneHandoverResult => {
     emit(`HANDOVER_REFUSED ${key}: ${why}`);
+    if (borrowed) return { code: 2 };
     // a run refused while the lane was busy keeps the options it was given (the note as an absolute path): a ready mark
     // starts it again with them (freshness readyResume)
     const request: RolloverRequest = { ...(opts.note ? { note: resolve(opts.note) } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}), ...(opts.keepOld ? { keepOld: true } : {}), ...(opts.verifyMin ? { verifyMin: opts.verifyMin } : {}) };
     if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), request } : {}) });
     return { code: 2 };
   };
+  if (borrowed) return refuse(`a lane moves to a new session only with an approval: ${approvalProblem(opts.approvedBy, () => undefined, { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, "", [])} (--dry-run needs none)`);
   if (!omoSession(config)) return refuse("dori handover --lane needs omo as the agent (backend aoe, or herdr with agentCommand omo)");
   // a herdr handover opens a new conversation; an agentCommand that picks its session itself (--continue, --session ...) would reopen the old one
   if (config.backend === "herdr" && hasSessionSelector(config.agentCommand.slice(1))) return refuse(`dori handover --lane on herdr needs an agentCommand without a session selector (it opens a new session): ${config.agentCommand.join(" ")}`);
@@ -474,7 +527,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     return { code: 3 };
   }
   // a dry run needs no approval, but a given one is checked the same way, so it can be tried before the real run
-  const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes" }, key, lane.pane ?? "", readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox ?? "", deps.ownerIds ?? []));
+  const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, lane.pane ?? "", readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox ?? "", deps.ownerIds ?? []));
   if (unapproved) return refuse(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
@@ -506,7 +559,8 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   const marked = detachedJobs(table, tree, session, old.id, deps.envOf);
   // a pid in the pane's own tree is no detached job, even when an earlier note listed it (as a chain, before the session's
   // own launcher shell and eval kernel stopped counting as chains)
-  const detached = [...marked, ...carried(dir, key, deps.alive, new Set([...marked.map((d) => d.pid), ...chains.flatMap((c) => c.pids ?? [c.pid]), ...monitorPids, ...tree]))];
+  // nor is another session's process an earlier note took for one (a herdr server the lane started, its panes' agents)
+  const detached = [...marked, ...carried(dir, key, deps.alive, new Set([...marked.map((d) => d.pid), ...chains.flatMap((c) => c.pids ?? [c.pid]), ...monitorPids, ...tree, ...foreignPids(table, tree)]))];
   const model = opts.model || lane.model || config.defaultModel;
   const screen = await captureTmux(deps.run, lane.pane);
   const shown = statusLine(screen, model);
@@ -521,7 +575,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   // a detached eval cell computing in the kernel (or in the agent, for js) has no process of its own: its start without an
   // end in the session log, since this agent started; a ready mark covers the cells started before it
   const oldLog = logOf(sessionDir, session);
-  const agentStart = Date.parse((await deps.run(["ps", "-o", "lstart=", "-p", String(agent.pid)])).out.trim());
+  const agentStart = await agentStartOf(deps.run, agent);
   const logText = oldLog ? readFileSync(oldLog, "utf8") : "";
   const background = logText ? pendingBackground(logText, Number.isNaN(agentStart) ? 0 : agentStart) : [];
   const cells = background.filter((j) => j.kind === "eval" && !(ready && j.at <= Date.parse(ready.at)));
@@ -646,8 +700,12 @@ const IDLE_POLL_MS = 3_000;
 // waitIdleMin minutes. Then a lane still busy is refused (blocked busy, and freshness asks it to reach a safe point).
 // Work that would die (a local chain, a background eval cell) or go on unreachable (a background task) refuses at once
 // (blocked work).
-export const laneHandover = async (deps: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions = {}): Promise<LaneHandoverResult> => {
-  if (!opts.waitIdleMin || opts.dryRun) return attempt(deps, key, here, opts);
+export const laneHandover = async (input: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions = {}): Promise<LaneHandoverResult> => {
+  const deps = { ...input, signal: freezeSignal(input.signal) };
+  // the grant is taken once, before any wait: every attempt of this run is the run freshness started
+  const granted = decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && takeAutoGrant(deps.config.stateDir, "lane", key, opts.autoGrant, deps.clock.now());
+  // a borrowed auto: is refused by attempt before anything else, also when another run holds the lock
+  if (!opts.waitIdleMin || opts.dryRun || (decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && !granted)) return attempt(deps, key, here, opts, granted);
   const emit = (line: string): void => {
     deps.print(line);
     watchLog(deps.config.watchLog, deps.clock, { source: "handover", line });
@@ -664,7 +722,7 @@ export const laneHandover = async (deps: LaneHandoverDeps, key: string, here: st
     const since = deps.clock.now();
     const until = since + opts.waitIdleMin * 60_000;
     for (let waiting = false; ; waiting = true) {
-      const r = await attempt(deps, key, here, { ...opts, idle: { final: deps.clock.now() >= until, since, waitedMin: opts.waitIdleMin } });
+      const r = await attempt(deps, key, here, { ...opts, idle: { final: deps.clock.now() >= until, since, waitedMin: opts.waitIdleMin } }, granted);
       if (!r.retry) return r;
       if (!waiting) emit(`HANDOVER_WAIT_IDLE ${key}: a turn is running or a question is open; the move starts the moment the lane is idle (up to ${opts.waitIdleMin} min)`);
       for (;;) {
@@ -681,6 +739,19 @@ export const laneHandover = async (deps: LaneHandoverDeps, key: string, here: st
 };
 
 type Check = { readonly reasons: string[]; readonly session: string; readonly account?: string; readonly supplements?: readonly Supplement[] };
+
+// Every committed move records the lane's sessions: the new one, and the outgoing one (found in the old pane, else the
+// registry's: an adopted lane has none recorded until dori sync --write), which Registry.write keeps in priorSessions.
+// A new session that could not be found yet leaves the lane with no current session, so its usage reads unknown (never
+// the old transcript twice) until dori sync --write finds it.
+export const keepSessions = async (deps: Pick<LaneHandoverDeps, "registry">, key: string, found: string, next: string): Promise<void> => {
+  const now = await deps.registry.read(key);
+  const outgoing = found || now?.session;
+  await deps.registry.patch(key, {
+    ...(next ? { session: next, sessionVia: "handover" } : { session: undefined, sessionVia: "handover-unresolved" }),
+    ...(outgoing && outgoing !== next ? { priorSessions: [...(now?.priorSessions ?? []).filter((s) => s !== outgoing), outgoing] } : {}),
+  });
+};
 
 const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string, verifyMin: number, understood: string, emit: (line: string) => void): Promise<Check> => {
   const tries = Math.max(1, Math.ceil((verifyMin * 60_000) / POLL_MS));
@@ -820,6 +891,7 @@ export const recover = async (deps: LaneHandoverDeps, p: Pending, emit: (line: s
     await pointLane(deps, p.key, p.from, p.to, `pane kept on ${p.to}: interrupted handover repaired, the old session is gone`, emit);
     await tell(deps, p.to, `[LEAD] ${COMMITTED}: the handover was interrupted after the old session ${p.from} closed; you are the ${p.key} lane now. ${deps.config.launchKeywords}: go on with step 5 of the note ${p.note}.`);
     emit(`HANDOVER_RECOVERED ${p.key} kept on ${p.to}: the old session ${p.from} is gone`);
+    await keepSessions(deps, p.key, p.fromSession ?? "", p.cwd ? await deps.sessionOf(p.to, p.cwd).catch(() => "") : "");
     if (p.chains?.length) await chainsEnded(deps, p.key, p.chains, p.to, emit);
   } else {
     emit(`HANDOVER_RECOVERED ${p.key}: neither ${p.from} nor ${p.to} is alive (a reboot?); the registry is left as it is, dori sync and dead-panes show the lane`);
@@ -844,7 +916,7 @@ const moveLane = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, facts
     emit(`HANDOVER_FAIL ${lane.key}: could not open the new session: ${e instanceof Error ? e.message : String(e)}; nothing moved, ${from.pane} stays the lane`);
     return { code: 3, note };
   }
-  const pending: Pending = { key: lane.key, pid: process.pid, at: iso(deps.clock), from: from.pane, to: pane, note, chains: facts.chains, ...(facts.agentPid ? { agentPid: facts.agentPid } : {}) };
+  const pending: Pending = { key: lane.key, pid: process.pid, at: iso(deps.clock), from: from.pane, to: pane, note, chains: facts.chains, ...(facts.agentPid ? { agentPid: facts.agentPid } : {}), ...(from.session ? { fromSession: from.session } : {}), cwd: facts.cwd };
   writeFileSync(pendingFile(config.stateDir, lane.key), JSON.stringify(pending, null, 1));
   // the old pane stays quiet when it is still open after a finished move (--keep-old, or the close failed); the mark expires
   let keepQuiet = false;
@@ -918,6 +990,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
     emit(`HANDOVER_OLD_GONE ${lane.key}: ${from.pane} ended during the checks (${checked.reasons.join("; ")}); the lane stays on ${pane}`);
     await tell(deps, pane, `[LEAD] ${COMMITTED}: the old session ended during the checks, so you are the ${lane.key} lane now although a check failed (${checked.reasons.join("; ")}); tell the lead what you see. ${config.launchKeywords}: go on with step 5 of the note.`);
     record("kept-new-old-gone", checked.reasons);
+    await keepSessions(deps, lane.key, facts.from.session, checked.session || (await deps.sessionOf(pane, facts.cwd).catch(() => "")));
     await forwardLate(deps, facts, ctx, pane);
     await endStrayTasks(deps, { who: lane.key, session: from.session, pane, note, emit });
     if (facts.chains.length) await chainsEnded(deps, lane.key, facts.chains, pane, emit);
@@ -936,7 +1009,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   const oldK = facts.oldLog ? contextK(facts.oldLog).last : undefined;
   Object.assign(ctx.sizes, { ...(oldK !== undefined ? { oldK } : {}), ...(fresh.first !== undefined ? { firstK: fresh.first } : {}), ...(fresh.last !== undefined ? { checkedK: fresh.last } : {}), ...(newLog ? { newLog } : {}) });
   emit(`HANDOVER_SIZE ${lane.key} old ${oldK ?? "?"}k -> new first ${fresh.first ?? "?"}k, checked ${fresh.last ?? "?"}k (${sizePct(ctx.sizes) ?? "?"}% of the old)`);
-  await deps.registry.patch(lane.key, { session: checked.session, sessionVia: "handover" });
+  await keepSessions(deps, lane.key, facts.from.session, checked.session);
   rmSync(readyFile(config.stateDir, lane.key), { force: true });
   if (opts.keepOld) {
     thaw();
