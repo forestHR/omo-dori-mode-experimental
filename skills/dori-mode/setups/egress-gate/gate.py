@@ -1931,15 +1931,18 @@ class Gate:
         try:
             if info is None:
                 status, _, body = await self.bot_call("GET", f"/channels/{thread}")
-                info = json_object(body) if 200 <= status < 300 else {}
+                if not 200 <= status < 300:
+                    raise OSError(status)
+                info = json_object(body)
             name, owner = str(info.get("name") or ""), str(info.get("owner_id") or "")
             if not name or not owner or owner == str(self.config["owner_id"]):
                 return
             bare = bare_thread_name(name)
+            if bare.startswith(KIND_ICONS) and bare != name and LEADING_MARK.sub("", name, count=1) == bare:
+                return  # one mark (any of them) and a kind icon: already the shape
             wanted = f"{WAITING_MARK} {bare if bare.startswith(KIND_ICONS) else '🔐 ' + bare}"[:100]
-            if wanted == name:
-                return
-            status, _, _ = await self.bot_call("PATCH", f"/channels/{thread}", {"name": wanted})
+            # Discord renames an archived thread only together with unarchiving it; the card goes in next anyway.
+            status, _, _ = await self.bot_call("PATCH", f"/channels/{thread}", {"name": wanted, "archived": False})
             if not 200 <= status < 300:
                 raise OSError(status)
         except (Refused, OSError, ValueError, KeyError, http.client.HTTPException):
