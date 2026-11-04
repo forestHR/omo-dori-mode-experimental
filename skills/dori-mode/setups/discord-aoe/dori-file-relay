@@ -579,9 +579,10 @@ class Server:
             self.unmoved.pop(key, None)
         except (Refused, RuntimeError) as e:
             entry.update(result="failed", reason=reason, failed_move=str(e)[:200])
-            if self.unmoved.get(key) == (sig, reason, entry["failed_move"]):  # still in the way: logged once
+            # still in the way: logged once (not the reason, whose error count grows each scan)
+            if self.unmoved.get(key) == (sig, entry["failed_move"]):
                 return
-            self.unmoved[key] = (sig, reason, entry["failed_move"])
+            self.unmoved[key] = (sig, entry["failed_move"])
         log(entry)
 
     def wake(self, name: str, to: str, info: dict) -> None:

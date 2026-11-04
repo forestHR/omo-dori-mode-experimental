@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -206,4 +206,19 @@ test("a refusal that cannot be set aside is logged once, not on every scan, and 
   rmSync(join(to, ".failed"));
   await serve(1);
   expect(JSON.parse(readFileSync(join(to, ".failed", "link.why"), "utf8")).reason).toBe("symlink");
+});
+
+test("a file that keeps failing to deliver, with .failed in the way, is logged as failed once and set aside once it can be", async () => {
+  await serve(1);
+  const to = home("mo", "outbox", "to-yoodori");
+  writeFileSync(join(to, ".failed"), "in the way", { mode: 0o600 });
+  put(join(to, "locked.pdf"), "locked");
+  chmodSync(join(to, "locked.pdf"), 0o000); // the reader cannot open it: an error, not a refusal
+  expect((await serve(7)).code).toBe(0);
+  const rows = relayLog().filter((r) => r.src === "mo:outbox/to-yoodori/locked.pdf");
+  expect(rows.map((r) => r.result)).toEqual(["error", "error", "failed"]);
+  expect(rows[2].failed_move).toBeTruthy();
+  rmSync(join(to, ".failed"));
+  await serve(4);
+  expect(JSON.parse(readFileSync(join(to, ".failed", "locked.pdf.why"), "utf8")).reason).toStartWith("error x3");
 });
