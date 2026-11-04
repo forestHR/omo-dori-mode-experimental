@@ -232,6 +232,27 @@ test("directive-audit: gaps of the day go to the watch log and one summary to th
   expect(threadGaps).toEqual([]);
 });
 
+test("directive-audit: a local entry enters the ledger no earlier than the earliest owner message its source links, so a lane opened that morning is not its gap; a fork entry keeps its date and commits", async () => {
+  const flake = (at: string) => String((BigInt(Date.parse(at)) - 1420070400000n) << 22n);
+  // guild and channel are older than the day; the owner spoke at 16:30 and again at 18:00 KST on 2026-10-16
+  const link = (at: string) => `https://discord.com/channels/${flake("2025-01-01T00:00:00Z")}/${flake("2026-10-01T00:00:00Z")}/${flake(at)}`;
+  const said = `${link("2026-10-16T09:00:00Z")} ${link("2026-10-16T07:30:00Z")}`;
+  const withLinks = { ...local, entries: local.entries.map((e) => (e.id === "options-ledger" || e.id === "docs-same-pr" ? { ...e, source: said } : e)) };
+  const deps = await ledgerDeps({ directives: { common: COMMON_LEDGER, local: await write("links.json", JSON.stringify(withLinks)) } });
+  const inbox = await write("inbox.jsonl", "");
+  const lane = { title: "g", thread: "discord:42", done: "x", cwd: "/work/hr35-isaac" };
+  // 09:30 KST, before he said it; 17:00 KST, after his first message and before the second
+  await deps.registry.write({ ...lane, key: "morning", brief: await write("morning.md", fields), openedAt: "2026-10-16T00:30:00.000Z" });
+  await deps.registry.write({ ...lane, key: "after", brief: await write("after.md", fields), openedAt: "2026-10-16T08:00:00.000Z" });
+  const r = await runDirectiveAudit(deps, { since: "2026-10-15T15:00:00.000Z", inbox, owner: "7", dryRun: true });
+  const ids = r.gaps.map((g) => `${g.lane} ${g.id}`);
+  expect(ids).not.toContain("morning options-ledger");
+  expect(r.lines.some((l) => l.startsWith("DIRECTIVE_LATE morning options-ledger:") && l.includes("2026-10-16T07:30:00.000Z"))).toBe(true);
+  expect(ids).toContain("after options-ledger");
+  // docs-same-pr is a fork entry: the local line's links do not move it
+  expect(ids).toEqual(expect.arrayContaining(["morning docs-same-pr", "after docs-same-pr"]));
+});
+
 test("directive-audit: a directive that entered the ledger after the lane opened, or that the lead relayed to the lane in a [LEAD] line, is not its gap; one it never got still is", async () => {
   const sessions = join(state.dir, "sessions");
   const repo = join(state.dir, "ledger-repo");
