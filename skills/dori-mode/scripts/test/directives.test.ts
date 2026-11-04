@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditHook, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
+import { laneGapSplit, applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAuditHook, dailyAuditSince, leadThreadGaps, linkRows, meaningCachePath, memoryRepoFor, pushLinks, runDirectiveAudit, withApplied } from "../src/directive-audit.ts";
 import { loadConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
@@ -623,6 +623,70 @@ test("no scope narrowed for briefs hits the eight-step template by itself: it wo
   expect(narrowed.map((e) => e.id).sort()).toEqual(["new-features-zzangdori", "pair-efficient", "pair-owner-relay", "pair-route"]);
   const ctx = scopeContext(await eightSteps(), ledger, { repo: "some-repo" });
   expect(narrowed.filter((e) => appliesWhy(e, ctx)).map((e) => e.id)).toEqual([]);
+});
+
+// owner Q482: launch fixes the every-lane entries and the repo's own; a small model picks among the rest, and the rules decide when it cannot
+const withModel = <T extends { run: (...a: never[]) => unknown }>(deps: T, reply: { code: number; out: string } | readonly { code: number; out: string }[]) => {
+  const asked: string[][] = [];
+  const run = (cmd: string[], opts?: unknown) => {
+    if (cmd[0] !== "omo") return (deps.run as (c: string[], o?: unknown) => unknown)(cmd, opts);
+    asked.push(cmd);
+    const r = "code" in reply ? reply : reply[asked.length - 1]!;
+    return Promise.resolve({ ...r, err: "" });
+  };
+  const config = { ...(deps as unknown as { config: { directives: object } }).config, directives: { ...(deps as unknown as { config: { directives: object } }).config.directives, pickModel: "anthropic-subscription/claude-haiku-5-5" } };
+  return { deps: { ...deps, run, config } as T, asked };
+};
+const pickBrief = fields.replace("로그인 고침", "유돌한테 넘길 일을 정리한다");
+
+test("launch: the model's pick decides the non-fixed entries, every-lane and repo entries stay, the choice is on the lane's record", async () => {
+  const { deps, asked } = withModel(await ledgerDeps(), { code: 0, out: 'x {"picked":[{"id":"transcribe-yoodori","why":"녹음"},{"id":"not-an-id","why":"?"}]}' });
+  const r = await renderBrief(deps, input(await write("pick.md", pickBrief)));
+  expect(asked.length).toBe(3);
+  expect(asked[0]!.join(" ")).not.toContain("ulw");
+  expect(r.draft.directives?.pick?.picked.map((p) => p.id)).toEqual(["transcribe-yoodori"]);
+  const applied = r.draft.directives?.applied ?? [];
+  expect(applied).toEqual(expect.arrayContaining(["transcribe-yoodori", "docs-same-pr", "eight-steps", "options-ledger"]));
+  // the rule would call pair-route for the name in the brief; the model did not
+  expect(applied).not.toContain("pair-route");
+  expect(r.lines.find((l) => l.startsWith("LAUNCH_DIRECTIVE_PICKED"))).toContain("transcribe-yoodori");
+});
+
+test("launch: the three runs are merged; a run that fails adds nothing and the others still count", async () => {
+  const one = (id: string) => ({ code: 0, out: `{"picked":[{"id":"${id}","why":"w"}]}` });
+  const both = withModel(await ledgerDeps(), [one("transcribe-yoodori"), { code: 1, out: "" }, one("deck-context")]);
+  const r = await renderBrief(both.deps, input(await write("merge.md", pickBrief)));
+  expect(r.draft.directives?.pick?.picked.map((p) => p.id).sort()).toEqual(["deck-context", "transcribe-yoodori"]);
+  expect(r.draft.directives?.pick?.runs).toEqual({ asked: 3, answered: 2 });
+  expect(r.draft.directives?.pickFallback).toBeUndefined();
+  expect(r.lines.find((l) => l.startsWith("LAUNCH_DIRECTIVE_PICKED"))).toContain("2 of 3 runs answered");
+});
+
+test("launch: a model that fails, answers without JSON or names nothing leaves the choice to the scope rules, and the record says why", async () => {
+  for (const reply of [{ code: 1, out: "" }, { code: 0, out: "ULTRAWORK MODE ENABLED!" }, { code: 0, out: '{"picked":[]}' }, { code: 0, out: '{"picked":[{"id":"not-an-id"}]}' }]) {
+    const { deps } = withModel(await ledgerDeps(), reply);
+    const r = await renderBrief(deps, input(await write("fall.md", pickBrief)));
+    expect(r.draft.directives?.pick).toBeUndefined();
+    expect(r.draft.directives?.pickFallback).toContain("claude-haiku");
+    expect(r.draft.directives?.applied).toContain("pair-route");
+    expect(r.lines.some((l) => l.startsWith("LAUNCH_DIRECTIVE_PICK_FALLBACK"))).toBe(true);
+  }
+});
+
+test("directive-audit against a pick: what the model chose and the brief lacks is a gap, what it left out is listed and not counted", async () => {
+  const deps = await ledgerDeps();
+  const ledger = loadLedger(deps.config);
+  const pick = { model: "m", picked: [{ id: "transcribe-yoodori", why: "녹음" }] };
+  const lane = { key: "picked", title: "t", thread: "discord:42", brief: await write("audit-pick.md", pickBrief), done: "x", cwd: "/work/hr35-isaac", openedAt: "2099-01-01T00:00:00.000Z", directives: { applied: [], waived: [], pick } };
+  const blocks = { "eight-steps": await eightSteps(), "ui-steps": await uiSteps() };
+  const r = await laneGapSplit(deps, lane as never, ledger, blocks, { files: [] });
+  const ids = r.gaps.map((g) => g.id);
+  expect(ids).toEqual(expect.arrayContaining(["transcribe-yoodori", "docs-same-pr", "options-ledger"]));
+  expect(ids).not.toContain("pair-route");
+  expect(r.excused.find((x) => x.gap.id === "pair-route")?.line).toStartWith("DIRECTIVE_PICK_SKIPPED picked pair-route:");
+  // a lane launched without a pick is read by the rules as before
+  const { pick: _gone, ...rest } = lane.directives;
+  expect((await laneGapSplit(deps, { ...lane, directives: rest } as never, ledger, blocks, { files: [] })).gaps.map((g) => g.id)).toContain("pair-route");
 });
 
 test("directive-audit: a thread the lead opened without reading the ledger and no lane works in is DIRECTIVE_LEAD; a checked one, a lane's and an older one are not", () => {

@@ -20,12 +20,14 @@ import { laneArea, loadTree, treeSection } from "./explore.ts";
 import { watchLog } from "./watch-log.ts";
 import { StartRefused } from "./backlog.ts";
 import { relatedLines, relatedThreads, type RelatedThread } from "./related-thread.ts";
-import { addedLine, checkedLedger, headingAt, type Ledger, missingLines, planDirectives, repoName, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
+import { addedLine, checkedLedger, type DirectivePick, headingAt, type Ledger, mergePicks, missingLines, parsePick, PICK_RUNS, PICK_SYSTEM, pickCandidates, pickPrompt, planDirectives, repoName, type ScopeContext, scopeContext, uiHits, scopeText, waivedLines, withDirectives } from "./directives.ts";
 import { join } from "node:path";
 import type { BudgetLimits } from "./supervision.ts";
 import { Lessons } from "./lessons.ts";
 
 export type LaunchInput = {
+  // what the small model already chose for this launch (a second render with the new thread's ref)
+  readonly pick?: { readonly pick?: DirectivePick; readonly pickFallback?: string };
   readonly key: string;
   readonly title: string;
   readonly brief: string;
@@ -480,6 +482,20 @@ const draftLane = (deps: FlowDeps, input: LaunchInput): Lane => ({
   ...(input.budget && Object.keys(input.budget).length ? { budget: input.budget } : {}), ...(input.activityPaths?.length ? { activityPaths: input.activityPaths } : {}),
 });
 
+type Chosen = { readonly pick?: DirectivePick; readonly pickFallback?: string };
+
+// Which non-fixed entries this brief needs, from the small model; on any failure the scope rules decide and the record says why.
+const pickDirectives = async (deps: FlowDeps, raw: string, ledger: Ledger, ctx: ScopeContext): Promise<Chosen> => {
+  const model = deps.config.directives.pickModel;
+  if (!model) return {};
+  const candidates = pickCandidates(ledger, ctx);
+  const prompt = pickPrompt(raw, candidates);
+  const runs = await Promise.all(Array.from({ length: PICK_RUNS }, () => deps.run(fill(deps.config.reviewers.command, { model, system: PICK_SYSTEM, prompt }), { timeoutMs: 60_000 })));
+  const lists = runs.flatMap((r) => (r.code === 0 ? [parsePick(r.out, candidates)] : [])).filter((l) => l !== undefined);
+  if (!lists.length) return { pickFallback: `${model} gave no usable list in ${PICK_RUNS} runs (exit ${runs.map((r) => r.code).join(", ")})` };
+  return { pick: { model, picked: mergePicks(lists), runs: { asked: PICK_RUNS, answered: lists.length } } };
+};
+
 export type Rendered = {
   readonly draft: Lane;
   readonly text: string;
@@ -501,10 +517,11 @@ export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<R
   const cwd = input.cwd ?? deps.config.defaultCwd;
   const ledger = launchLedger(deps);
   const ctx = scopeContext(raw, ledger, { ui: input.ui, repo: ledger.entries.length ? await laneRepo(deps, cwd) : "" });
-  const plan = planDirectives(raw, ledger, ctx, input.waive);
+  const chosen = ledger.entries.length ? (input.pick ?? (await pickDirectives(deps, raw, ledger, ctx))) : { pickFallback: "" };
+  const plan = planDirectives(raw, ledger, ctx, input.waive, chosen.pick);
   const ui = Boolean(input.ui) || plan.blocks.includes("ui-steps");
   const at = iso(deps.clock);
-  const draft: Lane = { ...draftLane(deps, input), ...(ui ? { ui: true } : {}), ...(ledger.entries.length ? { directives: { applied: plan.applied, waived: plan.waived.map(({ e, reason }) => ({ id: e.id, reason, at })) } } : {}) };
+  const draft: Lane = { ...draftLane(deps, input), ...(ui ? { ui: true } : {}), ...(ledger.entries.length ? { directives: { applied: plan.applied, waived: plan.waived.map(({ e, reason }) => ({ id: e.id, reason, at })), ...chosen } } : {}) };
   const past = await pastSignals(deps, input, draft.cwd ?? deps.config.defaultCwd);
   const tree = await treeContext(deps, draft);
   const skipEight = plan.waived.some(({ e }) => e.block === "eight-steps");
@@ -514,7 +531,8 @@ export const renderBrief = async (deps: FlowDeps, input: LaunchInput): Promise<R
   const hint = uiWarning(input, raw, ledger, ui);
   const added = addedLine(input.key, plan);
   const lessons = repoLessons(deps, draft.cwd ?? deps.config.defaultCwd, lead);
-  const lines = [...(hint ? [hint] : []), ...(added ? [added] : []), ...waivedLines(input.key, plan), ...lessons.warnings];
+  const picked = chosen.pick ? `LAUNCH_DIRECTIVE_PICKED ${input.key}: ${chosen.pick.model} chose ${chosen.pick.picked.map((p) => p.id).join(", ")} (${chosen.pick.runs?.answered ?? 1} of ${chosen.pick.runs?.asked ?? 1} runs answered)` : chosen.pickFallback ? `LAUNCH_DIRECTIVE_PICK_FALLBACK ${input.key}: the scope rules decide (${chosen.pickFallback})` : undefined;
+  const lines = [...(hint ? [hint] : []), ...(added ? [added] : []), ...(picked ? [picked] : []), ...waivedLines(input.key, plan), ...lessons.warnings];
   return { draft, ...(steps ? { steps } : {}), lines, missing: missingLines(input.key, plan), text: `${ui ? withUiSteps(lead, await uiSteps()) : lead}\n${lessons.section ? `${lessons.section}\n` : ""}${past ? `${past}\n` : ""}${tree ? `${tree}\n` : ""}${footer(draft, deps.config.leadPane, deps.config.backend, Object.keys(deps.config.mergeGate.repos))}` };
 };
 
@@ -570,7 +588,9 @@ export const launchLane = async (deps: FlowDeps, input: LaunchInput, warn: (line
     const line = `THREAD_OPENED ${input.key} ${ref}: the lane's work thread, new in this Dori's channel (--thread ${NEW_THREAD})`;
     warn(line);
     watchLog(deps.config.watchLog, deps.clock, { source: "launch", line });
-    ({ draft, text } = await renderBrief(deps, { ...input, thread: ref }));
+    // the same choice, not a second call that may choose otherwise
+    const { pick, pickFallback } = draft.directives ?? {};
+    ({ draft, text } = await renderBrief(deps, { ...input, thread: ref, pick: { ...(pick ? { pick } : {}), ...(pickFallback ? { pickFallback } : {}) } }));
   }
   await Bun.write(input.brief, text);
   const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${resolve(input.brief)} in full. You are the ${input.key} lane; report as the brief's footer says.`;

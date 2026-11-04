@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { laneSessionFiles, readLeadRelays, type ReportLine } from "./auto-signals.ts";
 import { checkReviewers, ChallengeError, reviewers } from "./challenge.ts";
 import { fill } from "./config.ts";
-import { APPLIED_HEADING, appliesWhy, briefGaps, checkedLedger, coveredBy, type Directive, type DirectiveBlock, DirectiveError, directiveText, duplicated, type Gap, GENERATED_SECTION, headingAt, type Ledger, leadGaps, LINK_SOURCE, loadLedger, scopeContext, unledgered } from "./directives.ts";
+import { APPLIED_HEADING, appliesUnder, appliesWhy, briefGaps, checkedLedger, coveredBy, type Directive, type DirectiveBlock, DirectiveError, directiveText, duplicated, type Gap, GENERATED_SECTION, headingAt, type Ledger, leadGaps, LINK_SOURCE, loadLedger, pickCandidates, scopeContext, unledgered } from "./directives.ts";
 import type { DoriConfig } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { eightSteps, laneRepo, launchLedger, uiSteps } from "./launch.ts";
@@ -72,6 +72,14 @@ export const laneGapSplit = async (deps: Pick<FlowDeps, "run" | "config">, lane:
   const byId = new Map(ledger.entries.map((e) => [e.id, e] as const));
   const gaps: Gap[] = [];
   const excused: Excused[] = [];
+  const pick = lane.directives?.pick;
+  if (pick) {
+    const ctx = scopeContext(brief, ledger, { ui: lane.ui, repo });
+    for (const e of pickCandidates(ledger, ctx)) {
+      const why = appliesWhy(e, ctx);
+      if (why && !appliesUnder(e, ctx, pick) && !coveredBy(brief, e, ledger)) excused.push({ gap: { lane: lane.key, id: e.id, line: "" }, line: `DIRECTIVE_PICK_SKIPPED ${lane.key} ${e.id}: the scope rule calls it (${why}) and ${pick.model} left it out; read it against the lane's work` });
+    }
+  }
   let relays: ReportLine[] | undefined;
   for (const g of all) {
     const at = opts.entered?.get(g.id);
@@ -129,7 +137,7 @@ export const laneDirectiveWords = async (deps: Pick<FlowDeps, "run" | "config">,
   const brief = await readBrief(briefOf(lane, deps.config.defaultCwd));
   const ctx = scopeContext(brief, ledger, { ui: lane.ui, repo: await laneRepo(deps, lane.cwd ?? deps.config.defaultCwd) });
   const waived = new Set((lane.directives?.waived ?? []).map((w) => w.id));
-  return ledger.entries.filter((e) => e.words && !waived.has(e.id) && appliesWhy(e, ctx)).map((e) => `[${e.id}, ${e.date}] "${e.words}"`);
+  return ledger.entries.filter((e) => e.words && !waived.has(e.id) && appliesUnder(e, ctx, lane.directives?.pick)).map((e) => `[${e.id}, ${e.date}] "${e.words}"`);
 };
 
 // --- dori directives apply: a lane launched before a directive was in the ledger gets it now ---
@@ -183,7 +191,7 @@ export const applyDirectives = async (deps: FlowDeps, lane: Lane, opts: { readon
     return { ok: false, added: [], message, lines: [...lines, line] };
   }
   await Bun.write(briefOf(lane, deps.config.defaultCwd), withApplied(brief, texts));
-  await deps.registry.patch(lane.key, { directives: { applied: [...new Set([...(lane.directives?.applied ?? []), ...ids])], waived: lane.directives?.waived ?? [] } });
+  await deps.registry.patch(lane.key, { directives: { ...lane.directives, applied: [...new Set([...(lane.directives?.applied ?? []), ...ids])], waived: lane.directives?.waived ?? [] } });
   const line = `DIRECTIVES_APPLIED ${lane.key}: ${ids.join(", ")} sent to ${lane.pane} (SUBMITTED) and added to ${lane.brief} under "${APPLIED_HEADING.slice(3)}"`;
   watchLog(deps.config.watchLog, deps.clock, { source: "directives", line });
   return { ok: true, added: ids, message, lines: [...lines, line] };
@@ -388,7 +396,7 @@ export const runDirectiveAudit = async (deps: FlowDeps, opts: { readonly since: 
     gaps.push(...s.gaps);
     excused.push(...s.excused);
   }
-  const notCounted = excused.length ? ` (${excused.length} not counted: entered the ledger after the lane opened, or the lead relayed it in a [LEAD] line; listed with --dry-run)` : "";
+  const notCounted = excused.length ? ` (${excused.length} not counted: entered the ledger after the lane opened, the lead relayed it in a [LEAD] line, or the model left out what a scope rule calls; listed with --dry-run)` : "";
   const excusedLines = opts.dryRun ? excused.map((x) => x.line) : [];
   gaps.push(...unledgered(await readBrief(opts.inbox), ledger, opts.owner, opts.since, process.env.DORI_DISCORD_GUILD?.trim() ?? ""));
   if (opts.threads) gaps.push(...leadThreadGaps(opts.threads, await deps.registry.list(), opts.since));

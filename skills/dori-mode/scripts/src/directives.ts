@@ -431,6 +431,56 @@ export const appliesWhy = (e: Directive, ctx: ScopeContext): string | undefined 
   return undefined;
 };
 
+// --- the small model that reads a brief at launch (owner Q482): every-lane entries, blocks and require entries stay fixed ---
+
+export type DirectivePick = { readonly model: string; readonly picked: readonly { readonly id: string; readonly why: string }[]; readonly runs?: { readonly asked: number; readonly answered: number } };
+
+// The model chooses differently between runs (agreement 0.51), so launch asks it this many times at once and takes all it named.
+export const PICK_RUNS = 3;
+export const mergePicks = (lists: readonly DirectivePick["picked"][]): DirectivePick["picked"] => {
+  const out = new Map<string, DirectivePick["picked"][number]>();
+  for (const list of lists) for (const p of list) if (!out.has(p.id)) out.set(p.id, p);
+  return [...out.values()];
+};
+
+// A repo's own entries come by the repo, not by the model: on a replay of 20 briefs models left them out most (fork-is-source).
+const repoEntry = (e: Directive, ctx: Pick<ScopeContext, "repo">): boolean => Boolean(e.scope.repos?.includes(ctx.repo));
+export const pickCandidates = (ledger: Pick<Ledger, "entries">, ctx: Pick<ScopeContext, "repo">): Directive[] =>
+  ledger.entries.filter((e) => e.mode === "inject" && !e.block && !e.scope.all && !repoEntry(e, ctx));
+
+export const PICK_SYSTEM = "레인 브리프를 읽고 소유자의 상시 지침 중 이 일에 걸리는 것을 고른다. 걸릴 수 있으면 넣는다: 빠지는 쪽이 더 나쁘다. JSON만 답한다.";
+export const pickPrompt = (brief: string, candidates: readonly Directive[]): string => {
+  const list = candidates.map((e) => `- ${e.id}: ${e.by === "owner" && e.words ? (e.prompt ?? e.words) : (e.rule ?? "")}`).join("\n");
+  // ulw in a prompt makes omo answer with its mode banner instead of the JSON
+  const text = leadText(brief).replace(/\bulw[- ]?(?:plan|loop|explore)?\b/g, "집중").slice(0, 7000);
+  return `[지침 목록]\n${list}\n\n[브리프]\n${text}\n\n형식: {"picked":[{"id":"...","why":"한 줄"}]}`;
+};
+
+// The ids the reply names among the candidates; undefined when it is not that JSON or names none (the scope rules decide then).
+export const parsePick = (reply: string, candidates: readonly Directive[]): DirectivePick["picked"] | undefined => {
+  const at = reply.indexOf("{");
+  const end = reply.lastIndexOf("}");
+  if (at < 0 || end < at) return undefined;
+  let picked: unknown;
+  try {
+    picked = (JSON.parse(reply.slice(at, end + 1)) as { picked?: unknown }).picked;
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(picked)) return undefined;
+  const ids = new Set(candidates.map((e) => e.id));
+  const out = (picked as { id?: unknown; why?: unknown }[]).flatMap((x) => (typeof x?.id === "string" && ids.has(x.id) ? [{ id: x.id, why: typeof x.why === "string" ? x.why : "" }] : []));
+  return out.length ? out : undefined;
+};
+
+// Why an entry is in a lane's brief when the model chose for it: what stays fixed by its rule, the repo's own, or the pick.
+export const appliesUnder = (e: Directive, ctx: ScopeContext, pick?: DirectivePick): string | undefined => {
+  if (!pick || e.mode !== "inject" || e.block || e.scope.all) return appliesWhy(e, ctx);
+  if (repoEntry(e, ctx)) return `repo ${ctx.repo}`;
+  const p = pick.picked.find((x) => x.id === e.id);
+  return p ? `model ${pick.model}: ${p.why}` : undefined;
+};
+
 const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
 
 // The text dori launch puts in for an inject directive, and what shows it is already in a brief.
@@ -518,7 +568,7 @@ export type DirectivePlan = {
 
 // What the ledger asks of this brief: inject directives in scope it lacks, require directives it does not meet; waived ids
 // are left out (a waiver of an id not in the ledger is refused: a typo would let a directive through).
-export const planDirectives = (brief: string, ledger: Ledger, ctx: ScopeContext, waive: Readonly<Record<string, string>> = {}): DirectivePlan => {
+export const planDirectives = (brief: string, ledger: Ledger, ctx: ScopeContext, waive: Readonly<Record<string, string>> = {}, pick?: DirectivePick): DirectivePlan => {
   const ids = new Set(ledger.entries.map((e) => e.id));
   const unknown = Object.keys(waive).filter((id) => !ids.has(id));
   if (unknown.length) throw new DirectiveError(`--waive ${unknown.join(", ")}: no such directive in the ledger (dori directives lists them)`);
@@ -529,7 +579,7 @@ export const planDirectives = (brief: string, ledger: Ledger, ctx: ScopeContext,
   const applied: string[] = [];
   for (const e of ledger.entries) {
     if (e.mode === "lead") continue;
-    const why = appliesWhy(e, ctx);
+    const why = appliesUnder(e, ctx, pick);
     if (!why) continue;
     const reason = waive[e.id];
     if (reason !== undefined) {
@@ -574,7 +624,7 @@ export const briefGaps = (lane: Pick<Lane, "key" | "directives" | "ui">, brief: 
   const out: Gap[] = [];
   for (const e of ledger.entries) {
     if (e.mode === "lead" || waived.has(e.id)) continue;
-    const why = appliesWhy(e, ctx);
+    const why = appliesUnder(e, ctx, lane.directives?.pick);
     if (!why) continue;
     const lacks = e.block ? !squash(brief).includes(squash(blockLines[e.block])) : e.mode === "inject" ? !coveredBy(brief, e, ledger) : requireMissing(brief, e).length > 0;
     // an entry with a pointer is a gap of its pointer: that is the text to send

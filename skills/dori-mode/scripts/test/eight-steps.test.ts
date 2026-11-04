@@ -56,7 +56,7 @@ test("a brief with only some of the steps is an edited frame: nothing added, LAU
 
 test("dori launch --dry-run --ui orders ulw, the UI steps, the four fields, then the eight steps, and prints LAUNCH_STEPS_ADDED", async () => {
   const config = join(state.dir, "config.json");
-  await Bun.write(config, JSON.stringify({ stateDir: state.dir, watchLog: join(state.dir, "watch.log"), defaultCwd: "/home/test" }));
+  await Bun.write(config, JSON.stringify({ stateDir: state.dir, watchLog: join(state.dir, "watch.log"), defaultCwd: "/home/test", directives: { pickModel: "" } }));
   const brief = await briefFile(fields);
   const r = await run(["env", `DORI_CONFIG=${config}`, `DORI_STATE_DIR=${state.dir}`, `DORI_ENV_FILE=${join(state.dir, "missing.env")}`, "bun", join(import.meta.dir, "../src/cli.ts"), "launch", "eight", "--title", "t", "--brief", brief, "--done", 'command ["bun","test"]', "--goal", "g", "--no-thread", "test lane", "--dry-run", "--ui"]);
   expect(r.code).toBe(0);
