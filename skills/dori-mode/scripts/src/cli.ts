@@ -450,10 +450,16 @@ const USAGE = `dori <command> [options]
                                        Qn or message link, kept in the note and log: refuses while a local chain of the
                                        lane's agent or eval kernel (not the session's own launcher shell or idle kernel), a
                                        background eval cell, a running turn or an open question would die, unless the lane
-                                       ran handover ready (or --force); an automatic start (auto:) never moves a lane that
+                                       ran handover ready (or --force); a lead's or owner's request refused that way waits
+                                       (HANDOVER_PENDING): the lane is asked for its safe point and freshness starts it again
+                                       by itself; a run that finds a waiting run of the lane makes it step aside and moves
+                                       the lane itself (HANDOVER_TAKEN_OVER); an automatic start (auto:) never moves a lane that
                                        runs or watches a training or eval chain (handover.trainingTags, trainingWatch);
                                        --wait-idle MIN (freshness's automatic start): waits up to MIN minutes for a running
                                        turn to end and freezes the old agent at that idle moment, before the new session opens;
+                                       under the lane's lock an automatic run gives way to a lead's waiting request
+                                       (HANDOVER_YIELDED); --request-at AT --request-pane PANE (freshness's start again of a
+                                       waiting request): moves only while that request still waits in PANE (HANDOVER_REQUEST_GONE);
                                        writes a note (brief, owner goal, Done, the owner's messages since the last handover, todos, goal,
                                        monitors, local chains, detached jobs, last reports, model and thinking), opens a
                                        session in the same real path with --model and --thinking, points the registry and
@@ -575,7 +581,7 @@ const flags = parseArgs({
     goal: { type: "string" }, "challenge-before": { type: "string", multiple: true }, plan: { type: "string" }, kind: { type: "string" }, result: { type: "string" },
     direction: { type: "string" }, next: { type: "string" }, gpu: { type: "string", multiple: true }, "gpu-all": { type: "boolean" }, mode: { type: "string" }, minutes: { type: "string" },
     summary: { type: "string" }, file: { type: "string", multiple: true }, all: { type: "boolean" }, check: { type: "boolean" }, send: { type: "boolean" },
-    "keep-old": { type: "boolean" }, "wait-idle": { type: "string" }, "no-monitors": { type: "boolean" }, state: { type: "string" }, "text-file": { type: "string" },
+    "keep-old": { type: "boolean" }, "wait-idle": { type: "string" }, "request-at": { type: "string" }, "request-pane": { type: "string" }, "no-monitors": { type: "boolean" }, state: { type: "string" }, "text-file": { type: "string" },
     force: { type: "boolean" }, thinking: { type: "string" }, "approved-by": { type: "string" }, window: { type: "string" }, reread: { type: "boolean" },
     answer: { type: "string" }, repo: { type: "string", multiple: true }, since: { type: "string" }, until: { type: "string" }, backtest: { type: "boolean" },
     static: { type: "boolean" }, dir: { type: "string", multiple: true }, "no-thread": { type: "string" }, "why-new": { type: "string" },
@@ -1405,13 +1411,13 @@ try {
           },
           // a lead's lane handover refused while the lane was busy, started again once the lane marked ready: a detached run
           // with the same approval and options that waits for the lane's idle moment like an automatic one
-          resume: async (k: string, approvedBy: string, request: RolloverRequest) => {
+          resume: async (k: string, approvedBy: string, request: RolloverRequest, serves: { readonly at: string; readonly pane: string }) => {
             const refused = windowsDetachRefusal();
             if (refused) return { started: false, line: `could not start: ${refused}` };
             const unit = `dori-rollover-${k}-${Date.now()}`;
             const log = join(config.stateDir, "handover", "run.log");
             mkdirSync(join(config.stateDir, "handover"), { recursive: true });
-            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...(decidedBy(approvedBy) === "auto" ? [`--setenv=${AUTO_GRANT_ENV}=${mintAutoGrant(config.stateDir, "lane", k, Date.now())}`] : []), ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "--lane", k, "--wait-idle", String(config.handover.autoWaitMin), "--approved-by", approvedBy, ...resumeArgs(request)]);
+            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...(decidedBy(approvedBy) === "auto" ? [`--setenv=${AUTO_GRANT_ENV}=${mintAutoGrant(config.stateDir, "lane", k, Date.now())}`] : []), ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "--lane", k, "--wait-idle", String(config.handover.autoWaitMin), "--approved-by", approvedBy, ...resumeArgs(request), "--request-at", serves.at, "--request-pane", serves.pane]);
             return r.code === 0 ? { started: true, line: `unit=${unit} log=${log}` } : { started: false, line: `could not start: ${(r.err || r.out).trim().slice(0, 160)}` };
           },
           // the audit after a committed handover: a detached run, so its supplement round does not hold up the sweep
@@ -2185,7 +2191,7 @@ try {
         if (minutes !== undefined && !(minutes > 0)) die("--minutes must be a positive number");
         const waitIdle = opt("wait-idle") ? Number(opt("wait-idle")) : undefined;
         if (waitIdle !== undefined && !(waitIdle > 0)) die("--wait-idle must be a positive number of minutes");
-        const r = await laneHandover(laneDeps, opt("lane") ?? "", here, { approvedBy: opt("approved-by"), ...(autoGrant ? { autoGrant } : {}), note: opt("note"), model: opt("model"), thinking: opt("thinking"), force: Boolean(flags.values.force), keepOld: Boolean(flags.values["keep-old"]), dryRun: Boolean(flags.values["dry-run"]), verifyMin: minutes, ...(waitIdle ? { waitIdleMin: waitIdle } : {}) });
+        const r = await laneHandover(laneDeps, opt("lane") ?? "", here, { approvedBy: opt("approved-by"), ...(autoGrant ? { autoGrant } : {}), note: opt("note"), model: opt("model"), thinking: opt("thinking"), force: Boolean(flags.values.force), keepOld: Boolean(flags.values["keep-old"]), dryRun: Boolean(flags.values["dry-run"]), verifyMin: minutes, ...(waitIdle ? { waitIdleMin: waitIdle } : {}), ...(opt("request-at") && opt("request-pane") ? { serves: { at: opt("request-at") ?? "", pane: opt("request-pane") ?? "" } } : {}) });
         process.exit(r.code);
       }
       if (flags.values.template) {

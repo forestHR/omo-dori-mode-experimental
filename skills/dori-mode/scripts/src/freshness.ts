@@ -7,7 +7,7 @@ import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { leadAlert } from "./autoturn.ts";
 import { taskOpen, taskRecord } from "./background.ts";
-import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, statusLine, waitingRequest } from "./lane-handover.ts";
+import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, safePointFile, safePointText, statusLine, waitingRequest } from "./lane-handover.ts";
 import { COMMITTED, crossed, dueReasons, limitsFor, readRollovers, type RolloverEntry, type RolloverRequest, type Signals, type Who } from "./rollover.ts";
 import { auditDue, type Committed, weeklyDue, writeMarker } from "./rollover-audit.ts";
 import { dailyAuditSince, linksDue } from "./directive-audit.ts";
@@ -90,7 +90,7 @@ export type RolloverHooks = {
   // starts again, detached, a lane handover the lead (or the owner) approved that was refused while the lane was busy,
   // with the same approval and the options that run was given, once the lane marked ready (readyResume); started false
   // when it could not be started
-  readonly resume?: (key: string, approvedBy: string, request: RolloverRequest) => Promise<{ readonly started: boolean; readonly line: string }>;
+  readonly resume?: (key: string, approvedBy: string, request: RolloverRequest, serves: { readonly at: string; readonly pane: string }) => Promise<{ readonly started: boolean; readonly line: string }>;
   // whether a process still runs (a handover's lock holder, the chain pids a refusal named); process.kill(pid, 0) by default
   readonly alive?: (pid: number) => boolean;
   // whether a background task (st_...) a refusal named has ended: its senpi record under home has a final status (a task
@@ -109,12 +109,19 @@ export type RolloverHooks = {
   readonly leadTranscript?: () => Promise<string | undefined>;
 };
 
-const pidAlive = (pid: number): boolean => {
+// A zombie (it ended, its parent has not collected it: an eval kernel's Popen child) answers kill 0 but runs nothing: a
+// waiting handover whose chain ended as one never started again (QA lane qa-hsa, 2026-11-03 13:28Z).
+export const pidAlive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) !== "Z";
+  } catch {
+    return true;
   }
 };
 
@@ -138,10 +145,6 @@ type Attempt = Extract<RolloverEntry, { kind: "rollover" }>;
 // The record of the automatic run started at autoAt: the last automatic rollover entry of this lane (or the lead) since.
 const lastAuto = (stateDir: string, who: Who, key: string, since: string): Attempt | undefined =>
   readRollovers(stateDir).findLast((e): e is Attempt => e.kind === "rollover" && e.who === who && e.key === key && (e.approvedBy ?? "").startsWith("auto:") && e.at >= since);
-
-// what the lane is asked when an automatic rollover finds it busy: reach a safe point, write the summary, mark ready, go idle
-export const safePointText = (key: string, why: string): string =>
-  `[LEAD] An automatic rollover of ${key} to a new session is due, but the lane is busy (${why}). At your next safe point: start no new work, write your conversation summary (dori handover ready --template prints its headings) to a file, run dori handover ready ${key} --note <file>, then end your turn.${/background task\(s\) still run/.test(why) ? " The ready mark does not cover your background tasks: the move waits until they end, so start no new ones and let these finish (or end them yourself if their work is no longer needed)." : ""} The local chains that command lists end with this session: if one must keep running (a training, eval or deploy run), let it finish or move it out of the session (setsid, systemd-run) first, and say so in your report. The move starts by itself once you are idle; nothing else to do.`;
 
 const screenSignals = (deps: FlowDeps): RolloverHooks => ({
   signals: async (pane, model) => {
@@ -222,7 +225,7 @@ const rolloverDue = async (deps: FlowDeps, hooks: RolloverHooks, who: Who, key: 
       // the lane was busy: ask it once per autoRetryMin to reach a safe point, then start again when it can move
       if (who === "lane" && (!seen.askedAt || now - Date.parse(seen.askedAt) >= retryMs)) {
         const why = (last.reasons[0] ?? "").replace(/\. Ask the lane to reach a safe point.*$/, "");
-        const told = await sendVerified(deps.run, deps.clock, deps.config, pane, safePointText(key, why));
+        const told = await sendVerified(deps.run, deps.clock, deps.config, pane, safePointText(key, why, "auto"));
         seen = { ...seen, askedAt: at };
         await save(seen);
         acts.push({ kind: "rollover_auto", lane: key, detail: `asked ${pane} to reach a safe point and write its summary (${why})${told ? "" : `; the request did not reach pane ${pane}`}` });
@@ -279,41 +282,96 @@ const rolloverDue = async (deps: FlowDeps, hooks: RolloverHooks, who: Who, key: 
 // the dori handover --lane options that give a run started again what the refused run was given
 export const resumeArgs = (r: RolloverRequest): string[] => [...(r.note ? ["--note", r.note] : []), ...(r.model ? ["--model", r.model] : []), ...(r.thinking ? ["--thinking", r.thinking] : []), ...(r.keepOld ? ["--keep-old"] : []), ...(r.verifyMin ? ["--minutes", String(r.verifyMin)] : [])];
 const resumeFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.ready-resume.json`);
+// The one waiting handover of a lane (Q475): the lead's request refused busy or work is started again by itself, once per
+// refusal (the claim names the refusal), never given up: refused while a turn ran, at the next sweep (the started run waits
+// for the idle moment); refused for work, when the lane marks ready after it or every chain and task it named ended. A
+// request still waiting handover.readyMin after it was first asked is told to the lead once, and goes on waiting.
+const STARTED_GRACE_MS = 2 * 60_000;
+
 const readyResume = async (deps: FlowDeps, hooks: RolloverHooks, key: string, pane: string): Promise<SweepAct[]> => {
   if (!hooks.resume) return [];
   const stateDir = deps.config.stateDir;
-  const mark = readJson<ReadyMark>(readyFile(stateDir, key));
-  const markAt = Date.parse(mark?.at ?? "");
-  if (!mark || Number.isNaN(markAt) || mark.pane !== pane) return [];
-  const claimed = resumeFile(stateDir, key);
-  if (readJson<{ readyAt?: string }>(claimed)?.readyAt === mark.at) return [];
   const asked = waitingRequest(readRollovers(stateDir), key, pane);
-  if (!asked || Date.parse(asked.at) >= markAt) return [];
-  if (handoverRunning(stateDir, "lane", key, hooks.alive ?? pidAlive)) return [];
+  if (!asked) return [];
+  // the safe-point ask the pane did not take (a herdr question open, a pane gone for a moment) is typed again each sweep
+  // until it is, once per request: without it the lane never learns it should mark ready (review 320 round 8)
+  const askFile = safePointFile(stateDir, key);
+  if (asked.safePoint && !asked.safePoint.told && readJson<{ request?: string }>(askFile)?.request !== asked.at && !handoverRunning(stateDir, "lane", key, hooks.alive ?? pidAlive)) {
+    // a text the pane refuses outright (an unsafe character) is a failed delivery, tried again next sweep, never a throw that
+    // ends the sweep for every lane after this one (review 320 round 9)
+    if (await sendVerified(deps.run, deps.clock, deps.config, pane, safePointText(key, asked.safePoint.why, "lead")).catch(() => false)) {
+      mkdirSync(join(stateDir, "handover", "lanes"), { recursive: true });
+      writeFileSync(askFile, `${JSON.stringify({ request: asked.at, at: new Date(deps.clock.now()).toISOString() })}\n`);
+      watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line: `HANDOVER_SAFE_POINT_ASKED ${key} asked: the safe-point request of the handover asked at ${asked.at} reached ${pane} now` });
+    }
+  }
+  const claimed = resumeFile(stateDir, key);
+  const claim = readJson<{ request?: string; since?: string; approvedBy?: string; result?: string; toldAt?: string; readyAt?: string; at?: string }>(claimed);
+  const by = (asked.approvedBy ?? "").trim();
+  // the first ask of this waiting request: a run started again for it and refused again carries it on (its row names the
+  // request it was started for); a new request with the same approval starts its own wait (review 320 round 15)
+  const since = claim?.since && asked.resumes && claim.request === asked.resumes ? claim.since : claim?.request === asked.at && claim.since ? claim.since : asked.at;
+  // a refusal started once (or skipped for good) is done; one still waiting, or skipped for a stale ready mark, is looked at
+  // again: a fresh mark or its work ending still starts it (review 320)
+  // a started run that died before it wrote another row (no live run holds the lane, checked below) is started again once
+  // its startup grace has passed, with no new event needed: the request stays decided (review 320, plan challenge 14:48Z)
+  const abandoned = claim?.result === "started" && deps.clock.now() - Date.parse(claim.at ?? "") > STARTED_GRACE_MS;
+  if (claim?.request === asked.at && claim.result !== "waiting" && claim.result !== "stale-mark" && claim.result !== "launch-failed" && !abandoned) return [];
+  const alive = hooks.alive ?? pidAlive;
+  if (handoverRunning(stateDir, "lane", key, alive)) return [];
   const now = deps.clock.now();
   const min = deps.config.handover.readyMin;
-  // a refusal logged before its options were kept (no request) is not started again: it could drop --keep-old and close
-  // the old session; the lead runs it again
-  const why = !asked.request ? "the request was logged before its options were kept, so a start now could drop them (--keep-old, --note, --model)" : now - markAt > min * 60_000 ? `the ready mark is older than ${min} min` : "";
-  const by = (asked.approvedBy ?? "").trim();
-  mkdirSync(join(stateDir, "handover", "lanes"), { recursive: true });
-  writeFileSync(claimed, `${JSON.stringify({ readyAt: mark.at, at: new Date(now).toISOString(), request: asked.at, approvedBy: by, result: why ? "skipped" : "started" })}\n`);
+  const mark = readJson<ReadyMark>(readyFile(stateDir, key));
+  const markAt = Date.parse(mark?.at ?? "");
+  const readied = !!mark && !Number.isNaN(markAt) && mark.pane === pane && markAt > Date.parse(asked.at);
+  const taskEnded = hooks.taskEnded ?? (() => false);
+  const named = [...(asked.pids ?? []), ...(asked.tasks ?? [])];
+  const ended = named.length > 0 && (asked.pids ?? []).every((pid) => !alive(pid)) && (asked.tasks ?? []).every((id) => taskEnded(id));
   const log = (line: string): SweepAct[] => {
     watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line });
     return [{ kind: "ready_resume", lane: key, detail: line.slice(line.indexOf(" ", line.indexOf(" ") + 1) + 1) }];
   };
+  mkdirSync(join(stateDir, "handover", "lanes"), { recursive: true });
+  if (asked.blocked === "work" && !readied && !ended) {
+    if (now - Date.parse(since) <= min * 60_000 || (claim?.request === asked.at && claim.toldAt)) return [];
+    const lead = deps.config.leadPane;
+    const text = `[DORI] ${key}: the handover you asked for at ${since} still waits: the lane has not marked ready and the work it named still runs (${named.join(", ")}). It starts by itself once either happens; to move it now, run dori handover --lane ${key} --approved-by "<the same approval>" --force (that work then ends).`;
+    const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, text) : false;
+    writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, result: "waiting", ...(told || !lead ? { toldAt: new Date(now).toISOString() } : {}) })}\n`);
+    return log(`HANDOVER_PENDING_STALE ${key} waiting: the request of ${since} (refused ${asked.blocked}) still waits after ${min} min; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
+  }
+  // a refusal logged before its options were kept (no request) is not started again: it could drop --keep-old and close
+  // the old session; the lead runs it again. A ready mark past readyMin is ignored by the run, so it starts nothing.
+  const stale = asked.blocked === "work" && readied && !ended && now - markAt > min * 60_000;
+  const why = !asked.request ? "the request was logged before its options were kept, so a start now could drop them (--keep-old, --note, --model)" : stale ? `the ready mark is older than ${min} min` : "";
+  // the lead hears of one stale mark once
+  if (stale && claim?.request === asked.at && claim.result === "stale-mark" && claim.readyAt === mark?.at) return [];
+  writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, at: new Date(now).toISOString(), ...(readied ? { readyAt: mark?.at } : {}), ...(claim?.toldAt && claim.since === since ? { toldAt: claim.toldAt } : {}), result: stale ? "stale-mark" : why ? "skipped" : "started" })}\n`);
+  const cause = asked.blocked === "busy" ? "the lane was busy; the run waits for its idle moment" : readied ? `the ready mark of ${mark?.at} in ${pane} follows it` : `the work it named ended (${named.join(", ")})`;
   if (why) {
     const lead = deps.config.leadPane;
     const text = asked.request
-      ? `[DORI] ${key}: the handover you asked for at ${asked.at} was not started again: the lane marked ready at ${mark.at}, more than handover.readyMin (${min} min) ago. Ask the lane to run dori handover ready ${key} --note <file> again (the handover then starts by itself), or run it again yourself.`
-      : `[DORI] ${key}: the lane marked ready at ${mark.at} after the handover you asked for at ${asked.at}, but that request was logged before its options were kept, so it was not started again. Run dori handover --lane ${key} again with the same approval and options now.`;
+      ? `[DORI] ${key}: the handover you asked for at ${asked.at} was not started again: the lane marked ready at ${mark?.at}, more than handover.readyMin (${min} min) ago. Ask the lane to run dori handover ready ${key} --note <file> again (the handover then starts by itself), or run it again yourself.`
+      : `[DORI] ${key}: the handover you asked for at ${asked.at} was refused (${asked.blocked}), but that request was logged before its options were kept, so it was not started again. Run dori handover --lane ${key} again with the same approval and options now.`;
     const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, text) : false;
-    return log(`HANDOVER_READY_RESUME_SKIPPED ${key} skipped: the ready mark of ${mark.at} in ${pane} follows the request of ${asked.at} (refused ${asked.blocked}), not started again: ${why}; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
+    return log(`HANDOVER_READY_RESUME_SKIPPED ${key} skipped: ${readied ? `the ready mark of ${mark?.at} in ${pane} follows the request of ${asked.at}` : `the request of ${asked.at}`} (refused ${asked.blocked}), not started again: ${why}; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : `lead not told: the note did not reach pane ${lead}`}`);
   }
-  const r = await hooks.resume(key, by, asked.request ?? {});
-  if (!r.started) rmSync(claimed, { force: true });
+  // a request still waiting readyMin after it was first asked is told to the lead once, a busy one too (review 320)
+  const toldAt = claim?.toldAt && (claim.request === asked.at || claim.since === since) ? claim.toldAt : undefined;
+  if (!toldAt && now - Date.parse(since) > min * 60_000) {
+    const lead = deps.config.leadPane;
+    const told = lead ? await sendVerified(deps.run, deps.clock, deps.config, lead, `[DORI] ${key}: the handover you asked for at ${since} still waits: the lane stayed busy (${asked.blocked}). It goes on starting by itself at the lane's idle moment; to move it now, run dori handover --lane ${key} --approved-by "<the same approval>" --force.`) : false;
+    watchLog(deps.config.watchLog, deps.clock, { source: "freshness", line: `HANDOVER_PENDING_STALE ${key} waiting: the request of ${since} (refused ${asked.blocked}) still waits after ${min} min; ${!lead ? "lead not told: leadPane is not configured" : told ? "lead told" : "lead not told"}` });
+    // kept only once the lead got it (or there is no lead to tell): a note that did not arrive goes again next sweep
+    if (told || !lead) writeFileSync(claimed, `${JSON.stringify({ ...readJson<object>(claimed), toldAt: new Date(now).toISOString() })}\n`);
+  }
+  // the run checks under the lane's lock that this request still waits in this pane (review 320 round 14)
+  const r = await hooks.resume(key, by, asked.request ?? {}, { at: asked.at, pane });
+  // the claim is given back for the next sweep; a stale note already delivered stays delivered (review 320)
+  // it keeps the request it was for, so the wait keeps its age and its told note (review 320 round 16)
+  if (!r.started) writeFileSync(claimed, `${JSON.stringify({ request: asked.at, since, approvedBy: by, result: "launch-failed", ...(readJson<{ toldAt?: string }>(claimed)?.toldAt ? { toldAt: readJson<{ toldAt?: string }>(claimed)?.toldAt } : {}) })}\n`);
   return log(r.started
-    ? `HANDOVER_READY_RESUMED ${key} started: the ready mark of ${mark.at} in ${pane} follows the request of ${asked.at} (refused ${asked.blocked}); started again with the same approval ${JSON.stringify(by)}: ${r.line}`
+    ? `HANDOVER_READY_RESUMED ${key} started: ${readied ? `the ready mark of ${mark?.at} in ${pane} follows the request of ${asked.at}` : `${cause}; the request of ${asked.at}`} (refused ${asked.blocked}); started again with the same approval ${JSON.stringify(by)}: ${r.line}`
     : `HANDOVER_READY_RESUME_FAILED ${key} failed: the request of ${asked.at} could not be started again (${r.line}); the next sweep tries again`);
 };
 
@@ -417,7 +475,8 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
       acts.push(...(await superviseLane(deps, seen)));
       const resumed = await readyResume(deps, hooks, lane.key, lane.pane);
       acts.push(...resumed);
-      if (resumed.some((a) => a.detail.startsWith("started"))) continue;
+      // a lead's request still waiting holds the lane too: no automatic start beside it (review 320 round 13)
+      if (resumed.some((a) => a.detail.startsWith("started")) || waitingRequest(readRollovers(deps.config.stateDir), lane.key, lane.pane)) continue;
       acts.push(...(await rolloverDue(deps, hooks, "lane", lane.key, lane.pane, lane.model ?? deps.config.defaultModel, lane.rolloverDue, stuckTop(lane), (due) => deps.registry.patch(lane.key, { rolloverDue: due }))));
       continue;
     }
@@ -446,7 +505,8 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
     const resumed = await readyResume(deps, hooks, lane.key, lane.pane);
     acts.push(...resumed);
     // the start just made holds the lane: no automatic start beside it in this sweep
-    if (!resumed.some((a) => a.detail.startsWith("started"))) acts.push(...(await rolloverDue(deps, hooks, "lane", lane.key, lane.pane, lane.model ?? deps.config.defaultModel, current.rolloverDue, stuckTop(current), (due) => deps.registry.patch(lane.key, { rolloverDue: due }))));
+    // a lead's request still waiting holds the lane too: no automatic start beside it (review 320 round 13)
+    if (!resumed.some((a) => a.detail.startsWith("started")) && !waitingRequest(readRollovers(deps.config.stateDir), lane.key, lane.pane)) acts.push(...(await rolloverDue(deps, hooks, "lane", lane.key, lane.pane, lane.model ?? deps.config.defaultModel, current.rolloverDue, stuckTop(current), (due) => deps.registry.patch(lane.key, { rolloverDue: due }))));
     const heard = lastHeard(current);
     const silentMin = Math.round((now - heard) / 60_000);
     if (silentMin >= deps.config.nudgeAfterMin && (current.lastNudgeAt ?? 0) < heard) {
