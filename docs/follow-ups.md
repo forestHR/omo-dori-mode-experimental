@@ -10,6 +10,12 @@ What would close it: a single per-lane record, written under the lock with a gen
 
 Until then a run that dies after repointing the lane, before it finishes, leaves the move to the next `dori handover --lane <key>` run, whether the lead starts it or an automatic rollover does.
 
+Design chosen after review round 17 of #320 (not started; the lead set it aside on 2026-11-04), plan `/tmp/tmp.6Nnl3yJr6R/plan-320-r17.md`:
+- One record per lane, `<stateDir>/handover/lanes/<key>.handover.json`, changed only by a transition under the lane lock; it folds in the lock owner, the waiting request, the ready-resume claim, the takeover files and the journal, and the rollover log stays history only.
+- Three numbers: `rev` (every write, compare-and-write), request id (`at` + `by`), and `epoch` (the fencing token, bumped only when ownership of the move changes), checked under the lock at the repoint and the commit row.
+- One executor: commands (lead run, ready mark, `--force`, a due auto) only write intent, and one `reconcile()` does every move, so the owner's four flows (one waiting request, start again on ready or idle, the first `--force` moves, never two moves) are checked in one place. Cutover is quiesced (one PR switches every writer and imports a waiting row once); liveness holds given that the lane eventually goes idle or ready and freshness keeps sweeping.
+- About 3 PRs: record + `reconcile()` + an exhaustive interleaving harness (safety checked before review); cutover of the writers; docs + herdr QA.
+
 ## Lane handover: an exception after the commit with --keep-old rolls the move back (#320)
 
 With `--keep-old`, the new session is told `HANDOVER_COMMITTED` before the post-commit steps (the note append, the owner report). If one of them throws, the run's exception repair uses `recover()`, which closes the new session while the old one is alive, as on main. A process that dies there is handled the same way by the next run. The lead accepted this as main's behaviour on 2026-11-04. The record above closes it: the committed phase makes recovery finish the move.

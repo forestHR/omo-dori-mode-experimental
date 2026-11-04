@@ -274,7 +274,7 @@ export const LEAD_PREFIX = "lead:";
 
 // a lead's approval names the signal it acts on (a STUCK rung, an intent-check finding, a measured threshold)
 // whole tokens only: "age" in "message" or 단 in 단계 is no signal (challenge, grok-4.7)
-const SIGNAL_WORD = /(?<![\w])(?:COMPACTION_STUCK|compaction did not complete|STUCK|rung ?4|INTENT_CHECK|VIOLATION|CONTRADICTION|GOAL_LOSS|ROLLOVER_DUE|SAME_FIX_3|fixated|context \d+ ?%|context after compaction \d+ ?k|compactions? \d+|\d+ compactions?|age \d+(?:\.\d+)? ?h)(?![\w])|막힘 ?4 ?단|맥락 (?:이상|단)|압축 \d+/i;
+const SIGNAL_WORD = /(?<![\w])(?:COMPACTION_STUCK|compaction did not complete|STUCK|rung ?4|INTENT_CHECK|VIOLATION|CONTRADICTION|GOAL_LOSS|ROLLOVER_DUE|SAME_FIX_3|fixated|context \d+(?:\.\d+)? ?%|context after compaction \d+ ?k|compactions? \d+|\d+ compactions?|age \d+(?:\.\d+)? ?h)(?![\w])|막힘 ?4 ?단|맥락 (?:이상|단)|압축 \d+/i;
 
 // the thresholds of one side, from handover.lane* or handover.lead*
 export const limitsFor = (who: Who, h: DoriConfig["handover"]): Limits =>
@@ -434,6 +434,27 @@ export const approvalProblem = (ref: string | undefined, card: (id: string) => Q
   const linked = OWNER_REF.exec(`owner ${r}`);
   const problem = linked ? ownerRefProblem(linked, owner) : `${r} is not a Discord message link`;
   return problem ? `${JSON.stringify(r)} is a link, but ${problem}` : undefined;
+};
+
+// A lead's approval names the signal behind the decision; the signal is measured, so it is read from the records instead of
+// typed (owner Q475: 17 of 81 refused handovers were the approval's wording, each typed again within a minute): the
+// lane's top stuck rung, the threshold freshness saw crossed in this session (ROLLOVER_DUE), or the last rollover
+// proposal for this session. The lead still decides and gives the reason; nothing measured, nothing filled.
+export const measuredSignal = (o: { readonly pane: string; readonly stuck?: { readonly metric: string; readonly n: number; readonly rung: number }; readonly due?: { readonly pane: string; readonly crossed: readonly string[] }; readonly proposal?: Extract<RolloverEntry, { kind: "proposal" }> }): string | undefined => {
+  if (o.stuck && o.stuck.rung >= 1) return `STUCK rung ${o.stuck.rung} on ${o.stuck.metric} (${o.stuck.n} failed attempts)`;
+  if (o.due?.pane === o.pane && o.due.crossed.length) return o.due.crossed.join(", ");
+  if (o.proposal?.pane === o.pane && o.proposal.crossed.length) return o.proposal.crossed.join(", ");
+  return undefined;
+};
+
+// The lead's approval with the measured signal added, when it gives a reason and names neither a signal nor the owner;
+// anything else (auto:, a card, a link, a typed signal) is left for approvalProblem as it was given.
+export const filledApproval = (ref: string | undefined, signal: string | undefined): string | undefined => {
+  const r = ref?.trim() ?? "";
+  if (!signal || !r.startsWith(LEAD_PREFIX)) return undefined;
+  const why = r.slice(LEAD_PREFIX.length).trim();
+  // a measured signal approvalProblem would not read as one fills nothing (it would turn a refusal into a confusing one)
+  return why.length < 3 || SIGNAL_WORD.test(why) || OWNER_REF.test(why) || !SIGNAL_WORD.test(signal) ? undefined : `${r}, ${signal} (measured)`;
 };
 
 // While a session is being replaced it must not talk to the owner: the new one may already answer. dori send, ask and

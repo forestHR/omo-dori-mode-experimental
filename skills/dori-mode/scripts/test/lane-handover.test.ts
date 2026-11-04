@@ -9,7 +9,7 @@ import { autoReadyLine, freshnessTick, pidAlive, resumeArgs } from "../src/fresh
 import { closeDueFrozen, readFrozen } from "../src/frozen.ts";
 import { ackHandover, manifestPath } from "../src/handover.ts";
 import { compactionStuckOn, type LaneFacts, laneHandover, type LaneHandoverDeps, type LaneHandoverOptions, markReady, missingFrom, pendingFile, readyFile, statusLine, trainingMark, waitingRequest } from "../src/lane-handover.ts";
-import { appendRollover, approvalProblem, AUTO_GRANT_MS, mintAutoGrant, takeAutoGrant, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, peerStuckLines, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
+import { appendRollover, approvalProblem, AUTO_GRANT_MS, filledApproval, measuredSignal, mintAutoGrant, takeAutoGrant, compactionScan, holdTyped, inboxMessages, compactionsIn, crossed, ownerRolloverText, peerStuckLines, quietReason, readRollovers, rolloverCause, rolloverStats, sessionSignals } from "../src/rollover.ts";
 import { stuckTop, stuckView } from "../src/explore.ts";
 import { recordFix } from "../src/same-fix.ts";
 import { QuestionStore } from "../src/messenger/discord-cards.ts";
@@ -2828,6 +2828,54 @@ test("review 320 round 3: a request that keeps coming back busy past readyMin is
   // Then
   expect(resumes).toHaveLength(4);
   expect(sent(w).filter((x) => x.startsWith("[DORI] demo: the handover you asked for") && x.includes("stayed busy"))).toHaveLength(1);
+});
+
+test("a lead's approval without a signal gets the measured one from the records: the stuck rung, the crossed threshold, the last proposal; nothing measured, nothing filled", () => {
+  // Given: 17 of 81 refusals were the approval's wording (no signal word 9), each typed again within a minute
+  const stuck = { metric: "dori review #318", n: 3, rung: 4 };
+  const due = { pane: OLD, at: "2026-10-11T16:00:00Z", crossed: ["context after compaction 310k >= 300k"] };
+  const proposal = { kind: "proposal" as const, who: "lane" as const, at: "2026-10-11T16:10:00Z", key: "demo", pane: OLD, signals: {}, crossed: ["compactions 3 >= 3"], blockers: "" };
+  // When / Then
+  expect(measuredSignal({ pane: OLD, stuck })).toBe("STUCK rung 4 on dori review #318 (3 failed attempts)");
+  expect(measuredSignal({ pane: OLD, due })).toBe("context after compaction 310k >= 300k");
+  expect(measuredSignal({ pane: OLD, proposal })).toBe("compactions 3 >= 3");
+  // a threshold or proposal of another session is not this one's
+  expect(measuredSignal({ pane: NEW, due, proposal })).toBeUndefined();
+  expect(filledApproval("lead:moving it to a fresh session", "compactions 3 >= 3")).toBe("lead:moving it to a fresh session, compactions 3 >= 3 (measured)");
+  // a typed signal, an owner citation, no reason, no lead: prefix: left as typed (approvalProblem judges it)
+  expect(filledApproval("lead:moving it, context 85%", "compactions 3 >= 3")).toBeUndefined();
+  expect(filledApproval("lead:as asked, owner 1567161005161840723", "compactions 3 >= 3")).toBeUndefined();
+  expect(filledApproval("lead:", "compactions 3 >= 3")).toBeUndefined();
+  expect(filledApproval("auto:handover.autoRolloverLanes", "compactions 3 >= 3")).toBeUndefined();
+  expect(filledApproval("lead:moving it to a fresh session", undefined)).toBeUndefined();
+  // freshness writes context with a decimal (QA lane qa-hsa: "context 4.5% >= 1%" was filled and then refused): it reads as a signal
+  expect(approvalProblem(filledApproval("lead:moving it to a fresh session", "context 4.5% >= 1%"), () => undefined, { on: false, key: "k" }, "demo", OLD, [], true)).toBeUndefined();
+  expect(filledApproval("lead:moving it to a fresh session", "something unmeasured")).toBeUndefined();
+});
+
+test("the lane handover fills a lead's approval from the lane's measured signal and logs it filled; with none measured it is refused as before; a hand-typed auto: stays refused", async () => {
+  // Given
+  const deps: LaneHandoverDeps = { ...(await setup()), reportOwner: async () => "msg-1" };
+  // When: nothing measured yet
+  const bare = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "lead:moving it to a fresh session", dryRun: true });
+  // the lane crossed a threshold in this pane
+  await deps.registry.patch("demo", { rolloverDue: { pane: OLD, at: "2026-10-11T16:00:00Z", crossed: ["context after compaction 310k >= 300k"] } });
+  const dry = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "lead:moving it to a fresh session", dryRun: true });
+  const real = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "lead:moving it to a fresh session" });
+  const borrowed = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "auto:handover.autoRolloverLanes" });
+  // Then
+  expect(bare.code).toBe(2);
+  expect(printed[0]).toContain("does not say the reason and the signal behind it");
+  // the dry run is held by the lane's chain only; its approval passed
+  expect(dry.code).toBe(2);
+  const filled = "lead:moving it to a fresh session, context after compaction 310k >= 300k (measured)";
+  expect(printed).toContain(`HANDOVER_APPROVAL_FILLED demo: ${JSON.stringify(filled)} (the signal read from the records)`);
+  expect(printed).toContain(`HANDOVER_APPROVAL_OK ${JSON.stringify(filled)}`);
+  // the real run (refused here for the chain) logs the approval as filled
+  expect(real.code).toBe(2);
+  expect(readRollovers(state.dir).findLast((e) => e.kind === "rollover")).toMatchObject({ approvedBy: filled, blocked: "work" });
+  expect(borrowed.code).toBe(2);
+  expect(printed.some((l) => l.startsWith("HANDOVER_REFUSED demo: a lane moves to a new session only with an approval: HANDOVER_APPROVAL"))).toBe(true);
 });
 
 test("review 320 round 5: a holder that repointed the lane and died before its commit is repaired, never read as moved", async () => {
