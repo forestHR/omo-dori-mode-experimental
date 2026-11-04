@@ -108,8 +108,8 @@ export const readUneyed = (file: string): { readonly answered: ReadonlySet<strin
 };
 
 // The eyes read receipt slack-watch.ts puts on an addressed message comes off once the Dori answers it, as on Discord.
-// The watcher's inbox rows say which messages got eyes (addressed) and where their answer goes (reply_thread); a post
-// there, or in a thread under the message itself, answers every earlier one of them; a post with no thread answers
+// The watcher's inbox rows say which messages got eyes (addressed, a bot's post never) and where their answer goes
+// (reply_thread); a post there, or in a thread under the message itself, answers every earlier one of them; a post with no thread answers
 // every earlier one in that channel that is not inside a thread (a DM, or a channel message answered in the channel
 // itself, as the owner asked OkDori to do: 2026-11-03 10:52 KST, the eyes stayed). reactions.remove with the bot
 // token only ever takes off the bot's own reaction, never a person's or another app's. Each removal is one attempt in
@@ -139,13 +139,13 @@ export const clearEyes = async (unreact: Unreact, files: { readonly inbox: strin
   const targets: string[] = [];
   for (const line of readFileSync(files.inbox, "utf8").split("\n")) {
     if (!line.includes('"scope":"slack"')) continue;
-    let row: { scope?: string; id?: string; channel_id?: string; thread_ts?: string | null; reply_thread?: string | null; addressed?: string | null };
+    let row: { scope?: string; id?: string; channel_id?: string; thread_ts?: string | null; reply_thread?: string | null; addressed?: string | null; author_kind?: string };
     try {
       row = JSON.parse(line);
     } catch {
       continue;
     }
-    if (row.scope !== "slack" || !row.addressed || !row.id || row.channel_id !== posted.channel || !(known ? known.has(row.id) : tsAfter(posted.ts, row.id))) continue;
+    if (row.scope !== "slack" || !row.addressed || row.author_kind === "bot" || !row.id || row.channel_id !== posted.channel || !(known ? known.has(row.id) : tsAfter(posted.ts, row.id))) continue;
     const answers = thread ? (row.reply_thread ?? null) === thread || row.id === thread : (row.reply_thread ?? null) === null || (row.thread_ts ?? null) === null;
     if (!answers) continue;
     if (!done.has(`${posted.channel}:${row.id}`) && !targets.includes(row.id)) targets.push(row.id);

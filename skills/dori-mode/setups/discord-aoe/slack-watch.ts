@@ -2,7 +2,8 @@
 // Slack watcher for a Dori with its own Slack app (a bot, never a member's account). Off unless DORI_SLACK_APP_TOKEN is
 // set. Socket Mode: no public port, one outgoing WebSocket. Each human message the bot can see becomes one inbox row
 // (scope "slack"); a DM, a mention of the bot or a reply in a thread the Dori posted in also prints one SLACK_MSG line for
-// the lead's monitor. Replies go out with dori send slack --to <channel> [--thread <ts>] under the bot's name.
+// the lead's monitor. Another bot's channel post is taken in only when it mentions the bot or holds one of the names,
+// and is never answered from here. Replies go out with dori send slack --to <channel> [--thread <ts>] under the bot's name.
 // --wait waits for the tokens instead of exiting; --set-tokens asks for them on the terminal and writes them to dori.env.
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -53,6 +54,8 @@ export type SlackEvent = {
   readonly channel_type?: string;
   readonly user?: string;
   readonly bot_id?: string;
+  readonly username?: string;
+  readonly bot_profile?: { readonly name?: string };
   readonly text?: string;
   readonly ts?: string;
   readonly thread_ts?: string;
@@ -61,8 +64,9 @@ export type SlackEvent = {
 export type Self = { readonly userId: string; readonly botId: string };
 export type Addressed = "dm" | "mention" | "own-thread" | "name" | null;
 
-// Subtypes that are a person writing. Edits, deletes, joins and bot posts are not taken in.
-const HUMAN_SUBTYPES: ReadonlySet<string | undefined> = new Set([undefined, "thread_broadcast", "file_share"]);
+// Subtypes that are someone writing. Edits, deletes and joins are not taken in. An app's post has bot_id, with a user
+// (chat.postMessage) or as subtype bot_message without one.
+const POST_SUBTYPES: ReadonlySet<string | undefined> = new Set([undefined, "thread_broadcast", "file_share", "bot_message"]);
 const SEEN_MAX = 2000;
 
 export type WatchDeps = {
@@ -154,9 +158,25 @@ export class SlackWatch {
     this.deps.note?.("done", channel, ts, attempt);
   }
 
+  private mentioned(ev: SlackEvent): boolean {
+    return ev.type === "app_mention" || (ev.text ?? "").includes(`<@${this.self.userId}>`);
+  }
+
+  private isDm(ev: SlackEvent): boolean {
+    return ev.channel_type === "im" || (ev.channel?.startsWith("D") ?? false);
+  }
+
+  // Another bot's post counts only for a mention or a name: not a DM, and not a reply in the Dori's own thread, which
+  // would let two bots keep each other awake.
+  private botAddressed(ev: SlackEvent): Addressed {
+    if (this.isDm(ev)) return null;
+    if (this.mentioned(ev)) return "mention";
+    return this.o.mention?.test(ev.text ?? "") ? "name" : null;
+  }
+
   async addressed(ev: SlackEvent): Promise<Addressed> {
-    if (ev.channel_type === "im" || ev.channel?.startsWith("D")) return "dm";
-    if (ev.type === "app_mention" || (ev.text ?? "").includes(`<@${this.self.userId}>`)) return "mention";
+    if (this.isDm(ev)) return "dm";
+    if (this.mentioned(ev)) return "mention";
     if (ev.thread_ts && (await this.deps.threads()).some((t) => t.channel === ev.channel && t.rootTs === ev.thread_ts)) return "own-thread";
     // "옥돌아 들리면 대답해봐" in a channel, no @: only reaches the app when it reads the whole channel (channels:history)
     if (this.o.mention?.test(ev.text ?? "")) return "name";
@@ -165,15 +185,20 @@ export class SlackWatch {
 
   async handle(ev: SlackEvent): Promise<Record<string, unknown> | null> {
     if (ev.type !== "message" && ev.type !== "app_mention") return null;
-    if (!ev.channel || !ev.ts || !ev.user || ev.bot_id || !HUMAN_SUBTYPES.has(ev.subtype) || ev.user === this.self.userId) return null;
+    if (!ev.channel || !ev.ts || !POST_SUBTYPES.has(ev.subtype) || ev.user === this.self.userId || ev.bot_id === this.self.botId) return null;
+    const bot = Boolean(ev.bot_id) || ev.subtype === "bot_message";
+    // A bot's row carries its bot id, never its user: an app posting with a person's token has that person as user, and
+    // every reader that knows the owner by id must not take the post for the owner's.
+    const authorId = bot ? ev.bot_id : ev.user;
+    if (!authorId || (bot && !this.botAddressed(ev))) return null;
     const key = `${ev.channel}:${ev.ts}`;
     if (this.seen.has(key)) return null;
     this.seen.add(key);
     if (this.seen.size > SEEN_MAX) this.seen.delete(this.seen.values().next().value ?? "");
-    const addressed = await this.addressed(ev);
+    const addressed = bot ? this.botAddressed(ev) : await this.addressed(ev);
     const files = (ev.files ?? []).map((f) => f.name ?? "file");
     const content = [ev.text ?? "", ...files.map((f) => `[file: ${f}]`)].filter(Boolean).join("\n");
-    const author = await this.name(ev.user);
+    const author = (ev.user ? await this.name(ev.user) : null) ?? ev.username ?? ev.bot_profile?.name ?? null;
     // where a reply goes: the thread the message is in; a channel message starts a thread under itself; a plain DM is
     // answered in the DM itself
     const replyThread = ev.thread_ts ?? (addressed === "dm" ? null : ev.ts);
@@ -184,18 +209,20 @@ export class SlackWatch {
       thread_ts: ev.thread_ts ?? null,
       reply_thread: replyThread,
       scope: "slack",
-      author_id: ev.user,
+      author_id: authorId,
       author_name: author,
-      author_kind: this.o.owner.includes(ev.user) ? "owner" : "member",
+      author_kind: bot ? "bot" : this.o.owner.includes(authorId) ? "owner" : "member",
       addressed,
       mentions_self: addressed === "mention" || addressed === "name",
       content,
     };
     // the eyes go on before the row is written, so dori send slack, which reads the rows, never clears a message whose
-    // eyes are still on their way (only a reactions.add past the deadline can, and that one is taken off again above)
-    if (addressed) await this.react(ev.channel, ev.ts);
+    // eyes are still on their way (only a reactions.add past the deadline can, and that one is taken off again above).
+    // A bot's post gets none: nobody waits on the receipt, and it would stay on a post the lead does not answer.
+    if (addressed && !bot) await this.react(ev.channel, ev.ts);
     this.deps.append(row);
-    if (addressed) this.deps.log(`SLACK_MSG ${ev.channel} ${replyThread ?? "-"} ${addressed} ${author ?? ev.user}${row.author_kind === "owner" ? " (owner)" : ""}: ${content.slice(0, 160).replace(/\n/g, " ")}`);
+    // one line whatever a bot chose as its name: a line break in it could otherwise pass for a SLACK_MSG of its own
+    if (addressed) this.deps.log(`SLACK_MSG ${ev.channel} ${replyThread ?? "-"} ${addressed} ${author ?? authorId}${row.author_kind === "owner" ? " (owner)" : bot ? " (bot)" : ""}: ${content.slice(0, 160)}`.replace(/\n/g, " "));
     return row;
   }
 }

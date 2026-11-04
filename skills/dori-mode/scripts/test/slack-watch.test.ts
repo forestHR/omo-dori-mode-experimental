@@ -7,6 +7,7 @@ import { missingTokens, runSocket, slackWatchOptions, startWatch, writeEnvValues
 import { MessengerError } from "../src/messenger/http.ts";
 import { clearEyes, readUneyed } from "../src/messenger/slack.ts";
 import { run } from "../src/run.ts";
+import { ownerMessages } from "../src/state-backup.ts";
 
 const WATCH = join(import.meta.dir, "..", "..", "setups", "discord-aoe", "slack-watch.ts");
 const CLI = join(import.meta.dir, "..", "src", "cli.ts");
@@ -166,7 +167,7 @@ test("a DM to the bot is acked, becomes one inbox row and one SLACK_MSG line, an
   expect(slack.calls.filter((c) => c.method === "chat.postMessage")).toEqual([{ method: "chat.postMessage", auth: `Bearer ${BOT}`, body: { channel: "C1", text: "네, 확인할게요", thread_ts: "1700000000.000200" } }]);
 });
 
-test("a mention seen twice and retried is one row; bot, own, edited and unaddressed messages do not wake the lead; a reply in the Dori's own thread does", async () => {
+test("a mention seen twice and retried is one row; an unaddressed bot's, own, edited and unaddressed messages do not wake the lead; a reply in the Dori's own thread does", async () => {
   // Given a thread the Dori posted in (recorded by dori send slack)
   const slack = fakeSlack();
   const w = await watcher(slack, [{ channel: "C1", rootTs: "1700000000.000500", seenTs: "1700000000.000500" }]);
@@ -178,7 +179,7 @@ test("a mention seen twice and retried is one row; bot, own, edited and unaddres
   slack.event({ type: "message", channel: "C1", user: "UGUEST", text: "다른 사람끼리 수다", ts: "1700000000.000310" });
   slack.event({ type: "message", subtype: "bot_message", bot_id: "BX", channel: "C1", text: "bot", ts: "1700000000.000320" });
   slack.event({ type: "message", channel: "C1", user: "UBOT", bot_id: "BBOT", text: "my own reply", ts: "1700000000.000330" });
-  slack.event({ type: "message", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "<@UBOT> ping from another app", ts: "1700000000.000335" });
+  slack.event({ type: "message", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "ping from another app", ts: "1700000000.000335" });
   slack.event({ type: "message", subtype: "message_changed", channel: "C1", ts: "1700000000.000340" });
   slack.event({ type: "message", channel: "C1", user: "UGUEST", text: "태그 없이 스레드 답", ts: "1700000000.000600", thread_ts: "1700000000.000500" });
   await slack.until("the own-thread SLACK_MSG", () => w.msgs().length === 2);
@@ -194,14 +195,13 @@ test("a mention seen twice and retried is one row; bot, own, edited and unaddres
   expect(slack.calls.filter((c) => c.method === "reactions.add").map((c) => c.body.timestamp)).toEqual(["1700000000.000300", "1700000000.000600"]);
 });
 
-test("a channel message that calls the Dori by name (DORI_SLACK_MENTION) wakes the lead as name and gets eyes; other people's talk and bots' posts with the name do not", async () => {
+test("a channel message that calls the Dori by name (DORI_SLACK_MENTION) wakes the lead as name and gets eyes; other people's talk does not", async () => {
   // Given okdori's names, as the owner wrote at 00:19 KST without an @
   const slack = fakeSlack();
   const w = await watcher(slack, [], 30_000, { DORI_SLACK_MENTION: "옥돌|옥도리|okdori" });
   // When
   slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UOWNER", text: "옥돌아 들리면 대답해봐", ts: "1700000000.000800" });
   slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UGUEST", text: "점심 뭐 먹지", ts: "1700000000.000810" });
-  slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "okdori status ping", ts: "1700000000.000820" });
   slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UGUEST", text: "OkDori, 자료 있어?", ts: "1700000000.000830" });
   await slack.until("two name SLACK_MSG lines", () => w.msgs().length === 2);
   // Then
@@ -480,6 +480,70 @@ test("more than 2,000 answered messages are each asked about once, never again",
   expect([first.code, second.code]).toEqual([0, 0]);
   expect(unreacted(slack).length).toBe(2001);
 }, 30_000);
+
+test("another bot's channel post that holds a name or mentions the bot is one row and one SLACK_MSG, as a bot and never the owner, with no eyes and no answer", async () => {
+  // Given the owner's words in the names, and a thread the Dori posted in
+  const slack = fakeSlack();
+  const w = await watcher(slack, [{ channel: "C1", rootTs: "1700000000.000500", seenTs: "1700000000.000500" }], 30_000, { DORI_SLACK_MENTION: "옥돌|혜린" });
+  const mention = { channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "<@UBOT> 확인 부탁", ts: "1700000000.000130" };
+  // When
+  slack.event({ type: "message", channel_type: "channel", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "혜린 학생, 정리 잘 해 주셨네요", ts: "1700000000.000100" });
+  slack.event({ type: "message", subtype: "bot_message", channel: "C1", bot_id: "BX", username: "ci-bot", text: "혜린 빌드 끝", ts: "1700000000.000110" });
+  slack.event({ type: "message", subtype: "bot_message", channel: "C1", bot_id: "BY", bot_profile: { name: "github" }, text: "옥돌 PR 열림", ts: "1700000000.000120" });
+  slack.event({ type: "app_mention", ...mention });
+  slack.event({ type: "message", channel_type: "channel", ...mention });
+  slack.event({ type: "message", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "옥돌 여기도 봐", ts: "1700000000.000510", thread_ts: "1700000000.000500" });
+  // an app that posts with the owner's own user token: the user field is the owner's, the post is still a bot's
+  slack.event({ type: "message", channel: "C1", user: "UOWNER", bot_id: "BOWNERAPP", text: "혜린 대신 올린 글", ts: "1700000000.000140" });
+  await slack.until("the six bot SLACK_MSG lines", () => w.msgs().length === 6);
+  const answered = await send(w, slack, ["--to", "C1", "--thread", "1700000000.000100", "--text", "답"]);
+  // Then
+  expect(w.rows().map((r) => [r.id, r.author_id, r.author_name, r.author_kind, r.addressed, r.mentions_self, r.reply_thread])).toEqual([
+    ["1700000000.000100", "BOTHER", "name-UOTHERAPP", "bot", "name", true, "1700000000.000100"],
+    ["1700000000.000110", "BX", "ci-bot", "bot", "name", true, "1700000000.000110"],
+    ["1700000000.000120", "BY", "github", "bot", "name", true, "1700000000.000120"],
+    ["1700000000.000130", "BOTHER", "name-UOTHERAPP", "bot", "mention", true, "1700000000.000130"],
+    ["1700000000.000510", "BOTHER", "name-UOTHERAPP", "bot", "name", true, "1700000000.000500"],
+    ["1700000000.000140", "BOWNERAPP", "name-UOWNER", "bot", "name", true, "1700000000.000140"],
+  ]);
+  expect(w.msgs()).toEqual([
+    "SLACK_MSG C1 1700000000.000100 name name-UOTHERAPP (bot): 혜린 학생, 정리 잘 해 주셨네요",
+    "SLACK_MSG C1 1700000000.000110 name ci-bot (bot): 혜린 빌드 끝",
+    "SLACK_MSG C1 1700000000.000120 name github (bot): 옥돌 PR 열림",
+    "SLACK_MSG C1 1700000000.000130 mention name-UOTHERAPP (bot): <@UBOT> 확인 부탁",
+    "SLACK_MSG C1 1700000000.000500 name name-UOTHERAPP (bot): 옥돌 여기도 봐",
+    "SLACK_MSG C1 1700000000.000140 name name-UOWNER (bot): 혜린 대신 올린 글",
+  ]);
+  expect(ownerMessages(readFileSync(w.o.inbox, "utf8"), ["UOWNER"], 1)).toEqual([]);
+  // no eyes went on a bot's post, nothing was posted but the lead's own answer, and that answer asks to take nothing off
+  expect(slack.calls.filter((c) => c.method === "reactions.add")).toEqual([]);
+  expect(slack.calls.filter((c) => c.method === "chat.postMessage").map((c) => c.body.text)).toEqual(["답"]);
+  expect(answered.code).toBe(0);
+  expect(unreacted(slack)).toEqual([]);
+});
+
+test("a bot's post is dropped when it holds no name or mention, is the Dori's own, is a DM, only replies in the Dori's thread, or is no post at all", async () => {
+  // Given the same names and thread
+  const slack = fakeSlack();
+  const w = await watcher(slack, [{ channel: "C1", rootTs: "1700000000.000500", seenTs: "1700000000.000500" }], 30_000, { DORI_SLACK_MENTION: "옥돌|혜린" });
+  // When
+  slack.event({ type: "message", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "배포 끝", ts: "1700000000.000100" });
+  slack.event({ type: "message", subtype: "bot_message", channel: "C1", bot_id: "BX", text: "빌드 끝", ts: "1700000000.000110" });
+  slack.event({ type: "message", channel: "C1", user: "UBOT", text: "혜린 옥돌 내 글", ts: "1700000000.000120" });
+  slack.event({ type: "message", channel: "C1", user: "UBOT", bot_id: "BBOT", text: "<@UBOT> 혜린 내 글", ts: "1700000000.000130" });
+  slack.event({ type: "message", subtype: "bot_message", channel: "C1", bot_id: "BBOT", text: "혜린 내 글, user 없이", ts: "1700000000.000140" });
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOTHERAPP", bot_id: "BOTHER", text: "혜린 DM", ts: "1700000000.000150" });
+  slack.event({ type: "message", subtype: "bot_message", channel: "D2", bot_id: "BX", text: "<@UBOT> DM", ts: "1700000000.000160" });
+  slack.event({ type: "message", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "스레드 답", ts: "1700000000.000510", thread_ts: "1700000000.000500" });
+  slack.event({ type: "message", subtype: "message_changed", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "혜린 고침", ts: "1700000000.000170" });
+  slack.event({ type: "message", subtype: "bot_message", channel: "C1", text: "혜린 누가 쓴 글인지 모름", ts: "1700000000.000180" });
+  // events are handled in order, so this last person's DM means every post above has been decided
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "끝", ts: "1700000000.000190" });
+  await slack.until("the closing DM", () => w.msgs().length >= 1);
+  // Then
+  expect(w.rows().map((r) => r.id)).toEqual(["1700000000.000190"]);
+  expect(w.msgs()).toEqual(["SLACK_MSG D1 - dm name-UOWNER (owner): 끝"]);
+});
 
 test("a disconnect from Slack opens a fresh connection and messages keep arriving", async () => {
   // Given
