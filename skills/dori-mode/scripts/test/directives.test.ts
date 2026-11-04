@@ -6,7 +6,7 @@ import { laneGapSplit, applyDirectives, auditOrReport, auditStampPath, checkMean
 import { loadConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
-import { APPLIED_HEADING, appliesWhy, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
+import { APPLIED_HEADING, appliesUnder, appliesWhy, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
 import type { Runner } from "../src/run.ts";
 import { DirectiveMissingError, eightSteps, launchLane, renderBrief, uiSteps } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -671,6 +671,24 @@ test("launch: a model that fails, answers without JSON or names nothing leaves t
     expect(r.draft.directives?.applied).toContain("pair-route");
     expect(r.lines.some((l) => l.startsWith("LAUNCH_DIRECTIVE_PICK_FALLBACK"))).toBe(true);
   }
+});
+
+test("the model reads the whole brief, and a directive it never saw is decided by its scope rule, so apply still delivers it", async () => {
+  const far = `${fields}\n${"채움 ".repeat(5000)}\n맨 끝 요구`;
+  const { deps, asked } = withModel(await ledgerDeps(), { code: 0, out: '{"picked":[{"id":"transcribe-yoodori","why":"w"}]}' });
+  const r = await renderBrief(deps, input(await write("far.md", far)));
+  expect(asked[0]!.join(" ")).toContain("맨 끝 요구");
+  expect(r.draft.directives?.pick?.evaluated).toContain("pair-route");
+  const ledger = loadLedger(deps.config);
+  const pick = r.draft.directives!.pick!;
+  const ctx = scopeContext(pickBrief, ledger, { repo: "some-repo" });
+  const route = ledger.entries.find((e) => e.id === "pair-route")!;
+  // seen and left out; a later entry with the same scope has not been seen
+  expect(appliesUnder(route, ctx, pick)).toBeUndefined();
+  expect(appliesUnder({ ...route, id: "entered-later" }, ctx, pick)).toStartWith("keyword ");
+  // a brief that cannot go through an argument leaves it to the rules
+  const huge = await renderBrief(deps, input(await write("huge.md", `${fields}\n${"채움 ".repeat(40000)}`)));
+  expect(huge.draft.directives?.pickFallback).toContain("too long");
 });
 
 test("directive-audit against a pick: what the model chose and the brief lacks is a gap, what it left out is listed and not counted", async () => {

@@ -433,7 +433,7 @@ export const appliesWhy = (e: Directive, ctx: ScopeContext): string | undefined 
 
 // --- the small model that reads a brief at launch (owner Q482): every-lane entries, blocks and require entries stay fixed ---
 
-export type DirectivePick = { readonly model: string; readonly picked: readonly { readonly id: string; readonly why: string }[]; readonly runs?: { readonly asked: number; readonly answered: number } };
+export type DirectivePick = { readonly model: string; readonly picked: readonly { readonly id: string; readonly why: string }[]; readonly runs?: { readonly asked: number; readonly answered: number }; readonly evaluated?: readonly string[] };
 
 // The model chooses differently between runs (agreement 0.51), so launch asks it this many times at once and takes all it named.
 export const PICK_RUNS = 3;
@@ -452,7 +452,7 @@ export const PICK_SYSTEM = "레인 브리프를 읽고 소유자의 상시 지�
 export const pickPrompt = (brief: string, candidates: readonly Directive[]): string => {
   const list = candidates.map((e) => `- ${e.id}: ${e.by === "owner" && e.words ? (e.prompt ?? e.words) : (e.rule ?? "")}`).join("\n");
   // ulw in a prompt makes omo answer with its mode banner instead of the JSON
-  const text = leadText(brief).replace(/\bulw[- ]?(?:plan|loop|explore)?\b/g, "집중").slice(0, 7000);
+  const text = leadText(brief).replace(/\bulw[- ]?(?:plan|loop|explore)?\b/g, "집중");
   return `[지침 목록]\n${list}\n\n[브리프]\n${text}\n\n형식: {"picked":[{"id":"...","why":"한 줄"}]}`;
 };
 
@@ -477,6 +477,8 @@ export const parsePick = (reply: string, candidates: readonly Directive[]): Dire
 export const appliesUnder = (e: Directive, ctx: ScopeContext, pick?: DirectivePick): string | undefined => {
   if (!pick || e.mode !== "inject" || e.block || e.scope.all) return appliesWhy(e, ctx);
   if (repoEntry(e, ctx)) return `repo ${ctx.repo}`;
+  // an entry the model never saw (it entered the ledger later) is not one it left out: its scope rule decides
+  if (pick.evaluated && !pick.evaluated.includes(e.id)) return appliesWhy(e, ctx);
   const p = pick.picked.find((x) => x.id === e.id);
   return p ? `model ${pick.model}: ${p.why}` : undefined;
 };

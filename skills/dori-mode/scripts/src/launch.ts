@@ -490,10 +490,12 @@ const pickDirectives = async (deps: FlowDeps, raw: string, ledger: Ledger, ctx: 
   if (!model) return {};
   const candidates = pickCandidates(ledger, ctx);
   const prompt = pickPrompt(raw, candidates);
+  // an argument this long does not reach the model at all
+  if (Buffer.byteLength(prompt) > 120_000) return { pickFallback: "the brief is too long to pass to the model" };
   const runs = await Promise.all(Array.from({ length: PICK_RUNS }, () => deps.run(fill(deps.config.reviewers.command, { model, system: PICK_SYSTEM, prompt }), { timeoutMs: 60_000 })));
   const lists = runs.flatMap((r) => (r.code === 0 ? [parsePick(r.out, candidates)] : [])).filter((l) => l !== undefined);
   if (!lists.length) return { pickFallback: `${model} gave no usable list in ${PICK_RUNS} runs (exit ${runs.map((r) => r.code).join(", ")})` };
-  return { pick: { model, picked: mergePicks(lists), runs: { asked: PICK_RUNS, answered: lists.length } } };
+  return { pick: { model, picked: mergePicks(lists), runs: { asked: PICK_RUNS, answered: lists.length }, evaluated: candidates.map((e) => e.id) } };
 };
 
 export type Rendered = {
