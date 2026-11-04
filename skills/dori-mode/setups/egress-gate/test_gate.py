@@ -59,6 +59,7 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.shared_drive = False
         self.foreign_files = set()  # Drive ids the fake answers as not the owner's
         self.file_mime = "application/vnd.google-apps.document"
+        self.file_published = False
         self.file_parents = []
         self.move_lands = True  # a Drive move PATCH changes file_parents
         self.write_delay = 0  # seconds the fake Google takes before it answers a write
@@ -276,6 +277,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                     data = self.event
                 elif path.endswith("/permissions"):
                     data = {"permissions": [{"type": "anyone" if self.file_public else "user", "role": "reader"}]}
+                    if self.file_published and "includePermissionsForView=published" in target:
+                        data["permissions"].append({"type": "anyone", "role": "reader", "view": "published"})
                 elif "/permissions/" in path:
                     data = {"type": "user", "emailAddress": "other@example.com"}
                 elif "/drive/v3/files/" in path:
@@ -285,6 +288,8 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                         data["driveId"] = "shared"
                 elif path.startswith("/v1/documents/"):
                     data = {"revisionId": "revision", "title": "Before"}
+                elif path.startswith("/v1/forms/"):
+                    data = {"formId": "f", "info": {"title": "Seminar"}, "items": [{"itemId": "qr", "title": "QR"}]}
                 elif path.startswith("/tasks/v1/"):
                     data = {"id": "t", "title": "Before", "notes": "old"}
                 else:
@@ -1047,6 +1052,88 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         status, _ = await self.request(path="/docs.googleapis.com/v1/documents/d:batchUpdate",
                                        data={"requests": [{"insertInlineImage": {"uri": "https://outside.example/i"}}]})
         self.assertEqual(status, 202)
+        self.assertFalse(self.writes())
+
+    def forms_seen(self):
+        return [r for r in self.seen if urlsplit(r[1]).path.startswith("/v1/forms")]
+
+    async def test_an_own_form_reads_and_edits_without_a_card_even_open_to_responders(self):
+        self.approval()
+        self.file_mime, self.file_published = gate.FORM_MIME, True
+        status, body = await self.request("GET", "/forms.googleapis.com/v1/forms/f", proof=False,
+                                          headers={"authorization": "Bearer caller-secret"})
+        self.assertEqual((status, json.loads(body)["formId"]), (200, "f"))
+        self.assertEqual(self.seen[-1][2]["authorization"], "Bearer access-secret")
+        self.assertFalse(self.changes())
+        edits = {"requests": [{"deleteItem": {"location": {"index": 0}}},
+                              {"updateFormInfo": {"info": {"description": ""}, "updateMask": "description"}}]}
+        status, _ = await self.request(path="/forms.googleapis.com/v1/forms/f:batchUpdate", data=edits)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.seen[-1][:2], ("POST", "/v1/forms/f:batchUpdate"))
+        self.assertFalse(self.service.pending())
+        self.assertFalse([m for m in self.cards.values() if "승인 필요" in m])
+        row = self.changes()[0]
+        self.assertEqual((row["api"], row["op"], row["owner_message"], row["restorable"]),
+                         ("forms", "forms.batchUpdate", "https://discord.com/channels/10/20/100", False))
+        self.assertEqual(row["resource"], {"id": "f", "title": "Seminar", "name": "Changed",
+                                           "link": "https://docs.google.com/forms/d/f/edit"})
+        self.assertEqual(json.loads((self.state / row["snapshot"]).read_text())["items"][0]["itemId"], "qr")
+
+    async def test_a_form_edit_needs_the_owners_message(self):
+        self.file_mime = gate.FORM_MIME
+        status, _ = await self.request(path="/forms.googleapis.com/v1/forms/f:batchUpdate", proof=False,
+                                       data={"requests": [{"deleteItem": {"location": {"index": 0}}}]})
+        self.assertEqual(status, 403)
+        self.assertFalse(self.forms_seen())
+        self.assertFalse(self.changes())
+
+    async def test_a_form_that_is_not_the_owners_alone_is_refused_read_and_write_without_a_card(self):
+        self.approval()
+        edit = {"requests": [{"deleteItem": {"location": {"index": 0}}}]}
+        for attribute, value, reason in [("file_owned", False, "drive-not-owned"), ("shared_drive", True, "drive-not-owned"),
+                                         ("file_public", True, "public-drive-target"), ("file_mime", "text/plain", "not-a-form")]:
+            before = getattr(self, attribute)
+            self.file_mime = gate.FORM_MIME
+            setattr(self, attribute, value)
+            for method, route, data in [("GET", "", None), ("POST", ":batchUpdate", edit)]:
+                with self.subTest(attribute=attribute, method=method):
+                    status, body = await self.request(method, "/forms.googleapis.com/v1/forms/f" + route, data=data)
+                    self.assertEqual((status, json.loads(body)["error"]), (403, reason))
+            setattr(self, attribute, before)
+        self.assertFalse(self.forms_seen())
+        self.assertFalse(self.service.pending())
+
+    async def test_form_responses_sharing_publishing_and_other_routes_are_refused_before_google(self):
+        self.approval()
+        self.file_mime = gate.FORM_MIME
+        for method, route in [("GET", "v1/forms/f/responses"), ("GET", "v1/forms/f/responses/r"),
+                              ("GET", "v1/forms/f%2Fresponses"), ("DELETE", "v1/forms/f/responses/r"),
+                              ("GET", "v1/forms/f/watches"), ("POST", "v1/forms/f/watches"),
+                              ("POST", "v1/forms/f:setPublishSettings"), ("POST", "v1/forms"), ("GET", "v1/forms"),
+                              ("DELETE", "v1/forms/f"), ("PATCH", "v1/forms/f"), ("POST", "v1/forms/f"),
+                              ("HEAD", "v1/forms/f"), ("GET", "v1/forms/f:batchUpdate"),
+                              ("PUT", "v1/forms/f:batchUpdate"), ("GET", "v1beta/forms/f")]:
+            status, body = await self.request(method, "/forms.googleapis.com/" + route)
+            self.assertEqual(status, 403, (method, route))
+            if method != "HEAD":
+                self.assertEqual(json.loads(body)["error"], "forms-route-not-allowed", (method, route))
+        for requests in [[{"setPublishSettings": {}}], [{"deleteItem": {}, "share": {}}], ["deleteItem"], {"deleteItem": {}}, None]:
+            status, body = await self.request(path="/forms.googleapis.com/v1/forms/f:batchUpdate", data={"requests": requests})
+            self.assertEqual((status, json.loads(body)["error"]), (403, "forms-request-not-allowed"), requests)
+        self.assertFalse(self.forms_seen())
+        self.assertFalse(self.writes())
+        self.assertFalse(self.service.pending())
+
+    async def test_a_form_write_over_a_configured_limit_cards_the_form_not_its_option_text(self):
+        self.approval()
+        self.file_mime = gate.FORM_MIME
+        self.config["limits"] = {"writes_per_owner_message": 0}
+        status, _ = await self.request(path="/forms.googleapis.com/v1/forms/f:batchUpdate", data={"requests": [
+            {"createItem": {"item": {"questionItem": {"question": {"choiceQuestion": {"options": [{"value": "옵션글"}]}}}}}}]})
+        self.assertEqual(status, 202)
+        card = [m for m in self.cards.values() if "승인 필요" in m][0]
+        self.assertIn("Seminar", card)
+        self.assertNotIn("옵션글", card)
         self.assertFalse(self.writes())
 
     async def test_docs_owned_update_records_revision_and_refuses_restore(self):

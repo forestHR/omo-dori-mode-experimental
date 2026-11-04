@@ -34,8 +34,13 @@ BODY_CAP = 25 * 1024 * 1024
 HEADER_CAP = 65536
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
        "te", "trailer", "transfer-encoding", "upgrade"}
-GOOGLE_HOSTS = {"www.googleapis.com", "gmail.googleapis.com", "docs.googleapis.com",
-                "tasks.googleapis.com", "sheets.googleapis.com", "people.googleapis.com"}
+GOOGLE_HOSTS = {"www.googleapis.com", "gmail.googleapis.com", "docs.googleapis.com", "tasks.googleapis.com",
+                "sheets.googleapis.com", "people.googleapis.com", "forms.googleapis.com"}
+# Forms: read and edit one of the owner's own forms. Everything else stays shut: responses are other people's data
+# nothing here needs, and setPublishSettings, watches and forms.create are not form edits.
+FORMS_ROUTE = re.compile(r"v1/forms/([A-Za-z0-9_-]{1,200})(:batchUpdate)?")
+FORMS_EDITS = {"updateFormInfo", "updateSettings", "createItem", "moveItem", "deleteItem", "updateItem"}
+FORM_MIME = "application/vnd.google-apps.form"
 # Contacts are read-only: name-to-address lookup for a recipient, never a contact write or directory listing.
 PEOPLE_READS = re.compile(r"v1/(?:people:(?:searchContacts|batchGet)|otherContacts(?::search)?"
                           r"|people/me/connections|people/[A-Za-z0-9_-]+)")
@@ -554,7 +559,7 @@ async def reply(writer: asyncio.StreamWriter, status: int, body: bytes, headers=
 DRIVE_ROLES = {"reader": "보기", "commenter": "댓글", "writer": "편집", "fileOrganizer": "정리",
               "organizer": "관리", "owner": "소유권"}
 CARD_KIND = {"calendar": "일정 초대", "drive": "Drive 공유", "docs": "문서 공유", "gmail": "메일",
-             "tasks": "할 일", "obsidian": "노트"}
+             "tasks": "할 일", "obsidian": "노트", "forms": "폼"}
 # A card thread's one leading mark (owner Q474, 2026-11-03): 🔔 a card waits on the owner; decided, ✅ done, ⛔ cancelled,
 # 💤 folded without an answer, ❗ failed. THREAD_STATUSES are the older word prefixes, still read so old names convert.
 THREAD_MARKS = ("✅", "⛔", "💤", "❗")
@@ -1159,6 +1164,13 @@ class Gate:
             raise Refused(found[0])
         return data
 
+    async def form_owned(self, form_id: str) -> None:
+        # A form open to responders stays editable: Drive lists that access (view=published) only when
+        # includePermissionsForView asks for it, so drive_owned does not count it as public. Refused, not a card:
+        # someone else's form, a shared drive's or one anyone can edit is not opened to the Dori at all.
+        if (await self.drive_owned(form_id)).get("mimeType") != FORM_MIME:
+            raise Refused("not-a-form")
+
     def metadata(self, headers: dict, body: bytes, upload: bool) -> dict:
         content_type = headers.get("content-type", "application/json")
         if upload and content_type.lower().startswith("multipart/related"):
@@ -1291,6 +1303,18 @@ class Gate:
                 snapshot = await self.google_json("/docs.googleapis.com/v1/documents/" +
                                                   quote(match[1], safe="") + "?fields=revisionId,title")
             return "docs", "documents.batchUpdate" if match[1] else "documents.create", snapshot
+        if host == "forms.googleapis.com":
+            match = FORMS_ROUTE.fullmatch(route[1:])
+            if method != "POST" or not match or not match[2]:
+                raise Refused("write-not-allowed")
+            edits = data.get("requests")
+            if not isinstance(edits, list) or not all(isinstance(e, dict) and len(e) == 1 and FORMS_EDITS.issuperset(e)
+                                                      for e in edits):
+                raise Refused("forms-request-not-allowed")
+            await self.form_owned(match[1])
+            # The whole form before the edit: a deleted item has no other way back (not a one-call restore).
+            form = await self.google_json("/forms.googleapis.com/v1/forms/" + match[1])
+            return "forms", "forms.batchUpdate", {**form, "title": form.get("info", {}).get("title", "")}
         raise Refused("write-not-allowed")
 
     def record(self, uid, api, op, method, path, query, status, response, proof, snapshot, approved_by=None,
@@ -1311,6 +1335,9 @@ class Gate:
                 if not link and api == "docs" and data.get("documentId"):
                     resource["id"] = data["documentId"]
                     link = "https://docs.google.com/document/d/" + data["documentId"]
+                if api == "forms" and snapshot:
+                    resource.update(id=snapshot.get("formId"), title=snapshot["title"])
+                    link = "https://docs.google.com/forms/d/" + str(snapshot.get("formId")) + "/edit"
                 if link:
                     resource["link"] = link
         restorable = (snapshot is not None and
@@ -1791,8 +1818,9 @@ class Gate:
                 for item in value:
                     destination(item)
 
-        destination(data)
-        destination(snapshot)
+        if api != "forms":  # a form's option values and image uris are not recipients
+            destination(data)
+            destination(snapshot)
         fallback = snapshot or {}
         title = " ".join(str(data.get("title") or data.get("summary") or data.get("name") or
                              fallback.get("title") or fallback.get("summary") or fallback.get("name") or "").splitlines())
@@ -2815,6 +2843,12 @@ class Gate:
                     raise Refused("google-host-denied")
                 if host == "people.googleapis.com" and not (method == "GET" and PEOPLE_READS.fullmatch(route)):
                     raise Refused("contacts-read-only")
+                if host == "forms.googleapis.com":
+                    form = FORMS_ROUTE.fullmatch(route)
+                    if not form or (method, bool(form[2])) not in {("GET", False), ("POST", True)}:
+                        raise Refused("forms-route-not-allowed")
+                    if method == "GET":
+                        await self.form_owned(form[1])
                 query = [(k, v) for k, v in query if k.lower() not in {"access_token", "key"}]
                 if method in READS:
                     outgoing = google_headers(headers, await self.access_token())

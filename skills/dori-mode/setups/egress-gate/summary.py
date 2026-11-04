@@ -24,7 +24,7 @@ def window_records(path: Path, cutoff: dt.datetime) -> list:
 
 
 NAMES = {"calendar": "일정", "tasks": "할 일", "drive": "드라이브",
-         "docs": "문서", "obsidian": "노트", "sheets": "시트"}
+         "docs": "문서", "obsidian": "노트", "sheets": "시트", "forms": "폼"}
 TEST_TITLE = re.compile(r"게이트\s*시험|gate[ -]?test", re.IGNORECASE)
 SHOWN_TITLES = 3
 # A refused write is a write request the gate turned down. CONNECT tunnels (a Dori tool calling a host off
