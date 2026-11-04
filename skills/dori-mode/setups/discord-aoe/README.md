@@ -105,7 +105,8 @@ One `KEY=VALUE` per line, `#` comments, absolute paths (neither systemd nor the 
 | `DORI_KAKAO_OWNER_ID`, `DORI_KAKAO_MENTION`, `DORI_KAKAO_STATE_DIR`, `DORI_KAKAO_INBOX`, `DORI_KAKAO_CLI`, `DORI_KAKAO_POLL_MS`, `DORI_KAKAO_SWEEP_MS`, `DORI_KAKAO_DISCOVER_MS` | no | no | Tune the KakaoTalk watcher ([table](#kakaotalk)) |
 | `DORI_KAKAO_ACCOUNT_FILE`, `DORI_KAKAO_DEVICE_TYPE` | no | the file it names is | Login only (`kakao-login.ts`); the password lives in that separate 0600 file, never in `dori.env` |
 | `DORI_USAGE_DIR`, `DORI_USAGE_SNAP_DIR` | no | no | Usage screenshot ([below](#usage-screenshot)) |
-| `DORI_SLACK_TOKEN`, `DORI_SLACK_COOKIE`, `DORI_TELEGRAM_TOKEN` | no | yes | Other messengers: `dori send slack\|telegram`, `dori presence`, `dori inbound slack` |
+| `DORI_SLACK_TOKEN`, `DORI_SLACK_COOKIE`, `DORI_TELEGRAM_TOKEN` | no | yes | Other messengers: `dori send slack\|telegram`, `dori presence`, `dori inbound slack\|telegram` |
+| `DORI_TELEGRAM_OWNER_ID`, `DORI_TELEGRAM_GROUP_ID`, `DORI_TELEGRAM_TOPIC_ID` | no | yes | `dori inbound telegram`: the owner whose messages pass (required there), and the optional group and topic |
 | `DORI_SLACK_APP_TOKEN` | no | yes | Turns the Slack watcher on (`slack-watch.ts`; an `xapp-` app-level token with `connections:write`); it also needs `DORI_SLACK_TOKEN` to be the app's `xoxb-` bot token ([section](#slack-as-a-bot)) |
 | `DORI_SLACK_OWNER_ID`, `DORI_SLACK_MENTION`, `DORI_SLACK_API`, `DORI_SLACK_WAIT_MS` | no | no | The owner's Slack member ids (rows get `author_kind: "owner"`), the Dori's names as a case-insensitive regex (a message holding one wakes the lead as `name`), the Web API base (a test server; default `https://slack.com/api`, also used by `dori send slack`), the token re-read interval of `--wait` (default 30000) |
 | `PATH` | no | no | The units' PATH (zele, node for agent-messenger); overrides the unit default |
