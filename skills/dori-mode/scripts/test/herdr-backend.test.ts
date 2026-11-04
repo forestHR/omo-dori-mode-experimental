@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deadPaneTick, newDeadPaneState } from "../src/dead-panes.ts";
 import { closeAoeSession, herdrAgentArgv, isClosedLine, liveSessions, paneActivity, paneLife, sessionFor } from "../src/aoe.ts";
-import { openHerdrSession } from "../src/herdr.ts";
+import { interactiveShellInFront, openHerdrSession } from "../src/herdr.ts";
 import { leadAlive } from "../src/lead-down.ts";
 import { readScreen, submitToPane } from "../src/panes.ts";
 import { resolveSession, shellPidOf, topAgent } from "../src/session-id.ts";
@@ -174,6 +174,61 @@ test("upstream #66/#70 on herdr: an omo pane with a question open, and a bare-ag
   const blocked = await submitToPane(pane({ agent: "claude", agent_status: "blocked" }), bare.clock, bare.config, "w1:p2", "yes");
   expect((blocked as { reason: string }).reason).toStartWith("PANE_BLOCKED: the agent in w1:p2 waits on a confirmation");
   expect(sent(world)).toEqual([]);
+});
+
+// upstream dori-superagent #69 (https://github.com/sisyphuslabs/dori-superagent/pull/69): herdr keeps calling an agent
+// suspended with Ctrl+Z idle while its shell is in front, and that shell would run the text as a command
+test("upstream #69 on herdr: a bare-agent pane with a shell in front (sh -c included), an unreadable or empty foreground, or an agent in no running state gets nothing; an agent alone in front is typed into", async () => {
+  const bare = omo({ agentCommand: ["claude", "{prompt}"] });
+  const pane = (p: Record<string, unknown> = {}): Runner => async (argv, o) => (argv[2] === "get" ? { code: 0, out: JSON.stringify({ result: { pane: { pane_id: "w1:p2", agent: "claude", agent_status: "idle", ...p } } }), err: "" } : fakeRunner(world)(argv, o));
+  const submit = (p?: Record<string, unknown>) => submitToPane(pane(p), bare.clock, bare.config, "w1:p2", "rm -rf /tmp/x");
+  world.herdrFront = { "w1:p2": [{ name: "zsh", argv: ["-zsh"] }] };
+  expect(await submit()).toMatchObject({ status: "NOT_SUBMITTED", reason: "the agent in w1:p2 is not in front: a shell (zsh) is, after the agent exited or was suspended with Ctrl+Z, or as its child, and it could run the text; nothing was typed" });
+  world.herdrFront = { "w1:p2": [{ name: "claude", argv: ["claude"] }, { name: "bash", argv: ["bash", "-c", "while read -r l; do eval \"$l\"; done"] }] };
+  expect((await submit()).status).toBe("NOT_SUBMITTED");
+  world.herdrFront = { "w1:p2": [] };
+  expect(await submit()).toMatchObject({ status: "NOT_SUBMITTED", reason: "herdr pane process-info shows nothing readable in front of w1:p2, so a shell in front cannot be ruled out; nothing was typed" });
+  world.herdrFront = { "w1:p2": [{ name: "claude", argv: ["claude"] }, {}] };
+  expect((await submit()).status).toBe("NOT_SUBMITTED");
+  world.herdrFront = { "w1:p2": null };
+  expect(await submit()).toMatchObject({ status: "NOT_SUBMITTED", reason: "herdr pane process-info could not be read for w1:p2, so a shell in front cannot be ruled out; nothing was typed" });
+  world.herdrFront = { "w1:p2": [{ name: "claude", argv: ["claude"] }] };
+  expect(await submit({ agent_status: "unknown" })).toMatchObject({ status: "NOT_SUBMITTED", reason: "the agent in w1:p2 is in state unknown, not idle, working, blocked or done, so it may not be reading; nothing was typed" });
+  expect(sent(world)).toEqual([]);
+  expect(world.calls.filter((c) => c[2] === "send-keys")).toEqual([]);
+  await submit();
+  expect(sent(world)).toEqual(["rm -rf /tmp/x"]);
+});
+
+// upstream #69's table from its test/herdr.test.ts, and the cases reviews 1-3 of #347 and the dori challenge of its plan
+// raised. Upstream lets a shell running a command (-c, -lc, pwsh -Command, -File) through; here every shell in front
+// holds, since its command line proves nothing about who reads the input.
+test.each([
+  ["login shell", [{ name: "-bash", argv: ["-bash"] }], true],
+  ["interactive zsh by path, upper case", [{ name: "/bin/ZSH", argv: ["/bin/zsh", "-i"] }], true],
+  ["busybox sh applet", [{ name: "busybox", argv: ["busybox", "sh"] }], true],
+  ["shell entry without argv", [{ name: "fish" }], true],
+  ["bash --rcfile FILE", [{ name: "bash", argv: ["bash", "--rcfile", "/tmp/rc"] }], true],
+  ["zsh -oemacs -i (review 3)", [{ name: "zsh", argv: ["zsh", "-oemacs", "-i"] }], true],
+  ["fish -C cmd", [{ name: "fish", argv: ["fish", "-C", "set x 1"] }], true],
+  ["pwsh -NoExit -Command", [{ name: "pwsh", argv: ["pwsh", "-NoExit", "-Command", "ls"] }], true],
+  ["pwsh -NoEx -Command (review 2)", [{ name: "pwsh", argv: ["pwsh", "-NoEx", "-Command", "ls"] }], true],
+  ["pwsh -File - (review 1)", [{ name: "pwsh", argv: ["pwsh", "-File", "-"] }], true],
+  ["cmd /k cmd /c (review 2)", [{ name: "cmd.exe", argv: ["cmd.exe", "/k", "cmd", "/c", "echo ready"] }], true],
+  ["pwsh.exe by Windows path (review 1)", [{ name: "C:\\Program Files\\PowerShell\\7\\pwsh.exe", argv: ["C:\\Program Files\\PowerShell\\7\\pwsh.exe"] }], true],
+  ["cmd.exe prompt", [{ name: "cmd.exe", argv: ["C:\\Windows\\System32\\cmd.exe"] }], true],
+  ["agent with a sh -c child: held, upstream delivers", [{ name: "omo", argv: ["omo"] }, { name: "sh", argv: ["sh", "-c", "sleep 1"] }], true],
+  ["bash -lc make: held, upstream delivers", [{ name: "bash", argv: ["bash", "-lc", "make"] }], true],
+  ["pwsh -Command ls: held, upstream delivers", [{ name: "pwsh", argv: ["pwsh", "-Command", "ls"] }], true],
+  ["cmd /c dir: held", [{ name: "cmd.exe", argv: ["cmd.exe", "/C", "dir"] }], true],
+  ["bash -c read/eval loop (challenge)", [{ name: "bash", argv: ["bash", "-c", "while read -r l; do eval \"$l\"; done"] }], true],
+  ["a shell by argv[0] under another name", [{ name: "x", argv: ["/bin/bash"] }], true],
+  ["an empty foreground group is doubt", [], true],
+  ["an entry with no name is doubt (challenge)", [{ name: "omo", argv: ["omo"] }, {}], true],
+  ["exec'd agent", [{ name: "bun", argv: ["bun", "omo.js"] }], false],
+  ["agent with a non-shell child", [{ name: "claude", argv: ["claude"] }, { name: "git", argv: ["git", "status"] }], false],
+] as const)("interactiveShellInFront (upstream #69): %s", (_, procs, want) => {
+  expect(interactiveShellInFront({ foreground_processes: procs })).toBe(want);
 });
 
 test("on herdr, /goal pause that empties the box with no turn is SUBMITTED in an omo pane only: another agent may take it as a prompt", async () => {

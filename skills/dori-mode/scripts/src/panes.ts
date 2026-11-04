@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { captureTmux, listAoePanes, liveSessions, paneLife, QUESTION_MARK, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
 import type { Backend, DoriConfig } from "./config.ts";
-import { herdrResult, isHerdrPane } from "./herdr.ts";
+import { herdrResult, isHerdrPane, shellInFrontName } from "./herdr.ts";
 import { replacementOf } from "./frozen.ts";
 import type { Clock, Runner } from "./run.ts";
 import { procTable, topAgent } from "./session-id.ts";
@@ -131,6 +131,9 @@ const backgroundAgent = async (run: Runner, pane: string): Promise<number | unde
 export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || isOmoExecutable(config.agentCommand[0] ?? "");
 export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
 
+// upstream #69: the states herdr reports for a pane whose agent is running (its others: unknown, or none over a shell)
+const ALIVE_STATUSES: ReadonlySet<string> = new Set(["idle", "working", "blocked", "done"]);
+
 const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): PaneKeys => {
   const herdr = isHerdrPane(pane);
   if (!omoPane(config, pane))
@@ -142,6 +145,14 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
         if (!got) return `PANE_GONE: there is no herdr pane ${pane}; nothing was typed`;
         if (!got.agent) return `PANE_DEAD: no agent runs in ${pane} (only its shell, which would run the text); nothing was typed`;
         if (got.agent_status === "blocked") return `PANE_BLOCKED: the agent in ${pane} waits on a confirmation the text would answer; nothing was typed`;
+        // upstream #69 (https://github.com/sisyphuslabs/dori-superagent/pull/69): only an agent herdr reports in a running
+        // state reads the text, and herdr keeps calling an agent suspended with Ctrl+Z idle while its shell is in front
+        if (!ALIVE_STATUSES.has(got.agent_status ?? "")) return `the agent in ${pane} is in state ${got.agent_status ?? "none"}, not idle, working, blocked or done, so it may not be reading; nothing was typed`;
+        const info = await herdrResult(run, ["pane", "process-info", "--pane", pane]);
+        if (!info) return `herdr pane process-info could not be read for ${pane}, so a shell in front cannot be ruled out; nothing was typed`;
+        const shell = shellInFrontName(info.process_info);
+        if (shell === "") return `herdr pane process-info shows nothing readable in front of ${pane}, so a shell in front cannot be ruled out; nothing was typed`;
+        if (shell !== undefined) return `the agent in ${pane} is not in front: a shell (${shell}) is, after the agent exited or was suspended with Ctrl+Z, or as its child, and it could run the text; nothing was typed`;
         return (await run(["herdr", "pane", "send-text", pane, text])).code === 0 ? undefined : "herdr send-text failed";
       },
       enter: async () => { await run(["herdr", "pane", "send-keys", pane, "enter"]); },
