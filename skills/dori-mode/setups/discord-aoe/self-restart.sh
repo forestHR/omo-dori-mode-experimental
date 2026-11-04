@@ -88,12 +88,29 @@ notify() { dori send discord --to "${DORI_DISCORD_PAIR_CHANNEL:-${DORI_DISCORD_C
 ready() { tmux capture-pane -p -t "=$T:" 2>/dev/null | grep -q '^❯'; }
 busy() { tmux capture-pane -p -t "=$T:" 2>/dev/null | grep -q 'esc to interrupt'; }
 
-# A herdr lead (a pane id with ":", backend herdr): the account's herdr server runs in its own unit (dori-herdr.service,
-# setups/discord-aoe/systemd), and dori revive starts the lead's recorded omo session again in its pane and types the
-# prompt; a lead whose agent still runs is left alone (dori never ends a live herdr agent); aoe and tmux are not used.
+# A herdr lead (a pane id with ":", backend herdr): the account's herdr server runs in its own unit
+# (setups/discord-aoe/systemd/dori-herdr.service, installed as dori-herdr.service or <user>-herdr.service), and dori revive
+# starts the lead's recorded omo session again in its pane and types the prompt; a lead whose agent still runs is left
+# alone (dori never ends a live herdr agent); aoe and tmux are not used.
+# The unit: DORI_HERDR_UNIT (environment or dori.env), else dori-herdr.service, else the one installed *-herdr.service;
+# several of those start none (HERDR_UNIT_AMBIGUOUS, set DORI_HERDR_UNIT), and none at all is logged (HERDR_UNIT_NONE).
+herdr_unit() {
+  local units
+  if [ -n "${DORI_HERDR_UNIT:-}" ]; then
+    systemctl --user cat "$DORI_HERDR_UNIT" >/dev/null 2>&1 && echo "$DORI_HERDR_UNIT" || log "HERDR_UNIT_MISSING $DORI_HERDR_UNIT (DORI_HERDR_UNIT)"
+    return
+  fi
+  systemctl --user cat dori-herdr.service >/dev/null 2>&1 && { echo dori-herdr.service; return; }
+  mapfile -t units < <(systemctl --user list-unit-files --no-legend --plain '*-herdr.service' 2>/dev/null | awk '{print $1}')
+  case ${#units[@]} in
+    1) echo "${units[0]}" ;;
+    0) log "HERDR_UNIT_NONE no dori-herdr.service or *-herdr.service" ;;
+    *) log "HERDR_UNIT_AMBIGUOUS ${units[*]}: set DORI_HERDR_UNIT" ;;
+  esac
+}
 if [[ "$T" == *:* ]]; then
-  HERDR_UNIT=dori-herdr.service
-  systemctl --user cat "$HERDR_UNIT" >/dev/null 2>&1 && { systemctl --user start "$HERDR_UNIT" || log "HERDR_UNIT_START_FAIL $HERDR_UNIT"; }
+  HERDR_UNIT=$(herdr_unit)
+  [ -z "$HERDR_UNIT" ] || systemctl --user start "$HERDR_UNIT" || log "HERDR_UNIT_START_FAIL $HERDR_UNIT"
   for _ in $(seq 50); do herdr pane list >/dev/null 2>&1 && break; sleep 0.2; done
   if OUT=$(dori revive "$T" --text "$PROMPT" 2>&1); then
     log "SELF-RESTART-OK herdr $OUT"
