@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
+import type { DirectivePick } from "./directives.ts";
 import type { BudgetLimits } from "./supervision.ts";
 
 export const LANE_KEY = /^[a-z0-9][a-z0-9._-]{1,60}$/;
@@ -109,7 +110,7 @@ export type Lane = {
   // launched with --ui, or its brief read like UI work: the directive ledger's UI directives apply to it
   readonly ui?: boolean;
   // the owner's directives dori launch found in scope (applied) and those the lead left out with a reason (dori launch --waive)
-  readonly directives?: { readonly applied: readonly string[]; readonly waived: readonly { readonly id: string; readonly reason: string; readonly at: string }[] };
+  readonly directives?: { readonly applied: readonly string[]; readonly waived: readonly { readonly id: string; readonly reason: string; readonly at: string }[]; readonly pick?: DirectivePick; readonly pickFallback?: string };
   readonly challenges?: readonly ChallengeRecord[];
   readonly explorations?: readonly ExplorationRecord[];
   readonly research?: ResearchSent;

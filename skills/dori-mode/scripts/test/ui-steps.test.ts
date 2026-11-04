@@ -53,7 +53,7 @@ test("LAUNCH_UI_HINT warns on a brief that reads like UI work without --ui, and 
 
 test("dori launch --dry-run --ui prints the brief with the steps; without --ui the directive ledger puts them in too, with LAUNCH_UI_HINT", async () => {
   const config = join(state.dir, "config.json");
-  await Bun.write(config, JSON.stringify({ stateDir: state.dir, watchLog: join(state.dir, "watch.log"), defaultCwd: "/home/test" }));
+  await Bun.write(config, JSON.stringify({ stateDir: state.dir, watchLog: join(state.dir, "watch.log"), defaultCwd: "/home/test", directives: { pickModel: "" } }));
   // the four fields: the ledger's four-fields directive stops a launch without them
   const brief = await briefFile(`${lead}[사용자와 장면] y\n[넘으면 안 되는 선] 없음\n`);
   const cli = (extra: string[]) =>
