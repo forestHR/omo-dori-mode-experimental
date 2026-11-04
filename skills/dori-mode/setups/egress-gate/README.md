@@ -205,7 +205,12 @@ Each card lives in a thread, and its result is written on the card there. A requ
 written inside a thread under the approval channel keeps its card in that thread; one
 written in the approval channel gets a thread on that message; anything else opens a new
 thread in the approval channel (any thread failure falls back to the channel); a new thread is named
-`🔔 🔐 <kind> · <what>` (🔔: a card in it waits on the owner). The cards one owner message asks for
+`🔔 🔐 <kind> · <what>` (🔔: a card in it waits on the owner). When the card joins a thread a Dori opened
+first (`dori thread open --from` on the owner's message, or a Dori thread the request was written in), that
+thread is renamed to the same shape with the Dori's title kept: `🔔 정해영 OmO 문의 답장` becomes
+`🔔 🔐 정해영 OmO 문의 답장`, so the decision later marks it like any card thread (2026-11-04). A name
+already in that shape (one mark, then `🔐`, `✉️` or `📬`) and a thread the owner opened himself keep their
+name; a failed rename is logged (`GATE_CARD_THREAD_RENAME_FAILED`) and the card is posted anyway. The cards one owner message asks for
 share one thread (owner Q474, 2026-11-03; one request had made eighteen Drive sharing threads in two
 minutes): a card or a batch card whose owner message already has an undecided card or batch card in a
 thread goes into that thread, in any order and also when they arrive at once. Choosing the thread until the

@@ -565,6 +565,8 @@ CARD_KIND = {"calendar": "일정 초대", "drive": "Drive 공유", "docs": "문�
 THREAD_MARKS = ("✅", "⛔", "💤", "❗")
 THREAD_STATUSES = ("✅ 완료", "⛔ 취소", "⌛ 만료", "❗ 실패")
 WAITING_MARK = "🔔"
+# The kind icons that follow the one mark (✉️ mail, 🔐 a gate card, 📬 a digest); a gate card's kind is 🔐.
+KIND_ICONS = ("🔐", "✉️", "✉", "📬")
 # Every leading mark either side ever wrote (the Dori fork's 🔄 🔔 ⏸️ ✅ 📌 and the old words), so a name keeps exactly one.
 LEADING_MARK = re.compile(r"^(?:(?:✅ 완료|⛔ 취소|⌛ 만료|❗ 실패) · |(?:완료|취소|만료|실패) · |(?:🔄|🔔|⏸|✅|⛔|💤|❗|⌛|📌)\ufe0f?\s*)")
 # An approved write the service answered with a non-2xx status; the code itself stays in the GATE_WRITE log line.
@@ -1898,12 +1900,16 @@ class Gate:
                 status, _, body = await self.bot_call("GET", f"/channels/{origin}")
                 info = json_object(body) if 200 <= status < 300 else {}
                 if info.get("type") in (11, 12) and str(info.get("parent_id")) == channel:
+                    await self.mark_joined_thread(origin, info)
                     return origin
             if origin == channel and message:
                 status, _, _ = await self.bot_call(
                     "POST", f"/channels/{channel}/messages/{message}/threads",
                     {"name": name, "auto_archive_duration": 10080})
-                if 200 <= status < 300 or status == 400:  # 400: that message already has its thread
+                if 200 <= status < 300:
+                    return message
+                if status == 400:  # that message already has its thread, often one a Dori opened first
+                    await self.mark_joined_thread(message)
                     return message
             status, _, body = await self.bot_call(
                 "POST", f"/channels/{channel}/threads", {"name": name, "type": 11, "auto_archive_duration": 10080})
@@ -1914,6 +1920,30 @@ class Gate:
             pass
         print("GATE_CARD_THREAD_FALLBACK", file=sys.stderr, flush=True)
         return channel
+
+    async def mark_joined_thread(self, thread, info=None) -> None:
+        """A card joining a thread a Dori opened first (`dori thread open --from`) gives it the card thread's shape.
+
+        2026-11-04: YooDori's "🔔 정해영 OmO 문의 답장" kept that name after the card joined it. The name becomes the
+        one waiting mark and the kind icon with the Dori's title kept ("🔔 🔐 정해영 OmO 문의 답장"), so the owner sees
+        a card waits and the decision later marks it. A name already in that shape and a thread the owner opened
+        himself stay as they are; a failed rename is logged and never stops the card."""
+        try:
+            if info is None:
+                status, _, body = await self.bot_call("GET", f"/channels/{thread}")
+                info = json_object(body) if 200 <= status < 300 else {}
+            name, owner = str(info.get("name") or ""), str(info.get("owner_id") or "")
+            if not name or not owner or owner == str(self.config["owner_id"]):
+                return
+            bare = bare_thread_name(name)
+            wanted = f"{WAITING_MARK} {bare if bare.startswith(KIND_ICONS) else '🔐 ' + bare}"[:100]
+            if wanted == name:
+                return
+            status, _, _ = await self.bot_call("PATCH", f"/channels/{thread}", {"name": wanted})
+            if not 200 <= status < 300:
+                raise OSError(status)
+        except (Refused, OSError, ValueError, KeyError, http.client.HTTPException):
+            print("GATE_CARD_THREAD_RENAME_FAILED", file=sys.stderr, flush=True)
 
     async def supersede(self, thread, api, op, path, method, title, body=b"") -> None:
         """A newer card for the same work in the same thread replaces the older undecided one.
