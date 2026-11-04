@@ -193,9 +193,9 @@ export const applyDirectives = async (deps: FlowDeps, lane: Lane, opts: { readon
 export const MEANING_SYSTEM = "You compare an owner's message with a directive a lead rewrote from it. You answer only in the requested format. You never ask questions and never translate quotes.";
 
 export const meaningPrompt = (e: Pick<Directive, "id" | "name" | "basis" | "rule" | "words" | "original" | "prompt">): string => [
-  "An owner gave a standing directive in Korean. WORDS is the directive as he said it: their message with only fillers and whole unrelated sentences left out. ORIGINAL is their whole message, for context. PROMPT is the lead's rewrite of WORDS as a standing rule for coding agents: what a lane does from now on, in general terms, imperative or declarative, no question, no spoken filler.",
+  "An owner gave a standing directive in Korean. WORDS is the directive as the owner said it: their message with only fillers and whole unrelated sentences left out. ORIGINAL is their whole message, for context. PROMPT is the lead's rewrite of WORDS as a standing rule for coding agents: what a lane does from now on, in general terms, imperative or declarative, no question, no spoken filler.",
   `CONTEXT (the lead's notes, not their words): the directive is called "${e.name}"; ${e.basis ?? ""}${e.rule ? ` The lead applies it as: ${e.rule}` : ""}`,
-  "WORDS can hold a task he asked to be done once in that message, a description of that situation or an aside; those are not the standing directive, and PROMPT leaving them out is not MISSING. A remark about a past case (\"처음부터 있었어야 할 것 같아\") may become the rule it implies. The rewrite may change the form (question to order, spoken to written, \"해 줘\" to \"한다\"), say who \"나\" and \"너\" are (형 = the owner, 리드 = the agent he spoke to) and name what a bare reference (\"이런 스레드\") points at when CONTEXT says it, and nothing else: it takes no requirement from the lead's notes that WORDS does not state. Check that PROMPT keeps every condition, target, scope, exception, step and the strength of WORDS (반드시 / 항상 / 절대 / 모두 / 가끔 stay as strong or as weak), and adds no requirement, target or method he did not state.",
+  "WORDS can hold a task the owner asked to be done once in that message, a description of that situation or an aside; those are not the standing directive, and PROMPT leaving them out is not MISSING. A remark about a past case (\"처음부터 있었어야 할 것 같아\") may become the rule it implies. The rewrite may change the form (question to order, spoken to written, \"해 줘\" to \"한다\"), say who \"나\" and \"너\" are (형 = the owner, 리드 = the agent the owner spoke to) and name what a bare reference (\"이런 스레드\") points at when CONTEXT says it, and nothing else: it takes no requirement from the lead's notes that WORDS does not state. Check that PROMPT keeps every condition, target, scope, exception, step and the strength of WORDS (반드시 / 항상 / 절대 / 모두 / 가끔 stay as strong or as weak), and adds no requirement, target or method the owner did not state.",
   `ORIGINAL:\n<<<\n${e.original ?? e.words}\n>>>`,
   `WORDS:\n<<<\n${e.words}\n>>>`,
   `PROMPT:\n<<<\n${e.prompt ?? ""}\n>>>`,
@@ -356,7 +356,7 @@ export const memoryRepoFor = (cwd: string, home: string): string => {
 
 // The lead memory files where their standing directives were kept before the ledger: system/*.md and reference/*.md, not
 // the lead's journal about itself (reference/self/, and system/self-aware.md, which reflection writes from it: their words
-// there are what he said about the lead's behaviour, quoted as evidence), and not system/boundaries.md, which keeps what he
+// there are what the owner said about the lead's behaviour, quoted as evidence), and not system/boundaries.md, which keeps what the owner
 // told the lead not to do in their own words by design (a pointer there would be a rewording). A repo that is not there
 // leaves the check out, with a line.
 const MEMORY_LEFT_OUT = ["system/self-aware.md", "system/boundaries.md"];

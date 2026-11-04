@@ -357,7 +357,7 @@ export const headingAt = (text: string, heading: string): number => {
 // The lead's text of a brief: what dori launch appended (past signals, tree, footer) and the ledger block it put in are cut.
 export const leadText = (brief: string): string => {
   let own = brief.split(/\n## (?:Past signals|Hypothesis tree|Lane footer) \(written by dori launch\)/)[0] ?? brief;
-  for (const heading of [DIRECTIVES_HEADING, "## 형 지침 (지침 장부에서 dori launch가 넣음)", APPLIED_HEADING]) {
+  for (const heading of [DIRECTIVES_HEADING, APPLIED_HEADING]) {
     const at = headingAt(own, heading);
     if (at < 0) continue;
     const rest = own.slice(at + heading.length);

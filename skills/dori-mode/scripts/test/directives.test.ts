@@ -378,8 +378,6 @@ test("directives apply: a lane launched before the ledger gets what its brief la
   expect(scopeContext(text, ledger, { repo: "hr35-isaac" }).kinds).toEqual(scopeContext(old, ledger, { repo: "hr35-isaac" }).kinds);
   // words of a directive added there are not the lane's work: a section full of UI words does not make it UI work
   expect(scopeContext(withApplied(old, ["대시보드 화면 프론트엔드 디자인 UI"]), ledger, { repo: "x" }).ui).toBe(false);
-  const historical = `${fields}\n## 형 지침 (지침 장부에서 dori launch가 넣음)\n대시보드 화면 프론트엔드 디자인 UI\n`;
-  expect(scopeContext(historical, ledger, { repo: "x" }).ui).toBe(false);
   expect(await Bun.file(deps.config.watchLog).text()).toMatch(/^\S+ directives DIRECTIVES_APPLIED old: eight-steps, /m);
   expect((await deps.registry.read("old"))?.directives?.applied).toEqual(expect.arrayContaining(before));
   // again: nothing to send, nothing written
