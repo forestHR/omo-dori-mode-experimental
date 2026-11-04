@@ -84,7 +84,7 @@ test("add refuses what a launch would refuse, and copies the brief; add again re
   add("x2", { ask: "형, 이거 해도 돼?" });
   const decided = decideItem(state, "x2", "응 해", "2026-11-02T16:00:00Z", "2026-11-03 01:00 KST");
   expect(decided.ask).toBeUndefined();
-  expect(readFileSync(decided.brief, "utf8")).toContain("형 답: 응 해");
+  expect(readFileSync(decided.brief, "utf8")).toContain("사용자 답: 응 해");
   expect(dropItem(state, "x2", "no", "t").status).toBe("dropped");
 });
 
@@ -206,7 +206,7 @@ test("backlog.writeNeedsOwnerLink: an item that may write asks the owner first u
   const linked = addItem(state, { id: "w3", title: "w3", brief, done: "file /tmp/x", ownerLink: "https://discord.com/channels/1/2/2" }, ctx).item;
   const reads = addItem(state, { id: "w4", title: "w4", brief, done: "file /tmp/x", readOnly: true }, ctx).item;
   // Then
-  expect(bare.ask).toBe("형 원문 링크가 확인되지 않은 쓰기 일이야(링크 없음). 시작해도 될까?");
+  expect(bare.ask).toBe("사용자 원문 링크가 확인되지 않은 쓰기 일이야(링크 없음). 시작해도 될까?");
   expect(bad.ask).toContain("the message is not the owner's");
   expect(linked.ask).toBeUndefined();
   expect(reads.ask).toBeUndefined();
@@ -486,7 +486,7 @@ test("the day report comes once a day after backlog.dayReportAt in its time zone
   const twice = dayReport(state, settings, Date.parse("2026-11-02T13:00:00Z"));
   // Then
   expect(before).toBeUndefined();
-  expect(after?.split("\n")).toContain("형 답 기다림: 메일 정리");
+  expect(after?.split("\n")).toContain("사용자 답 기다림: 메일 정리");
   expect(after).toStartWith("BACKLOG_DAY 2026-11-02:");
   expect(twice).toBeUndefined();
 });
@@ -724,7 +724,7 @@ test("the day report counts content questions as waiting on the owner", () => {
   // When
   const report = dayReport(state, { ...SETTINGS, dayReportAt: "00:00", timeZone: "UTC" }, now);
   // Then
-  expect(report?.split("\n")).toContain("형 답 기다림: 바뀐 할 일");
+  expect(report?.split("\n")).toContain("사용자 답 기다림: 바뀐 할 일");
 });
 
 test("an approval seen while the draft ran, then a content change: the follow-up asks again instead of taking the old card", async () => {

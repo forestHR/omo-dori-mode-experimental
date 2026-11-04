@@ -4,6 +4,50 @@ import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from
 import { run } from "../src/run.ts";
 import { withState } from "./fakes.ts";
 
+test("Slack hook references land in the intended thread and deduplicate against explicit channel arguments", async () => {
+  const state = withState();
+  const messages: unknown[] = [];
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
+    messages.push(await req.json());
+    return Response.json({ ok: true, channel: "C123", ts: "200.1" });
+  } });
+  try {
+    const command = ["env", `DORI_CONFIG=${join(state.dir, "missing.json")}`, `DORI_STATE_DIR=${state.dir}`, `DORI_ENV_FILE=${join(state.dir, "missing.env")}`, "DORI_SLACK_TOKEN=fake",
+      `DORI_SLACK_API=http://127.0.0.1:${server.port}/api`, "bun", join(import.meta.dir, "../src/cli.ts"), "send", "slack", "--text", "progress"];
+    const posted = await run([...command, "--to", "slack:C123:100.1"]);
+    const repeated = await run([...command, "--to", "C123", "--thread", "100.1"]);
+    expect({ code: posted.code, messages }).toEqual({ code: 0, messages: [{ channel: "C123", text: "progress", thread_ts: "100.1" }] });
+    expect(repeated.code).toBe(0);
+    expect(repeated.out).toContain("SEND_DUPLICATE 200.1");
+  } finally {
+    server.stop(true);
+    state.done();
+  }
+});
+
+for (const args of [
+  ["--to", "slack:C123"],
+  ["--to", "slack:C123:not-a-timestamp"],
+  ["--to", "slack:C123:100.1", "--thread", "999.1"],
+]) {
+  test(`Slack refuses ambiguous hook destination ${args.join(" ")} before posting`, async () => {
+    const state = withState();
+    let posted = false;
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => {
+      posted = true;
+      return Response.json({ ok: true, channel: "C123", ts: "200.1" });
+    } });
+    try {
+      const result = await run(["env", `DORI_CONFIG=${join(state.dir, "missing.json")}`, `DORI_STATE_DIR=${state.dir}`, `DORI_ENV_FILE=${join(state.dir, "missing.env")}`, "DORI_SLACK_TOKEN=fake",
+        `DORI_SLACK_API=http://127.0.0.1:${server.port}/api`, "bun", join(import.meta.dir, "../src/cli.ts"), "send", "slack", "--text", "progress", ...args]);
+      expect({ code: result.code, posted }).toEqual({ code: 2, posted: false });
+    } finally {
+      server.stop(true);
+      state.done();
+    }
+  });
+}
+
 test("Discord CLI enables typing by default, skips it on request, and leaves edits alone", async () => {
   const state = withState();
   try {

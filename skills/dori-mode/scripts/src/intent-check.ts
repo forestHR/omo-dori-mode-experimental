@@ -55,8 +55,8 @@ const QUOTED = /"([^"\n]{6,})"|“([^”]{6,})”|‘([^’]{6,})’|「([^」]{
 // a brief is the lead's prose around the owner's quoted words. Text outside quote marks is never the owner's.
 export const ownerWords = (text: string): string => [...text.matchAll(QUOTED)].map((m) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5] ?? "").join("\n");
 
-// The owner's own prompts a brief carries as built-in blocks (the eight steps, the UI steps) are his words, though they
-// stand in the brief unquoted; a line in parentheses under a step is the lead's rule on how the step is met, not his. On
+// The owner's own prompts a brief carries as built-in blocks (the eight steps, the UI steps) are their words, though they
+// stand in the brief unquoted; a line in parentheses under a step is the lead's rule on how the step is met, not their. On
 // 2026-11-01 pingpong-false-point's finding on step 7 ("plan approval은 모두 허가하니 ...") was dropped as ungrounded.
 export const briefBlockWords = (brief: string, blocks: Readonly<Record<string, string>>): string[] => {
   const flat = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -65,7 +65,7 @@ export const briefBlockWords = (brief: string, blocks: Readonly<Record<string, s
     .map((b) => b.split("\n").filter((l) => !/^\s+\(.*\)\s*$/.test(l)).join("\n"));
 };
 
-// The owner's messages a text links (discord.com/channels/<guild>/<channel>/<message id>), as the inbox recorded them: his
+// The owner's messages a text links (discord.com/channels/<guild>/<channel>/<message id>), as the inbox recorded them: their
 // words as he wrote or spoke them (author `owner` when known).
 export const linkedWords = (text: string, inbox: string, owner: string): string[] => {
   const out: string[] = [];
@@ -88,7 +88,7 @@ type InboxRow = { ts?: string; id?: string; kind?: string; thread?: string; chan
 // The owner's decisions in the lane's discord:<id> thread since `since`, from the inbox the listener writes, oldest first,
 // the newest n: question-card answers (only the owner answers a card) and the owner's own messages (author `owner`).
 // words: what the owner wrote or chose (a card's question is the lead's, context only, never grounds a quote). id: the
-// message (or the answer row); replyTo: the message his message answers; pane: the pane that asked the card he answered.
+// message (or the answer row); replyTo: the message their message answers; pane: the pane that asked the card he answered.
 export type OwnerDecision = ReportLine & { readonly words: string; readonly id?: string; readonly replyTo?: string; readonly pane?: string };
 export const ownerDecisions = (inbox: string, thread: string, owner: string, since: string, n: number): OwnerDecision[] => {
   const id = /^discord:(\d+)$/.exec(thread)?.[1];
@@ -185,7 +185,7 @@ export const ownerPrompt = (lane: Pick<Lane, "key" | "title" | "goal" | "directi
   "<<<BRIEF (the lane's brief; the owner's words are quoted in it)",
   brief,
   "BRIEF>>>",
-  "<<<OWNER DIRECTIVES (the owner's standing directives from the directive ledger that apply to this lane, his own words; a report that breaks one is a VIOLATION)",
+  "<<<OWNER DIRECTIVES (the owner's standing directives from the directive ledger that apply to this lane, their own words; a report that breaks one is a VIOLATION)",
   ...(directives.length ? directives.map((d) => cut(d, MAX_ITEM)) : ["(none)"]),
   "OWNER DIRECTIVES>>>",
   "<<<RELAYS (the lead's messages to the worker that carry the owner's words, oldest first)",
@@ -341,7 +341,8 @@ export const runIntentCheck = async (deps: FlowDeps, lane: Lane, opts: { readonl
   const failures: string[] = [];
   let checks: Awaited<ReturnType<typeof checkReviewers>> = [];
   try {
-    checks = await checkReviewers(deps, reviewers(family, reviewerOrder(rev.models, rev.first)));
+    const ordered = reviewerOrder(rev.models, rev.first);
+    checks = await checkReviewers(deps, rev.allowOwnModel === true ? ordered : reviewers(family, ordered));
   } catch (e) {
     if (!(e instanceof ChallengeError)) throw e;
     failures.push(e.message);

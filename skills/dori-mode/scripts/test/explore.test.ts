@@ -327,6 +327,16 @@ test("the reviewer reads the plan's repository with read-only tools and writes t
   await expect(runChallenge(deps, l, plan, { model: "github-copilot/claude-sonnet-5" })).rejects.toThrow("the lane's own family");
 });
 
+test("an explicit own-model opt-in saves a challenge on a single-model host while the default refuses it", async () => {
+  const model = "chatgpt-subscription/gpt-6-astra";
+  const off = await challengeWorld(hostRunner([]), [model], model);
+  await expect(runChallenge(off.deps, off.l, off.plan)).rejects.toThrow("no reviewer");
+  const deps = { ...off.deps, config: { ...off.deps.config, reviewers: { ...off.deps.config.reviewers, allowOwnModel: true } } };
+  const result = await runChallenge(deps, off.l, off.plan);
+  expect(result.reviews.map((review) => review.record.model)).toEqual([model]);
+  expect((await deps.registry.read(off.l.key))?.challenges).toEqual(result.reviews.map((review) => review.record));
+});
+
 test("reviewer ids the host cannot call are skipped before any call; one on a provider that is not logged in is called on one that is", async () => {
   const calls: Call[] = [];
   const { deps, l, plan } = await challengeWorld(hostRunner(calls), ["google/gemini-3.1-pro-preview", "nosuch/model-x", "github-copilot/gpt-6-astra", "anthropic-subscription/claude-fable-5-1:high"], "xai/grok-4.7");

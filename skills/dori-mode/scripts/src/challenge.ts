@@ -134,8 +134,9 @@ export const runChallenge = async (deps: FlowDeps, lane: Lane, planFile: string,
   const cfg = deps.config.explore;
   const own = lane.model ?? deps.config.defaultModel;
   const sameFamily = deps.config.reviewers.allowSameFamily === true;
-  if (opts.model && !reviewers(own, [opts.model], sameFamily).length) throw new ChallengeError(sameFamily ? `--model ${opts.model} is the lane's own model (${own}); pick another model` : `--model ${opts.model} is the lane's own family (${familyOf(own)}); pick another family, or set reviewers.allowSameFamily`);
-  const candidates = opts.model ? [opts.model] : reviewers(own, deps.config.reviewers.models, sameFamily);
+  const allowOwn = deps.config.reviewers.allowOwnModel === true;
+  if (opts.model && !allowOwn && !reviewers(own, [opts.model], sameFamily).length) throw new ChallengeError(sameFamily ? `--model ${opts.model} is the lane's own model (${own}); pick another model` : `--model ${opts.model} is the lane's own family (${familyOf(own)}); pick another family, or set reviewers.allowSameFamily`);
+  const candidates = opts.model ? [opts.model] : allowOwn ? [...deps.config.reviewers.models] : reviewers(own, deps.config.reviewers.models, sameFamily);
   if (!candidates.length) throw new ChallengeError(sameFamily ? `no reviewer in reviewers.models other than the lane's own model ${own}` : `no reviewer in reviewers.models is of another family than the lane's model ${own} (${familyOf(own)})`);
   const failures: string[] = [];
   const skip = (line: string): void => {

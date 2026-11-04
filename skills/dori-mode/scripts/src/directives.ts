@@ -88,7 +88,7 @@ export type Ledger = {
 export class DirectiveError extends Error {}
 
 export const COMMON_LEDGER = join(import.meta.dir, "../../references/directives.json");
-export const DIRECTIVES_HEADING = "## 형 지침 (지침 장부에서 dori launch가 넣음)";
+export const DIRECTIVES_HEADING = "## 사용자 지침 (지침 장부에서 dori launch가 넣음)";
 // the section dori directives apply adds to a launched lane's brief, before the parts dori launch appended
 export const APPLIED_HEADING = "## 추가 지침(리드, launch 뒤)";
 
@@ -357,7 +357,7 @@ export const headingAt = (text: string, heading: string): number => {
 // The lead's text of a brief: what dori launch appended (past signals, tree, footer) and the ledger block it put in are cut.
 export const leadText = (brief: string): string => {
   let own = brief.split(/\n## (?:Past signals|Hypothesis tree|Lane footer) \(written by dori launch\)/)[0] ?? brief;
-  for (const heading of [DIRECTIVES_HEADING, APPLIED_HEADING]) {
+  for (const heading of [DIRECTIVES_HEADING, "## 형 지침 (지침 장부에서 dori launch가 넣음)", APPLIED_HEADING]) {
     const at = headingAt(own, heading);
     if (at < 0) continue;
     const rest = own.slice(at + heading.length);
@@ -431,13 +431,14 @@ const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
 // lead rule goes in as the lead's rule only. An owner decision on record without his sentence says so in its tag. The
 // trigger and the basis stay in the ledger and its table.
 export const directiveTag = (e: Directive): string =>
-  e.by === "lead" ? `[리드 규칙 ${e.id}]` : e.words ? `[형 지침 ${e.id}, ${e.date}]` : `[형 결정 ${e.id}, ${e.date}, 원문 없음: 리드 기록]`;
+  e.by === "lead" ? `[리드 규칙 ${e.id}]` : e.words ? `[사용자 지침 ${e.id}, ${e.date}]` : `[사용자 결정 ${e.id}, ${e.date}, 원문 없음: 리드 기록]`;
 export const directiveText = (e: Directive): string => `${directiveTag(e)}\n${e.by === "owner" && e.words ? (e.prompt ?? e.words) : (e.rule ?? "")}`;
 export const hasDirective = (brief: string, e: Directive): boolean => {
   const b = squash(brief);
   const own = e.by === "owner" && e.words ? e.words : (e.rule ?? "");
   // [지침 <id>]: the tag of briefs launched before #72
-  return b.includes(squash(directiveTag(e))) || b.includes(`[지침 ${e.id}]`) || (Boolean(own) && b.includes(squash(own)));
+  const legacy = e.words ? `[형 지침 ${e.id}, ${e.date}]` : `[형 결정 ${e.id}, ${e.date}, 원문 없음: 리드 기록]`;
+  return b.includes(squash(directiveTag(e))) || b.includes(legacy) || b.includes(`[지침 ${e.id}]`) || (Boolean(own) && b.includes(squash(own)));
 };
 // The pointer that goes into a brief for an entry with via (undefined when it has none).
 export const pointerOf = (e: Directive, ledger: Pick<Ledger, "entries">): Directive | undefined => {

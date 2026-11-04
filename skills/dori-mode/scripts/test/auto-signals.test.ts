@@ -341,6 +341,21 @@ test("intent-check asks a reviewer of another family from the one reviewers list
   expect(after.intentCheck?.kinds).toEqual(["VIOLATION"]);
 });
 
+test("single-model intent checks require explicit opt-in and persist the resulting verdict", async () => {
+  writeFileSync(join(state.dir, "brief.md"), '# Brief\nOwner: "Keep the watcher running."');
+  const model = "chatgpt-subscription/gpt-6-astra";
+  const base = intentCheckDeps(10, "VERDICT: OK", []);
+  const l = { ...lane(state.dir), model, direction: { at: at(2), text: "Keep the watcher running." } };
+  await base.registry.write(l);
+  const reviewers = { ...base.config.reviewers, models: [model], first: model };
+  const off = { ...base, config: { ...base.config, reviewers } };
+  expect((await runIntentCheck(off, l, { files: [] })).skipped).toContain("no reviewer");
+  const on = { ...off, config: { ...off.config, reviewers: { ...reviewers, allowOwnModel: true } } };
+  const result = await runIntentCheck(on, l, { files: [] });
+  expect(result.model).toBe(model);
+  expect((await base.registry.read(l.key))?.intentCheck?.kinds).toEqual(["OK"]);
+});
+
 test("intent-check needs no new report; a finding again in the next check is rung 4, a clean check ends the context rung, and --reread sends the lane its brief only on a finding", async () => {
   writeFileSync(join(state.dir, "brief.md"), "# 브리프\n형: \"학습은 멈추지 말고\"");
   const file = writeSession([sessionLine(1, "assistant", "[REPORT] rl-e7 | milestone | 진행: 학습을 멈추고 비교표를 만듦")]);

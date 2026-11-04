@@ -44,7 +44,7 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
 
 // A relay supplies a directive when it names its id or carries its text (what shows it in a brief: tag, words or rule, or
-// the prompt a brief gets for his words; a built-in block as its whole text).
+// the prompt a brief gets for their words; a built-in block as its whole text).
 const supplies = (text: string, id: string, e: Directive | undefined, ledger: Ledger, blocks: Readonly<Record<DirectiveBlock, string>>): boolean => {
   if (new RegExp(`(?<![\\w-])${escapeRe(id)}(?![\\w-])`).test(text)) return true;
   if (!e) return false;
@@ -146,7 +146,7 @@ export const withApplied = (brief: string, texts: readonly string[]): string => 
 };
 
 export const applyMessage = (brief: string, texts: readonly string[]): string =>
-  `[LEAD] 지침 보충: 이 lane을 열 때 브리프에 없던 형 지침·리드 규칙이다. 하던 일은 그대로 이어가고, 지금부터 아래 지침도 따른다. 브리프 ${brief}의 "${APPLIED_HEADING.slice(3)}" 절에도 적었다.\n\n${texts.join("\n\n")}`;
+  `[LEAD] 지침 보충: 이 lane을 열 때 브리프에 없던 사용자 지침·리드 규칙이다. 하던 일은 그대로 이어가고, 지금부터 아래 지침도 따른다. 브리프 ${brief}의 "${APPLIED_HEADING.slice(3)}" 절에도 적었다.\n\n${texts.join("\n\n")}`;
 
 export type ApplyResult = { readonly lines: readonly string[]; readonly added: readonly string[]; readonly ok: boolean; readonly message?: string };
 
@@ -188,13 +188,13 @@ export const applyDirectives = async (deps: FlowDeps, lane: Lane, opts: { readon
   return { ok: true, added: ids, message, lines: [...lines, line] };
 };
 
-// --- dori directives check: a reviewer of another family compares each prompt with his message ---
+// --- dori directives check: a reviewer of another family compares each prompt with their message ---
 
 export const MEANING_SYSTEM = "You compare an owner's message with a directive a lead rewrote from it. You answer only in the requested format. You never ask questions and never translate quotes.";
 
 export const meaningPrompt = (e: Pick<Directive, "id" | "name" | "basis" | "rule" | "words" | "original" | "prompt">): string => [
-  "An owner gave a standing directive in Korean. WORDS is the directive as he said it: his message with only fillers and whole unrelated sentences left out. ORIGINAL is his whole message, for context. PROMPT is the lead's rewrite of WORDS as a standing rule for coding agents: what a lane does from now on, in general terms, imperative or declarative, no question, no spoken filler.",
-  `CONTEXT (the lead's notes, not his words): the directive is called "${e.name}"; ${e.basis ?? ""}${e.rule ? ` The lead applies it as: ${e.rule}` : ""}`,
+  "An owner gave a standing directive in Korean. WORDS is the directive as he said it: their message with only fillers and whole unrelated sentences left out. ORIGINAL is their whole message, for context. PROMPT is the lead's rewrite of WORDS as a standing rule for coding agents: what a lane does from now on, in general terms, imperative or declarative, no question, no spoken filler.",
+  `CONTEXT (the lead's notes, not their words): the directive is called "${e.name}"; ${e.basis ?? ""}${e.rule ? ` The lead applies it as: ${e.rule}` : ""}`,
   "WORDS can hold a task he asked to be done once in that message, a description of that situation or an aside; those are not the standing directive, and PROMPT leaving them out is not MISSING. A remark about a past case (\"처음부터 있었어야 할 것 같아\") may become the rule it implies. The rewrite may change the form (question to order, spoken to written, \"해 줘\" to \"한다\"), say who \"나\" and \"너\" are (형 = the owner, 리드 = the agent he spoke to) and name what a bare reference (\"이런 스레드\") points at when CONTEXT says it, and nothing else: it takes no requirement from the lead's notes that WORDS does not state. Check that PROMPT keeps every condition, target, scope, exception, step and the strength of WORDS (반드시 / 항상 / 절대 / 모두 / 가끔 stay as strong or as weak), and adds no requirement, target or method he did not state.",
   `ORIGINAL:\n<<<\n${e.original ?? e.words}\n>>>`,
   `WORDS:\n<<<\n${e.words}\n>>>`,
@@ -220,7 +220,7 @@ const meaningKey = (e: Directive): string => createHash("sha256").update(JSON.st
 type MeaningCache = Record<string, { readonly id: string; readonly model: string; readonly at: string }>;
 export const meaningCachePath = (stateDir: string): string => join(stateDir, "directives", "meaning.json");
 
-// Every owner entry with a prompt, against his words, by a reviewer of another family than the lead's model (reviewers.models,
+// Every owner entry with a prompt, against their words, by a reviewer of another family than the lead's model (reviewers.models,
 // reviewers.first first, the reviewers command). A SAME verdict is kept per (id, original, words, prompt) in the state
 // directory, so only a new or changed prompt is read again. Lines: DIRECTIVES_MEANING_OK, DIRECTIVES_BAD (meaning changed),
 // DIRECTIVES_MEANING_FAILED (no reviewer answered: not checked, and the check fails).
@@ -259,7 +259,7 @@ export const checkMeaning = async (deps: Pick<FlowDeps, "run" | "config" | "cloc
         return `DIRECTIVES_MEANING_OK ${e.id} [${model}]`;
       }
       ok = false;
-      return `DIRECTIVES_BAD directive ${e.id}: prompt does not mean what his words mean: ${v.problems.join("; ") || "CHANGED"} [${model}]`;
+      return `DIRECTIVES_BAD directive ${e.id}: prompt does not mean what their words mean: ${v.problems.join("; ") || "CHANGED"} [${model}]`;
     }
     ok = false;
     return `DIRECTIVES_MEANING_FAILED ${e.id}: no reviewer answered (${tried.join(" | ")})`;
@@ -354,10 +354,10 @@ export const memoryRepoFor = (cwd: string, home: string): string => {
   return join(home, ".omo", "memory", "agents", `${slug}-${createHash("sha256").update(cwd).digest("hex").slice(0, 8)}`, "repo");
 };
 
-// The lead memory files where his standing directives were kept before the ledger: system/*.md and reference/*.md, not
-// the lead's journal about itself (reference/self/, and system/self-aware.md, which reflection writes from it: his words
+// The lead memory files where their standing directives were kept before the ledger: system/*.md and reference/*.md, not
+// the lead's journal about itself (reference/self/, and system/self-aware.md, which reflection writes from it: their words
 // there are what he said about the lead's behaviour, quoted as evidence), and not system/boundaries.md, which keeps what he
-// told the lead not to do in his own words by design (a pointer there would be a rewording). A repo that is not there
+// told the lead not to do in their own words by design (a pointer there would be a rewording). A repo that is not there
 // leaves the check out, with a line.
 const MEMORY_LEFT_OUT = ["system/self-aware.md", "system/boundaries.md"];
 export const memoryFiles = (repo: string, skipped: string[]): { readonly path: string; readonly text: string }[] => {

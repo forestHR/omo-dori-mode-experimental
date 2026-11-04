@@ -1116,7 +1116,7 @@ try {
     case "challenge": {
       if (flags.values.check) {
         const own = key ? ((await lane(key)).model ?? config.defaultModel) : undefined;
-        const listed = own ? reviewers(own, config.reviewers.models, config.reviewers.allowSameFamily === true) : [...config.reviewers.models];
+        const listed = own && config.reviewers.allowOwnModel !== true ? reviewers(own, config.reviewers.models, config.reviewers.allowSameFamily === true) : [...config.reviewers.models];
         const checks = await checkReviewers(deps, listed);
         for (const c of checks) console.log(c.call ? `REVIEWER_OK ${c.listed}${c.call !== c.listed ? ` -> ${c.call}` : ""} (${familyOf(c.listed)}): ${c.note}` : `REVIEWER_SKIP ${c.listed} (${familyOf(c.listed)}): ${c.note}`);
         if (!checks.some((c) => c.call)) die("no reviewer in reviewers.models can be called on this host");
@@ -1662,10 +1662,14 @@ try {
       await quietGuard();
       const platform = key ?? die("send needs slack, telegram or discord");
       onlyOptions("send", ["to", "text", "text-file", "thread", "edit", "status", "no-typing", "ping", "reply", "again", "file"], 1);
-      const to = need("to");
+      const target = need("to");
+      const slackRef = platform === "slack" && target.startsWith("slack:") ? /^slack:([A-Z0-9]+):(\d+\.\d+)$/.exec(target) : undefined;
+      if (platform === "slack" && target.startsWith("slack:") && !slackRef) die("SEND_TARGET_INVALID use slack:<channel>:<thread_ts>", 2);
+      if (slackRef && opt("thread") && opt("thread") !== slackRef[2]) die("SEND_TARGET_CONFLICT --thread differs from the Slack thread reference", 2);
+      const to = slackRef?.[1] ?? target;
       const status = opt("status");
       if (status !== undefined && (platform !== "discord" || (status !== "working" && status !== "done"))) die("--status takes working or done, with discord");
-      const thread = opt("thread");
+      const thread = opt("thread") ?? slackRef?.[2];
       const edit = opt("edit");
       const filePaths = ((flags.values.file as (string | boolean)[] | undefined) ?? []).map((p) => (typeof p === "string" ? p.trim() : ""));
       if (filePaths.some((p) => !p)) die("SEND_FILE_REFUSED --file takes a path; nothing was sent", 2);

@@ -230,7 +230,9 @@ export type Stuck = { readonly hypothesesAt: number; readonly researchAt: number
 // the close summary and the rollover audit still take another family. first: the models id those four try first
 // (gpt-6.1-sol: on live Korean lane logs the cheaper gpt-6-luna misread a relayed order's scope); command: their argv
 // template ({model}, {prompt}, {system}); minutes: their time limit per call.
-export type Reviewers = { readonly models: readonly string[]; readonly allowSameFamily: boolean; readonly first: string; readonly command: ArgvTemplate; readonly minutes: number };
+// allowOwnModel explicitly permits fresh-context intent checks and challenges on single-model hosts.
+// It is off by default and does not change merge-gate or other reviewer policies.
+export type Reviewers = { readonly models: readonly string[]; readonly allowSameFamily: boolean; readonly allowOwnModel: boolean; readonly first: string; readonly command: ArgvTemplate; readonly minutes: number };
 
 // dori review / dori merge (src/merge-gate.ts). repos: "<owner>/<repo>" -> ISO time; claim-done refuses a lane whose done
 // signal names a PR of that repo merged at or after that time without dori merge (empty: no repo is checked). testCommand
@@ -543,8 +545,9 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   reviewers: {
     models: ["chatgpt-subscription/gpt-6-astra", "anthropic-subscription/claude-fable-5-1", "xai/grok-4.7", "chatgpt-subscription/gpt-6.1-sol", "anthropic-subscription/claude-opus-5-5", "xai/grok-4.6", "chatgpt-subscription/gpt-6-luna"],
     allowSameFamily: false,
+    allowOwnModel: false,
     first: "chatgpt-subscription/gpt-6.1-sol",
-    command: ["omo", "-p", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--omo-senpi-disabled", "--system-prompt", "{system}", "--model", "{model}", "{prompt}"],
+    command: ["omo", "-p", "--no-session", "--no-tools", "--no-skills", "--no-context-files", "--omo-senpi-disabled", "--system-prompt", "{system}", "--model", "{model}", "{prompt}"],
     minutes: 4,
   },
   scorecard: {
@@ -573,7 +576,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
     treeLines: 6,
     modelsCommand: ["omo", "--list-models"],
     authCommand: ["omo", "auth", "check", "--provider", "{provider}", "--json"],
-    challengeCommand: ["omo", "-p", "--no-session", "--tools", "read,grep,find,ls", "--no-extensions", "--no-skills", "--no-context-files", "--omo-senpi-disabled", "--system-prompt", "{system}", "--model", "{model}", "{prompt}"],
+    challengeCommand: ["omo", "-p", "--no-session", "--tools", "read,grep,find,ls", "--no-skills", "--no-context-files", "--omo-senpi-disabled", "--system-prompt", "{system}", "--model", "{model}", "{prompt}"],
     challengeMinutes: 10,
     branchCommand: ["omo", "-p", "--no-session", "--model", "{model}", "{prompt}"],
     branchMinutes: 15,

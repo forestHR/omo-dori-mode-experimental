@@ -95,22 +95,26 @@ test("launch puts an inject directive in scope into the brief as the ledger writ
   expect(r.missing).toEqual([]);
   expect(count(r.text, directiveText(options!))).toBe(1);
   // the prompt written from his words under a one-line tag (his spoken words stay in the ledger); never the rule or a summary
-  expect(r.text).toContain(`\n[형 지침 options-ledger, 2026-10-16]\n${options?.prompt}\n`);
+  expect(r.text).toContain(`\n[사용자 지침 options-ledger, 2026-10-16]\n${options?.prompt}\n`);
   expect(r.text).not.toContain(options?.words ?? "-");
   expect(r.text).not.toContain(options?.rule ?? "-");
   for (const e of loadLedger(deps.config).entries) {
     if (e.basis) expect(r.text).not.toContain(e.basis);
     if (e.trigger) expect(r.text).not.toContain(e.trigger);
   }
-  expect(r.text.indexOf("## 형 지침 (지침 장부에서 dori launch가 넣음)")).toBeGreaterThan(r.text.indexOf("8. 보고:"));
-  expect(r.text.indexOf("## 형 지침")).toBeLessThan(r.text.indexOf("## Lane footer"));
+  expect(r.text.indexOf("## 사용자 지침 (지침 장부에서 dori launch가 넣음)")).toBeGreaterThan(r.text.indexOf("8. 보고:"));
+  expect(r.text.indexOf("## 사용자 지침")).toBeLessThan(r.text.indexOf("## Lane footer"));
   expect(r.lines.find((l) => l.startsWith("LAUNCH_DIRECTIVE_ADDED lane-a:"))).toContain("options-ledger (repo hr35-isaac)");
   // another repo: not in scope
   expect((await renderBrief(deps, input(await write("b2.md", fields), { cwd: "/work/app" }))).text).not.toContain("[지침 options-ledger]");
   // a relaunch of the written brief adds nothing again
   const again = await renderBrief(deps, input(await write("b3.md", r.text)));
-  expect(count(again.text, "[형 지침 options-ledger,")).toBe(1);
+  expect(count(again.text, "[사용자 지침 options-ledger,")).toBe(1);
   expect(again.lines.some((l) => l.startsWith("LAUNCH_DIRECTIVE_ADDED"))).toBe(false);
+  // Historical tags still identify a directive when its old prompt differs from today's.
+  const historical = `${fields}\n[형 지침 options-ledger, 2026-10-16]\nPreviously injected wording.\n`;
+  const old = await renderBrief(deps, input(await write("legacy.md", historical)));
+  expect(old.lines.some((line) => line.startsWith("LAUNCH_DIRECTIVE_ADDED") && line.includes("options-ledger"))).toBe(false);
 });
 
 test("entries with via stay in the ledger and in scope but go into a brief as their one pointer; the pointer counts for them", async () => {
@@ -331,7 +335,7 @@ test("an owner entry with words goes into briefs as its prompt: a prompt is requ
   for (const asks of ["문서를 갱신해야 하지 않아?", "문서를 갱신하지 않아.", "문서도 같이 고칠까."])
     expect(ledgerProblems({ ...both, entries: [{ ...owner, prompt: asks }] })[0]).toContain("prompt is a question");
   expect(ledgerProblems({ ...both, entries: [{ ...lead, prompt: "무언가 한다." }] })[0]).toContain("prompt is for an owner entry with words");
-  expect(directiveText(owner)).toBe(`[형 지침 docs-same-pr, 2026-10-10]\n${owner.prompt}`);
+  expect(directiveText(owner)).toBe(`[사용자 지침 docs-same-pr, 2026-10-10]\n${owner.prompt}`);
   // a field with a note after its name ("[끝난 상태 — 2단계]") is that field; a missing one is not
   const four = both.entries.find((e) => e.id === "four-fields")!;
   expect(requireMissing(fields.replace("[끝난 상태]", "[끝난 상태 — 2단계]"), four)).toEqual([]);
@@ -374,6 +378,8 @@ test("directives apply: a lane launched before the ledger gets what its brief la
   expect(scopeContext(text, ledger, { repo: "hr35-isaac" }).kinds).toEqual(scopeContext(old, ledger, { repo: "hr35-isaac" }).kinds);
   // words of a directive added there are not the lane's work: a section full of UI words does not make it UI work
   expect(scopeContext(withApplied(old, ["대시보드 화면 프론트엔드 디자인 UI"]), ledger, { repo: "x" }).ui).toBe(false);
+  const historical = `${fields}\n## 형 지침 (지침 장부에서 dori launch가 넣음)\n대시보드 화면 프론트엔드 디자인 UI\n`;
+  expect(scopeContext(historical, ledger, { repo: "x" }).ui).toBe(false);
   expect(await Bun.file(deps.config.watchLog).text()).toMatch(/^\S+ directives DIRECTIVES_APPLIED old: eight-steps, /m);
   expect((await deps.registry.read("old"))?.directives?.applied).toEqual(expect.arrayContaining(before));
   // again: nothing to send, nothing written
@@ -438,7 +444,7 @@ test("directives check: a reviewer of another family reads each new prompt again
   const bad = await checkMeaning(deps, changed);
   expect(bad.ok).toBe(false);
   expect(asked).toHaveLength(owner.length + 1);
-  expect(bad.lines).toContain("DIRECTIVES_BAD directive skill-check: prompt does not mean what his words mean: STRENGTH: 반드시 꼭 vs 가능하면 [openai/gpt-6]");
+  expect(bad.lines).toContain("DIRECTIVES_BAD directive skill-check: prompt does not mean what their words mean: STRENGTH: 반드시 꼭 vs 가능하면 [openai/gpt-6]");
   // no reviewer answers: not checked, and the check fails
   reply = "I think it is fine";
   const none = await checkMeaning(deps, { ...ledger, entries: [{ ...skill, prompt: "다음부터는 스킬을 반드시 확인한다." }] });
@@ -587,7 +593,7 @@ test("an owner message carries the directives its words call, the host's own fir
   expect(ledgerProblems(ledger)).toEqual([]);
   const said = textDirectives("그리고 카드처리해 서류 준비하고 있어", ledger);
   expect(said.map(({ e, why }) => `${e.id} (${why})`)).toEqual(["card-docs (keyword 카드)", "request-thread (keyword 카드)"]);
-  expect(directiveLine(said[0]!.e)).toBe("[형 지침 card-docs, 2026-10-19] 카드 미결재 항목이 올라오면 서류를 준비한다.");
+  expect(directiveLine(said[0]!.e)).toBe("[사용자 지침 card-docs, 2026-10-19] 카드 미결재 항목이 올라오면 서류를 준비한다.");
   // a message that calls nothing gets nothing (not the every-lane entries), and a kind needs one hit in a message
   expect(textDirectives("오늘 점심 뭐 먹지", ledger)).toEqual([]);
   expect(textDirectives("이 PC에서 강화학습 돌려", ledger).map(({ e }) => e.id)).toEqual(["report-table", "gate-deferred", "approval-table", "redefined"]);
