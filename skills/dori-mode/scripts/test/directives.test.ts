@@ -620,7 +620,7 @@ test("a briefOnly entry reaches a brief only when its scope hits, and the lead's
 test("no scope narrowed for briefs hits the eight-step template by itself: it would be every lane again", async () => {
   const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
   const narrowed = ledger.entries.filter((e) => e.scope.briefOnly);
-  expect(narrowed.map((e) => e.id).sort()).toEqual(["herdr-only", "new-features-zzangdori", "pair-efficient", "pair-owner-relay", "pair-route"]);
+  expect(narrowed.map((e) => e.id).sort()).toEqual(["new-features-zzangdori", "pair-efficient", "pair-owner-relay", "pair-route"]);
   const ctx = scopeContext(await eightSteps(), ledger, { repo: "some-repo" });
   expect(narrowed.filter((e) => appliesWhy(e, ctx)).map((e) => e.id)).toEqual([]);
 });
