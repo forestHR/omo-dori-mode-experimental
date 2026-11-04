@@ -513,11 +513,13 @@ export const auditHandover = async (deps: LaneHandoverDeps, c: Committed, opts: 
   emit(`HANDOVER_AUDIT_COST ${c.key} ${c.stamp}: ${Math.round(ms / 1000)} s, ${cost.calls} model call(s), ~${tokensEst} tokens (estimated from the text size)`);
   // the old lead stays frozen only until its audit passed (owner Q476: 17 freezes, no thaw in three weeks): it is closed
   // now; an audit that left something out, or could not sort, keeps it frozen until handover.frozenCloseH, and one kept
-  // by hand (--keep-old, or handover.frozenCloseH 0: no closeAt) stays kept (review #321)
+  // by hand (--keep-old, or handover.frozenCloseH 0: no closeAt) stays kept (review #321). The audit passed only when it
+  // saw the new session: without its log the todo, goal and monitor checks above were skipped, not passed (review #332)
   if (c.who === "lead") {
     const rec = readFrozen(config.stateDir).find((f) => f.to === c.to);
-    const passed = !unsorted && rows.every((r) => r.fixed);
-    const why = !passed ? `the audit ${unsorted ? "could not sort what the old conversation held" : `left ${rows.filter((r) => !r.fixed).length} item(s) not filled in`}; it stays frozen until ${rec?.closeAt ?? "it is closed by hand"}` : "the audit passed, but it is kept until it is closed by hand (--keep-old, or handover.frozenCloseH 0)";
+    const unseen = !session ? "could not find the new session" : !sessionFile(sessionDir, session) ? `could not read the new session's log (${session})` : "";
+    const passed = !unsorted && !unseen && rows.every((r) => r.fixed);
+    const why = !passed ? `the audit ${unsorted ? "could not sort what the old conversation held" : unseen ? `${unseen}, so its todos, goal and monitors were not checked` : `left ${rows.filter((r) => !r.fixed).length} item(s) not filled in`}; it stays frozen until ${rec?.closeAt ?? "it is closed by hand"}` : "the audit passed, but it is kept until it is closed by hand (--keep-old, or handover.frozenCloseH 0)";
     if (rec && !rec.keepFor?.length) emit(passed && rec.closeAt ? `${await closeFrozen(deps, config.stateDir, rec, deps.clock.now())} (the audit after the handover passed)` : `HANDOVER_OLD_KEPT_FROZEN ${rec.pane}: ${why} (dori handover thaw ${rec.pane} resumes it)`);
   }
   return { code: 0, rows, line };

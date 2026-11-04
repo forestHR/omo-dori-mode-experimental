@@ -300,7 +300,8 @@ test("a monitor that starts work, re-armed watch-only as the note asks, is no ga
 
 // A committed lead handover on disk, its old lead frozen until the audit (owner Q476)
 const LEAD_OLD = "aoe_lead_1b1b1b1b";
-const leadHandover = (log: readonly string[], frozen: { readonly closeAt?: string } = { closeAt: "2026-10-20T10:01:00.000Z" }) => {
+// o.session: the new session's id in the result (undefined: a monitorless handover named none); o.newLog: its log on disk
+const leadHandover = (log: readonly string[], frozen: { readonly closeAt?: string } = { closeAt: "2026-10-20T10:01:00.000Z" }, o: { readonly todos?: readonly string[]; readonly session?: string; readonly newLog?: boolean } = { session: "new-sid" }) => {
   const top = join(state.dir, "handover");
   mkdirSync(top, { recursive: true });
   mkdirSync(sessionDir(), { recursive: true });
@@ -308,9 +309,9 @@ const leadHandover = (log: readonly string[], frozen: { readonly closeAt?: strin
   writeFileSync(oldLog, log.join("\n"));
   const note = join(top, "20261019-100000.md");
   writeFileSync(note, "# Lead handover\n");
-  writeFileSync(join(top, "20261019-100000.json"), JSON.stringify({ cwd: CWD, oldLog, todos: [], monitors: [], leadNote: "" }));
-  writeFileSync(join(top, "20261019-100000.result.json"), JSON.stringify({ at: COMMIT, note, to: { pane: NEW, session: "new-sid" }, result: "done-frozen", reasons: [] }));
-  writeFileSync(join(sessionDir(), "2026-10-19T10-00-00-000Z_new-sid.jsonl"), "");
+  writeFileSync(join(top, "20261019-100000.json"), JSON.stringify({ cwd: CWD, oldLog, todos: o.todos ?? [], monitors: [], leadNote: "" }));
+  writeFileSync(join(top, "20261019-100000.result.json"), JSON.stringify({ at: COMMIT, note, to: { pane: NEW, ...(o.session ? { session: o.session } : {}) }, result: "done-frozen", reasons: [] }));
+  if (o.newLog !== false) writeFileSync(join(sessionDir(), "2026-10-19T10-00-00-000Z_new-sid.jsonl"), "");
   writeFrozen(state.dir, { pane: LEAD_OLD, aoeId: "1b1b1b1b00001111", at: COMMIT, agentPid: 11, pids: [11, 12], ...frozen, to: NEW });
   w.aoe.push({ id: "1b1b1b1b00001111", title: "lead", path: CWD, tool: "omo", profile: "main" });
   w.tmux.push(LEAD_OLD);
@@ -340,6 +341,35 @@ test("an audit that leaves something out keeps the old lead frozen until frozenC
   await leadAudit(deps, sorter({ [QUOTE]: "STANDING" }));
   // Then
   expect(deps.printed.find((l) => l.startsWith(`HANDOVER_OLD_KEPT_FROZEN ${LEAD_OLD}: the audit left 1 item(s) not filled in`))).toContain("2026-10-20T10:01:00.000Z");
+  expect(readFrozen(state.dir).map((r) => r.pane)).toEqual([LEAD_OLD]);
+});
+
+test("an audit that could not find the new session keeps the old lead frozen while the old session had work left", async () => {
+  // Given: review #332 on #321, a monitorless handover named no session, the lookup failed, and the old lead had an open todo
+  leadHandover([said("2026-10-19T09:00:00Z", `[LEAD] 형(18:04 KST, ${OWNER_MSG}): "${QUOTE}" — 고쳐`)], undefined, { todos: ["Work: ship it (in_progress)"] });
+  const base = await setup();
+  const deps = { ...base, config: { ...base.config, leadPane: NEW }, sessionOf: async () => "" };
+  const sorted: Classify = async (items) => ({ verdicts: items.map(() => ({ verdict: "DONE" as const, why: "done" })), model: "test/model" });
+  // When
+  await leadAudit(deps, sorted);
+  // Then
+  expect(deps.printed.find((l) => l.startsWith("HANDOVER_OLD_CLOSED"))).toBeUndefined();
+  expect(deps.printed.find((l) => l.startsWith(`HANDOVER_OLD_KEPT_FROZEN ${LEAD_OLD}`))).toContain("2026-10-20T10:01:00.000Z");
+  expect(readFrozen(state.dir).map((r) => r.pane)).toEqual([LEAD_OLD]);
+  expect(w.calls.some((c) => c[0] === "aoe" && c[1] === "rm")).toBe(false);
+});
+
+test("an audit that found the new session but could not read its log keeps the old lead frozen", async () => {
+  // Given: the new session's id is known, its log is not on disk, so its todos, goal and monitors were never seen
+  leadHandover([said("2026-10-19T09:00:00Z", `[LEAD] 형(18:04 KST, ${OWNER_MSG}): "${QUOTE}" — 고쳐`)], undefined, { session: "new-sid", newLog: false });
+  const base = await setup();
+  const deps = { ...base, config: { ...base.config, leadPane: NEW } };
+  const sorted: Classify = async (items) => ({ verdicts: items.map(() => ({ verdict: "DONE" as const, why: "done" })), model: "test/model" });
+  // When
+  await leadAudit(deps, sorted);
+  // Then
+  expect(deps.printed.find((l) => l.startsWith("HANDOVER_OLD_CLOSED"))).toBeUndefined();
+  expect(deps.printed.find((l) => l.startsWith(`HANDOVER_OLD_KEPT_FROZEN ${LEAD_OLD}`))).toBeDefined();
   expect(readFrozen(state.dir).map((r) => r.pane)).toEqual([LEAD_OLD]);
 });
 
