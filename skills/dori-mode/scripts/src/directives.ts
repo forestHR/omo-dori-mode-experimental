@@ -28,6 +28,8 @@ export type DirectiveScope = {
   readonly kinds?: readonly string[];
   readonly repos?: readonly string[];
   readonly keywords?: readonly string[];
+  // narrowed for lane briefs only: the lead's surfaces stay as for an every-lane entry (no owner row, every thread it opens)
+  readonly briefOnly?: boolean;
 };
 
 export type Directive = {
@@ -477,8 +479,8 @@ export const textDirectives = (text: string, ledger: Ledger, opts: { readonly al
   const ctx = scopeContext(text, { ...ledger, minHits: 1 }, { repo: "" });
   const out: { e: Directive; why: string; rank: number }[] = [];
   for (const [i, e] of ledger.entries.entries()) {
-    if (e.mode === "require" || e.block || (e.scope.all && !opts.all)) continue;
-    const why = appliesWhy(e, ctx);
+    if (e.mode === "require" || e.block || ((e.scope.all || e.scope.briefOnly) && !opts.all)) continue;
+    const why = e.scope.briefOnly ? "all lanes" : appliesWhy(e, ctx);
     if (!why) continue;
     const shown = e.mode === "inject" ? (pointerOf(e, ledger) ?? e) : e;
     if (out.some((x) => x.e.id === shown.id)) continue;
@@ -664,7 +666,7 @@ export const promptTable = (ledger: Ledger): string => {
 // The ledger as one table for the owner.
 export const ledgerTable = (ledger: Ledger): string => {
   const cell = (s: string) => s.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
-  const scope = (s: DirectiveScope) => [s.all ? "모든 lane" : "", s.ui ? "UI" : "", ...(s.kinds ?? []), ...(s.repos ?? []).map((r) => `저장소 ${r}`), ...(s.keywords ?? []).map((k) => `낱말 /${k}/`)].filter(Boolean).join(", ");
+  const scope = (s: DirectiveScope) => [s.all ? "모든 lane" : "", s.ui ? "UI" : "", ...(s.kinds ?? []), ...(s.repos ?? []).map((r) => `저장소 ${r}`), ...(s.keywords ?? []).map((k) => `낱말 /${k}/`), s.briefOnly ? "브리프만(리드 쪽은 모든 lane처럼)" : ""].filter(Boolean).join(", ");
   const how = (e: Directive) => (e.mode === "inject" ? (e.block ? `주입(${e.block})` : e.via ? `주입(포인터 ${e.via}로)` : "주입") : e.mode === "require" ? "브리프 확인(없으면 멈춤)" : e.check === "none" ? "리드 행동(기계 확인 없음, intent-check가 읽음)" : `리드 행동 확인(${e.check})`);
   const words = (e: Directive) => (e.words ? `"${e.words}"` : e.block ? `(블록 원문: ${e.block === "eight-steps" ? "references/sessions.md 1. 조사 … 8. 보고" : "references/ui-work.md [UI 지침] 1)…7)"})` : e.by === "lead" ? "-" : "(원문 없음)");
   return [

@@ -401,7 +401,10 @@
       "date": "2026-10-20",
       "source": "형 2026-10-20 00:55 KST(#zzangdori, 리드 질문에 대한 답), 전달 짱돌 리드 [LEAD → lane yoodori-message-ux]",
       "scope": {
-        "all": true
+        "keywords": [
+          "도리 ?방|dori-pair|pair ?(?:채널|channel)|도리끼리|다른 도리|도리들|유돌|유도리|옥돌|옥도리|무돌|무도리|공돌|공도리|수돌|수도리|고돌|고도리|짱돌|짱도리|yoodori|okdori|moodori|gongdori|soodori|zzangdori"
+        ],
+        "briefOnly": true
       },
       "mode": "inject"
     },
@@ -444,7 +447,10 @@
       "date": "2026-10-24",
       "source": "형 2026-10-24 10:56 KST(그 도리 채널, 음성, 짱돌 봇 글 답), 10:59 KST(#zzangdori); 전달 짱돌 리드, 레인 yoodori-pair-route",
       "scope": {
-        "all": true
+        "keywords": [
+          "도리 ?방|dori-pair|pair ?(?:채널|channel)|도리끼리|다른 도리|도리들|유돌|유도리|옥돌|옥도리|무돌|무도리|공돌|공도리|수돌|수도리|고돌|고도리|짱돌|짱도리|yoodori|okdori|moodori|gongdori|soodori|zzangdori"
+        ],
+        "briefOnly": true
       },
       "mode": "inject"
     },
@@ -504,7 +510,10 @@
       "date": "2026-11-02",
       "source": "형 2026-11-02 11:06 KST(#zzangdori, 유돌 #yoodori 10:04 KST '올릴까?' 글을 전달하며), 전달 짱돌 리드, 레인 pair-owner-relay",
       "scope": {
-        "all": true
+        "keywords": [
+          "도리 ?방|dori-pair|pair ?(?:채널|channel)|도리끼리|다른 도리|도리들|유돌|유도리|옥돌|옥도리|무돌|무도리|공돌|공도리|수돌|수도리|고돌|고도리|짱돌|짱도리|yoodori|okdori|moodori|gongdori|soodori|zzangdori|발송|메일"
+        ],
+        "briefOnly": true
       },
       "mode": "inject"
     },
@@ -597,7 +606,18 @@
       "date": "2026-11-03",
       "source": "형 2026-11-03 09:56 KST(#zzangdori 음성), 09:57·09:58 KST(#dori-pair, 리드 분장 알림 정정), 09:59 KST(#zzangdori, 릴리스 확인), 전달 짱돌 리드, 레인 new-features-zzangdori",
       "scope": {
-        "all": true
+        "repos": [
+          "omo-dori-mode-experimental",
+          "cytoplasm"
+        ],
+        "kinds": [
+          "release",
+          "feature"
+        ],
+        "keywords": [
+          "도리 ?방|dori-pair|pair ?(?:채널|channel)|도리끼리|다른 도리|도리들|유돌|유도리|옥돌|옥도리|무돌|무도리|공돌|공도리|수돌|수도리|고돌|고도리|짱돌|짱도리|yoodori|okdori|moodori|gongdori|soodori|zzangdori|릴리스|릴리즈|새 기능|신규 기능|업무 ?분장"
+        ],
+        "briefOnly": true
       },
       "mode": "inject"
     },
@@ -663,7 +683,13 @@
       "date": "2026-11-03",
       "source": "형 2026-11-03 13:00 KST, herdr-switch 작업 스레드, 전달 짱돌 리드, 레인 herdr-switch",
       "scope": {
-        "all": true
+        "repos": [
+          "omo-dori-mode-experimental"
+        ],
+        "keywords": [
+          "herdr|\\baoe\\b|tmux|dori-mode"
+        ],
+        "briefOnly": true
       },
       "mode": "inject"
     },
