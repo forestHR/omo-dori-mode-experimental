@@ -72,7 +72,7 @@ cd skills/dori-mode/scripts && bun install && bun link    # puts `dori` on PATH
 mkdir -p ~/.dori && cp ../references/config.example.json ~/.dori/config.json
 ```
 
-`install.sh` does the same and first updates `~/.dori/src` (`DORI_SRC`) with `git pull --ff-only`. If local changes or local commits there block that pull, it exits 1 with the checkout, its `git status --short` and both ways on: rerun with `DORI_NO_PULL=1` to install the checkout as it is, or drop the work (`git -C ~/.dori/src fetch && git -C ~/.dori/src reset --hard '@{u}'`) and rerun. If the branch there follows no upstream (`git branch --unset-upstream`, or a detached HEAD), it says so and gives `git branch --set-upstream-to=origin/main` (on a detached HEAD, `git switch main` first) instead of the reset. `DORI_NO_PULL` also takes `true`, `yes` or `on`; `0`, `false`, `no` or `off` pull, and any other value stops the install instead of pulling quietly.
+`install.sh` does the same and first updates `~/.dori/src` (`DORI_SRC`) with `git pull --ff-only`. If local changes or local commits there block that pull, it exits 1 with the checkout, its `git status --short` and both ways on: rerun with `DORI_NO_PULL=1` to install the checkout as it is, or drop the work (`git -C ~/.dori/src fetch && git -C ~/.dori/src reset --hard '@{u}'`) and rerun.
 
 Then edit `~/.dori/config.json`: at least `leadPane` (your own herdr pane, from `herdr pane current`; with aoe, your tmux session name), `laneWorkspace` (herdr only), `defaultCwd`, and the two hooks if you want lane threads updated automatically. `references/scripts.md` explains every field.
 
@@ -80,13 +80,9 @@ Then edit `~/.dori/config.json`: at least `leadPane` (your own herdr pane, from 
 
 Arm these as persistent monitors in your own session:
 
-<!-- Inbound rows per platform: agent-messenger has no watch command (dori-superagent issue #74, https://github.com/sisyphuslabs/dori-superagent/issues/74). -->
-
 | Monitor | Command | Filter |
 |---|---|---|
-| inbound messages (Discord) | `tail -n 0 -F <stateDir>/discord/inbox.jsonl` (`DORI_DISCORD_INBOX` if set), the inbox `dori inbound discord` writes; keep that listener running as a service (`dori-inbound` unit, or `dori serve --only inbound`: a bare `dori serve` also runs `dori watch` and the other loops below, which would then run twice) | every new row |
-| inbound messages (Slack) | the two Slack rows below | as there |
-| inbound messages (Telegram) | none yet: neither agent-messenger nor `dori` has a Telegram watch command (`dori inbound` takes only `slack` and `discord`), so a Telegram Dori needs its own `getUpdates` poller until one ships | — |
+| inbound messages | your messenger's watch command | new owner messages |
 | done flow (and `LANE_BLOCKED` with aoe) | `dori watch` | `^LANE_` |
 | dead panes | `dori dead-panes --loop 3` | `^(DEAD\|UNRECOGNISED)_PANE` |
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |

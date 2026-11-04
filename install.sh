@@ -4,8 +4,7 @@
 #        curl -fsSL https://raw.githubusercontent.com/orientpine/omo-dori-mode-experimental/main/install.sh | DORI_BACKEND=aoe bash
 # Needs: git, bun 1.3+, and the lane backend: herdr, or aoe and tmux.
 # Optional env: DORI_BACKEND (herdr or aoe, default herdr), DORI_REPO (clone URL), DORI_SRC (clone dir),
-# SKILLS_DIR (where your agent loads skills), DORI_NO_PULL=1 (or true, yes, on: install an existing checkout as it is,
-# without pulling; 0, false, no, off or unset pull; any other value stops the install).
+# SKILLS_DIR (where your agent loads skills), DORI_NO_PULL=1 (install an existing checkout as it is, without pulling).
 set -euo pipefail
 
 repo="${DORI_REPO:-https://github.com/orientpine/omo-dori-mode-experimental.git}"
@@ -35,19 +34,10 @@ have agent-messenger || echo "note: agent-messenger not found; it is optional fo
 # A pull that local work blocks used to end with git's bare abort and no way to install the checkout as it is
 # (dori-superagent issue #48 reproduced here (MIT): https://github.com/sisyphuslabs/dori-superagent/issues/48).
 # Now it names the checkout and its local work and gives both ways on; DORI_NO_PULL=1 installs it without pulling.
-# DORI_NO_PULL=true used to pull quietly, since only 1 was read; a value that is neither yes nor no now stops the install
-# (dori-superagent issue #58 reproduced here (MIT): https://github.com/sisyphuslabs/dori-superagent/issues/58).
-no_pull="$(printf '%s' "${DORI_NO_PULL:-}" | tr '[:upper:]' '[:lower:]')"
-case "$no_pull" in
-  1|true|yes|on) no_pull=1 ;;
-  ''|0|false|no|off) no_pull= ;;
-  *) echo "DORI_NO_PULL must be 1, true, yes or on to install without pulling (or 0, false, no, off), got: $DORI_NO_PULL" >&2; exit 1 ;;
-esac
-
 if [ -d "$src/.git" ]; then
   origin="$(git -C "$src" remote get-url origin 2>/dev/null || true)"
-  if [ -n "$no_pull" ]; then
-    echo "DORI_NO_PULL=$DORI_NO_PULL: installing $src as it is, without pulling." >&2
+  if [ "${DORI_NO_PULL:-}" = 1 ]; then
+    echo "DORI_NO_PULL=1: installing $src as it is, without pulling." >&2
   elif [ "${origin%.git}" != "${repo%.git}" ]; then
     echo "warning: $src pulls from ${origin:-no origin}, not $repo; not updating it." >&2
     echo "  To follow $repo: git -C \"$src\" remote set-url origin \"$repo\" && git -C \"$src\" pull --ff-only" >&2
@@ -63,19 +53,7 @@ if [ -d "$src/.git" ]; then
     [ -z "$changes" ] || { echo "  Local changes in that checkout (git status --short):"; printf '%s\n' "$changes" | sed 's/^/    /'; } >&2
     [ -z "$ahead" ] || { echo "  Local commits upstream lacks:"; printf '%s\n' "$ahead" | sed 's/^/    /'; } >&2
     echo "  To install the checkout as it is, without pulling: run install.sh again with DORI_NO_PULL=1 (curl ... | DORI_NO_PULL=1 bash)." >&2
-    # With no upstream branch (git branch --unset-upstream, or a detached HEAD) there is no @{u} to reset to, so the
-    # way on is to follow one again (dori-superagent issue #58 reproduced here (MIT)).
-    branch="$(git -C "$src" symbolic-ref -q --short HEAD || true)"
-    if [ -n "$branch" ] && [ -n "$(git -C "$src" for-each-ref --format='%(upstream)' "refs/heads/$branch")" ]; then
-      echo "  If local work there is in the way and you want to drop it to update: git -C \"$src\" fetch && git -C \"$src\" reset --hard '@{u}', then run install.sh again." >&2
-    else
-      follow="$(git -C "$src" symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)"
-      if [ -n "$branch" ]; then
-        echo "  Branch $branch there follows no upstream branch, so there is nothing to pull. To follow $follow again: git -C \"$src\" branch --set-upstream-to=$follow, then run install.sh again." >&2
-      else
-        echo "  That checkout is on no branch (detached HEAD), so there is nothing to pull. To follow $follow again: git -C \"$src\" switch ${follow#origin/} && git -C \"$src\" branch --set-upstream-to=$follow, then run install.sh again." >&2
-      fi
-    fi
+    echo "  If local work there is in the way and you want to drop it to update: git -C \"$src\" fetch && git -C \"$src\" reset --hard '@{u}', then run install.sh again." >&2
     exit 1
   fi
 else

@@ -168,57 +168,6 @@ test("an untracked file in the way is listed even when the checkout hides untrac
   expect(readFileSync(join(src, "new.txt"), "utf8")).toBe("mine\n");
 });
 
-// dori-superagent issue #58 reproduced here (MIT): https://github.com/sisyphuslabs/dori-superagent/issues/58
-test("a branch with no upstream, or a detached HEAD, stops install.sh with the way to follow upstream again, not a reset to @{u}", () => {
-  const { upstream, src, commitUpstream, install } = setup();
-  commitUpstream("v2\n");
-  const before = git(src, "rev-parse", "HEAD");
-  git(src, "branch", "--unset-upstream");
-  const advised = (err: string) => {
-    const way = err.match(/To follow origin\/main again: (.+), then run install\.sh again\./)?.[1];
-    if (!way) throw new Error(`no way on in: ${err}`);
-    expect(Bun.spawnSync(["bash", "-c", way], { env: gitEnv }).exitCode).toBe(0);
-  };
-  const unset = install();
-  expect(unset.code).toBe(1);
-  expect(unset.err).toContain(`could not update ${src}`);
-  expect(unset.err).toContain("DORI_NO_PULL=1");
-  expect(unset.err).toContain(`git -C "${src}" branch --set-upstream-to=origin/main`);
-  expect(unset.err).not.toContain("reset --hard");
-  git(src, "checkout", "-q", "--detach");
-  const detached = install();
-  expect(detached.code).toBe(1);
-  expect(detached.err).toContain(`git -C "${src}" switch main && git -C "${src}" branch --set-upstream-to=origin/main`);
-  expect(detached.err).not.toContain("reset --hard");
-  expect(git(src, "rev-parse", "HEAD")).toBe(before);
-  advised(detached.err);
-  expect(install().code).toBe(0);
-  expect(git(src, "rev-parse", "HEAD")).toBe(git(upstream, "rev-parse", "HEAD"));
-  git(src, "branch", "--unset-upstream");
-  commitUpstream("v3\n");
-  const again = install();
-  expect(again.code).toBe(1);
-  advised(again.err);
-  expect(install().code).toBe(0);
-  expect(git(src, "rev-parse", "HEAD")).toBe(git(upstream, "rev-parse", "HEAD"));
-});
-
-test("DORI_NO_PULL=true or YES installs without pulling, 0 or false pulls, and a value that is neither stops the install", () => {
-  const { upstream, src, commitUpstream, install } = setup();
-  const before = git(src, "rev-parse", "HEAD");
-  commitUpstream("v2\n");
-  for (const value of ["true", "YES", "on"]) {
-    expect([value, install({ DORI_NO_PULL: value }).code]).toEqual([value, 0]);
-    expect(git(src, "rev-parse", "HEAD")).toBe(before);
-  }
-  const odd = install({ DORI_NO_PULL: "maybe" });
-  expect(odd.code).toBe(1);
-  expect(odd.err).toContain("DORI_NO_PULL must be 1, true, yes or on");
-  expect(git(src, "rev-parse", "HEAD")).toBe(before);
-  expect(install({ DORI_NO_PULL: "false" }).code).toBe(0);
-  expect(git(src, "rev-parse", "HEAD")).toBe(git(upstream, "rev-parse", "HEAD"));
-});
-
 test("DORI_NO_PULL=1 installs the checkout as it is, local edit and all", () => {
   const { src, file, commitUpstream, install } = setup();
   const before = git(src, "rev-parse", "HEAD");
