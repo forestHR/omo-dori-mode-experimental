@@ -1144,7 +1144,10 @@ const limitWorld = () => {
   const reply = (ms: number, errorMessage?: string) =>
     appendFileSync(leadFile, `${JSON.stringify({ timestamp: iso(ms), type: "message", message: { role: "assistant", content: [], ...(errorMessage ? { stopReason: "error", errorMessage } : { stopReason: "stop" }) } })}\n`);
   const laneReply = (ms: number, errorMessage?: string) => w.entry(ms, { type: "message", message: { role: "assistant", content: [], ...(errorMessage ? { stopReason: "error", errorMessage } : { stopReason: "stop" }) } });
-  return { deps, posts, row, reply, laneReply };
+  // an image the lead read: one tool-result line of base64 longer than the transcript tail the watch reads (2 MB)
+  const image = (ms: number, bytes: number) =>
+    appendFileSync(leadFile, `${JSON.stringify({ timestamp: iso(ms), type: "message", message: { role: "toolResult", toolName: "read", content: [{ type: "image", data: "A".repeat(bytes), mimeType: "image/png" }] } })}\n`);
+  return { deps, posts, row, reply, laneReply, image };
 };
 const blockedError = (until: number) => `All Claude accounts for anthropic-subscription are currently blocked (rate limit or auth errors).\n  Soonest automatic retry: ${iso(until)}.\n  /claude-account list  - inspect account states`;
 
@@ -1211,6 +1214,22 @@ test("an owner message the lead has not answered for leadWakeMin is typed into i
   l.reply(T0 + 15 * MIN);
   expect(await watchTick(l.deps(T0 + 40 * MIN))).toEqual([]);
   expect(sent(world)).toHaveLength(3);
+});
+
+test("a lead whose transcript ends in an image longer than the read tail answered the owner: nothing waits; a message after it still wakes the lead", async () => {
+  // live 2026-11-04 17:48Z: the lead read a 3.1 MB screenshot, the 2 MB tail held no reply, and 95 answered owner
+  // messages of the day read as waiting (LEAD_OWNER_WAITING ... 1332 min)
+  const l = limitWorld();
+  world.screen = watching("5: Dori inbox");
+  l.reply(T0 - 60 * MIN);
+  l.row(T0 - 30 * MIN, "m-1", "이 스레드 닫아도 되나?");
+  l.reply(T0 - 29 * MIN);
+  l.image(T0 - 28 * MIN, 3 * 1024 * 1024);
+  expect(await watchTick(l.deps(T0))).toEqual([]);
+  expect(sent(world)).toEqual([]);
+  l.row(T0 + MIN, "m-2", "도리야?");
+  expect(await watchTick(l.deps(T0 + 12 * MIN))).toEqual([`LEAD_OWNER_WAITING aoe_Dori_0a1b2c3d 1 owner message(s), oldest ${iso(T0 + MIN)} (11 min); woke the lead (SUBMITTED)`]);
+  expect(sent(world)[0]).toContain('The oldest: "도리야?"');
 });
 
 test("the limit lifted: the lead and a working lane stopped on a usage-limit error are woken once each on the first tick after the retry time; a paused lane, another error, a session that went on or a still-blocked pool are not", async () => {

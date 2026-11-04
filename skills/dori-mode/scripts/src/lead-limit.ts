@@ -29,11 +29,24 @@ const DAY_MS = 24 * 60 * 60_000;
 // a retry this close needs no notice: a short rate limit, not a usage limit
 const NOTICE_MIN_WAIT_MS = 5 * 60_000;
 
-export const tailOf = (path: string, bytes: number): string => {
-  const text = readFileSync(path, "utf8");
+const cutTail = (text: string, bytes: number): string => {
   if (text.length <= bytes) return text;
   const cut = text.slice(-bytes);
   return cut.slice(cut.indexOf("\n") + 1);
+};
+export const tailOf = (path: string, bytes: number): string => cutTail(readFileSync(path, "utf8"), bytes);
+
+// The lead's replies from the end of its transcript back to its last working one, and the session's start when the
+// whole file had to be read. One line can be longer than the tail: an image the lead read is one base64 tool result
+// (live 2026-11-04 17:48Z: 3.1 MB), and a tail cut inside it held no reply, so every owner row of the day read as
+// waiting (LEAD_OWNER_WAITING 95 owner message(s), 1332 min; 10-29 to 10-31 the same). The tail grows until it holds a
+// working reply or the whole file.
+export const recentReplies = (text: string, bytes = TAIL_BYTES): { readonly replies: LeadReply[]; readonly firstAt: number } => {
+  for (let n = bytes; ; n *= 4) {
+    const whole = text.length <= n;
+    const replies = leadReplies(cutTail(text, n));
+    if (whole || replies.some((r) => !r.error)) return { replies, firstAt: whole ? Date.parse(/"timestamp":"([^"]+)"/.exec(text)?.[1] ?? "") : Number.NaN };
+  }
 };
 
 // The lead's model replies, oldest first: an assistant message, with its error when the call failed.
@@ -104,9 +117,7 @@ export const leadLimitTick = async (deps: FlowDeps): Promise<string[]> => {
   const cwd = sessionFor(sessions, pane)?.path;
   const file = cwd ? await sessionFile(deps.run, deps.config.sessionsDir, pane, cwd, table) : undefined;
   if (!file) return [];
-  const transcript = tailOf(file.path, TAIL_BYTES);
-  const replies = leadReplies(transcript);
-  const firstAt = Date.parse(/"timestamp":"([^"]+)"/.exec(transcript)?.[1] ?? "");
+  const { replies, firstAt } = recentReplies(readFileSync(file.path, "utf8"));
   const lastGood = replies.findLast((r) => !r.error)?.at ?? (Number.isNaN(firstAt) ? 0 : firstAt);
   const errors = replies.filter((r) => r.error && r.at > lastGood);
   const blocked = errors.length > 0;
