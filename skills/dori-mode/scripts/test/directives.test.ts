@@ -6,7 +6,7 @@ import { laneGapSplit, applyDirectives, auditOrReport, auditStampPath, checkMean
 import { loadConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
-import { APPLIED_HEADING, appliesUnder, appliesWhy, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, hasDirective, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
+import { APPLIED_HEADING, appliesUnder, appliesWhy, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, hasDirective, ledgerProblems, loadLedger, messageLines, planDirectives, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
 import type { Runner } from "../src/run.ts";
 import { DirectiveMissingError, eightSteps, launchLane, renderBrief, uiSteps } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -202,7 +202,7 @@ test("directive-audit: gaps of the day go to the watch log and one summary to th
   await deps.registry.write({ ...clean, key: "old", thread: "none", brief: "/nope.md", openedAt: "2026-10-14T00:00:00.000Z" });
   const inbox = await write("inbox.jsonl", "");
   const quiet = await runDirectiveAudit(deps, { since: "2026-10-15T06:00:00.000Z", inbox, owner: "7" });
-  expect(quiet.lines).toEqual(["DIRECTIVE_AUDIT_OK since 2026-10-15T06:00:00.000Z: 1 lanes and the owner's messages read against 40 directives, no gap"]);
+  expect(quiet.lines).toEqual(["DIRECTIVE_AUDIT_OK since 2026-10-15T06:00:00.000Z: 1 lanes and the owner's messages read against 41 directives, no gap"]);
   expect(await Bun.file(deps.config.watchLog).exists()).toBe(false);
   expect(sent(world)).toEqual([]);
   // a lane whose brief lacks a directive and has no thread, and a standing directive of the owner nobody put in the ledger
@@ -636,6 +636,23 @@ test("a briefOnly entry reaches a brief only when its scope hits, and the lead's
   expect(textDirectives("유돌한테 넘겨", ledger).map(({ e }) => e.id)).not.toContain("pair-route");
   const thread = textDirectives("로그인 화면의 글자를 고친다", ledger, { all: true });
   expect(thread.find(({ e }) => e.id === "pair-route")?.why).toBe("all lanes");
+});
+
+// the owner's "없는 건 없애" has no clause boundary to trim at: his entry stays on record for the lead and never goes
+// into a brief as text (the lead writes the limit in; launch/audit enforcement is a follow-up)
+test("upstream-released-only is a lead record: no brief gets its text from the ledger", async () => {
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
+  const task = "원본 main 커밋 이식: 원본 PR #37을 우리 쪽에 들이는 이식 레인. upstream 링크를 주석으로 단다.";
+  for (const pick of [undefined, { model: "m", picked: [{ id: "upstream-released-only", why: "x" }] }]) {
+    const plan = planDirectives(task, ledger, scopeContext(task, ledger, { repo: "r" }), {}, pick);
+    expect([...plan.add.map(({ e }) => e.id), ...plan.missing.map(({ e }) => e.id)]).not.toContain("upstream-released-only");
+  }
+  expect(textDirectives("원본 main에 들어간 것만 이식", ledger).map(({ e }) => e.id)).toContain("upstream-released-only");
+  // what the lead reads (inbox hints, dori thread open) never says to remove without the limit
+  const hint = messageLines("원본 main에 들어간 것만 이식", ledger).find((l) => l.includes("upstream-released-only"))!;
+  const thread = textDirectives("원본 코드 적용", ledger, { all: true }).filter(({ e }) => e.id === "upstream-released-only").map(({ e }) => directiveLine(e));
+  expect(thread).toHaveLength(1);
+  for (const line of [hint, ...thread]) expect(line).not.toMatch(/없애|없앤/);
 });
 
 test("no scope narrowed for briefs hits the eight-step template by itself: it would be every lane again", async () => {

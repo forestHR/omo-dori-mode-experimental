@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
 """Hourly read-only watch of the upstream Dori repository for the lead.
 
-Reads the repository the checkout's `upstream` remote points at (merged PRs, issues, commits on its
-default branch) with gh only: no model, no clone, nothing written upstream, no upstream code run.
+Reads the repository the checkout's `upstream` remote points at (PRs merged into its default branch, issues,
+commits on that branch) with gh only: no model, no clone, nothing written upstream, no upstream code run.
+Upstream has no releases or tags, so only what is in its main counts as released, and that is ported without the
+owner's approval. An open issue, an open PR or a PR merged into another branch is only a proposal: the lead reviews it
+and asks the owner to integrate it when it looks needed; the merged PR or main commit that later brings it is ported.
 Each new item gets one rule-based class:
   1 already here    our code cites it (a dori-superagent pull/issue/commit link), the PR closes an issue
                     we cite, or the commit is already in our history
-  2 not ours        the herdr harness, or nothing under skills/ changed (root src/, docs, README)
-  3 owner decision  sends data outside (fetch or a non-GitHub URL in added code), changes autonomy
-                    (loop, backlog, schedule), adds a dependency under skills/, or changes something the
-                    owner feels (pause, interrupt, kill, defaults) under skills/
-  4 port candidate  changes skills/, or an open issue: reproduce on our side first
+  2 not ours        the herdr harness, or nothing under skills/ changed (root src/, docs, README); an issue closed
+                    without code; a PR closed without a merge
+  3 integration ask an open issue, an open PR or a PR merged into another branch: not in upstream main; the lead
+                    reviews it and, when it looks needed, asks the owner (dori ask); nothing is ported before he picks
+  4 port            a PR merged into main or a main commit that changes skills/; notes for the lane name what to read
+                    with care (data sent outside, autonomy, a new dependency, owner-felt behavior, content not read)
 Classes 3 and 4 append one kind "upstream-change" line each to the lead inbox. Classes 1 and 2 are kept
 and sent as one kind "upstream-weekly" line at most once a week. An item is recorded as seen only after
 its inbox line is written, so a failed append is retried next hour. A failed gh call records nothing
 and exits 3; the third failure in a row appends one kind "upstream-watch-fail" line.
 
 Env (tests/QA only): UPSTREAM_WATCH_STATE_DIR, UPSTREAM_WATCH_INBOX, UPSTREAM_WATCH_REPO,
-UPSTREAM_WATCH_SRC (the checkout whose citations and history count as "already here"),
+UPSTREAM_WATCH_BRANCH (the default branch when UPSTREAM_WATCH_REPO is set, else main), UPSTREAM_WATCH_SRC (the checkout whose citations and history count as "already here"),
 UPSTREAM_WATCH_GH_DIR (a folder with prs.json, issues.json, commits.jsonl, diff-<N>.txt and
 commit-<sha>.json instead of calling gh). Otherwise the inbox is DORI_DISCORD_INBOX, else
 <state>/discord/inbox.jsonl like the listener, and the state folder is <state>/upstream-watch, where
 <state> is DORI_STATE_DIR or ~/.dori/state. UPSTREAM_WATCH_THREAD (host setting, e.g. discord:<id>) is
 the one thread where the lead keeps upstream work; every inbox line names it.
 Flags: --seed records everything current as seen without writing inbox lines.
---mark <key> [--why TEXT] records one item (pr:23, issue:29, commit:<sha>) as decided, without a line.
+--mark <key> [--why TEXT] records one item (pr:23, pr-proposed:24, issue:29, commit:<sha>) as decided, without a line.
 """
 from __future__ import annotations
 
@@ -57,7 +61,6 @@ CITE = re.compile(r"github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/(pull|issues|c
 CLOSES = re.compile(r"\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s+#(\d+)", re.I)
 PR_REF = re.compile(r"\(#(\d+)\)\s*$|^Merge pull request #(\d+)")
 PR_HARNESS = re.compile(r"herdr|superharness|superagent", re.I)
-ISSUE_HARNESS = re.compile(r"herdr|superharness|superagent|\bduty\b|pane run|hourly loop", re.I)
 OUTBOUND_TITLE = re.compile(r"telemetry|analytics|tracking|usage counts?|phone.home", re.I)
 AUTONOMY = re.compile(r"\b(loops?|backlog|autonom\w*|schedul\w*|cron|hourly|daily|self-?assign\w*)\b", re.I)
 OWNER_FELT = re.compile(r"\b(paus\w*|wait|interrupt\w*|cancel\w*|kill\w*|auto-?merge|default (?:on|off)|opt-?out)\b", re.I)
@@ -70,10 +73,10 @@ DEP_KEYS = {"dependencies", "devDependencies", "optionalDependencies", "peerDepe
 JSON_BLOCK = re.compile(r'^\s*"([^"]+)"\s*:\s*\{\s*$')
 JSON_ENTRY = re.compile(r'^\s*"([^"]+)"\s*:\s*"')
 
-CLASS_NAME = {"1": "① 이미 있음", "2": "② 상관없음", "3": "③ 형 결정 필요", "4": "④ 이식 후보"}
+CLASS_NAME = {"1": "① 이미 있음", "2": "② 상관없음", "3": "③ 통합 요청 검토", "4": "④ 이식"}
 ACTION = {
-    "3": "할 일: 형 카드(dori ask: 가져온다 / 우리 식으로 바꿔 가져온다 / 안 가져온다), 답이 오면 이식 레인",
-    "4": "할 일: 작으면 이식 레인(원본은 git show로 읽기만, 우리 쪽 재현 먼저, 출처 링크 주석), 크면 형 카드",
+    "3": "할 일: 원본 main에 없음. 리드가 검토해서 적용이 필요해 보이면 형에게 통합 요청 카드(dori ask), 형이 고르기 전엔 이식 안 함, 필요 없어 보이면 넘김",
+    "4": "할 일: 이식 레인(원본 main 커밋을 git show로 읽고 들임, 출처 링크 주석), 형 승인 없이",
 }
 
 
@@ -103,8 +106,9 @@ def git(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(SRC), *args], capture_output=True, text=True, timeout=60)
 
 
-def upstream_repo() -> tuple[str, set[str]]:
+def upstream_repo() -> tuple[str, set[str], str]:
     named = os.environ.get("UPSTREAM_WATCH_REPO")
+    branch = os.environ.get("UPSTREAM_WATCH_BRANCH") or "main"
     remote = None
     if not named:
         url = git(["remote", "get-url", "upstream"]).stdout.strip()
@@ -113,11 +117,12 @@ def upstream_repo() -> tuple[str, set[str]]:
             raise GhError(f"the upstream remote of {SRC} is not a GitHub repository")
         remote = m.group(1)
         # The remote may use an old name; GitHub answers with the current one (used in links).
-        named = gh(["repo", "view", remote, "--json", "nameWithOwner", "--jq", ".nameWithOwner"]).strip()
+        named, branch = gh(["repo", "view", remote, "--json", "nameWithOwner,defaultBranchRef",
+                            "--jq", '.nameWithOwner + " " + .defaultBranchRef.name']).split()
     owner = named.split("/")[0]
     # Only links to this owner's repository (current or old name) count; the fork shares an old name.
     aliases = {named, *(f"{owner}/{n}" for n in OLD_NAMES), *([remote] if remote else [])}
-    return named, {a.lower() for a in aliases}
+    return named, {a.lower() for a in aliases}, branch
 
 
 def whole(kind: str, items: list[dict]) -> list[dict]:
@@ -126,11 +131,16 @@ def whole(kind: str, items: list[dict]) -> list[dict]:
     return items
 
 
-def merged_prs(repo: str) -> list[dict]:
+def all_prs(repo: str) -> list[dict]:
     if FIXTURE:
         return json.loads(fixture("prs.json"))
-    fields = "number,title,url,mergedAt,mergeCommit,body"
-    return whole("PR", json.loads(gh(["pr", "list", "--repo", repo, "--state", "merged", "--limit", LIST_LIMIT, "--json", fields])))
+    fields = "number,title,url,state,mergedAt,mergeCommit,body,baseRefName"
+    return whole("PR", json.loads(gh(["pr", "list", "--repo", repo, "--state", "all", "--limit", LIST_LIMIT, "--json", fields])))
+
+
+def in_main(pr: dict, branch: str) -> bool:
+    # merged into another branch is not in upstream main; if that branch reaches main, its commits come as commit items
+    return bool(pr.get("mergedAt")) and pr.get("baseRefName", branch) == branch
 
 
 def issues(repo: str) -> list[dict]:
@@ -286,7 +296,7 @@ def classify_change(title: str, paths: list[str], diff: str, blind: list[str] | 
     ours = [p for p in paths if p.startswith("skills/")]
     why = []
     if blind:
-        why.append(f"내용을 못 읽음(patch 없음: {', '.join(blind[:3])}{' 외' if len(blind) > 3 else ''}), 손으로 확인")
+        why.append(f"내용을 못 읽음(patch 없음: {', '.join(blind[:3])}{' 외' if len(blind) > 3 else ''}), 리드가 손으로 확인")
     sent = outbound(added)
     if OUTBOUND_TITLE.search(title) or sent:
         why.append("바깥으로 데이터를 보냄" + (f"({sent})" if sent else ""))
@@ -296,11 +306,10 @@ def classify_change(title: str, paths: list[str], diff: str, blind: list[str] | 
         why.append(f"새 의존성({dep})")
     if ours and (m := OWNER_FELT.search(title)):
         why.append(f"형이 겪는 동작이 바뀜({m.group(0)})")
-    if why:
-        return "3", "; ".join(why)
     if not ours:
         return "2", "skills/ 밖만 바뀜(루트 하네스·문서)"
-    return "4", f"skills/ {len(ours)}파일 바뀜"
+    # in upstream main: ported without the owner's approval; what needs care goes to the lane as a note
+    return "4", "; ".join([f"skills/ {len(ours)}파일 바뀜"] + [f"살필 것: {w}" for w in why])
 
 
 def classify_pr(repo: str, pr: dict, here: Here) -> tuple[str, str]:
@@ -318,19 +327,36 @@ def classify_pr(repo: str, pr: dict, here: Here) -> tuple[str, str]:
     return cls, why + (f", 이슈 {', '.join(f'#{i}' for i in closes)} 닫음" if closes else "")
 
 
+ISSUE_HARNESS = re.compile(r"herdr|superharness|superagent|\bduty\b|pane run|hourly loop", re.I)
+
+
+def classify_proposal(pr: dict, here: Here) -> tuple[str, str]:
+    n, sha = pr["number"], (pr.get("mergeCommit") or {}).get("oid")
+    if here.cites_number(n) or here.cites_commit(sha):
+        return "1", "우리 코드가 이 PR을 인용"
+    if cited := [i for i in map(int, CLOSES.findall(pr.get("body") or "")) if here.cites_number(i)]:
+        return "1", f"우리 코드가 이 PR이 닫은 이슈 #{cited[0]}를 인용"
+    if pr.get("mergedAt") and here.has_commit(sha):
+        return "1", "우리 이력에 이미 있음"
+    if PR_HARNESS.search(pr["title"]):
+        return "2", "herdr 하네스"
+    if pr.get("mergedAt"):
+        return "3", f"원본 main에 없음({pr.get('baseRefName')} 브랜치로 머지된 PR), 검토 거리"
+    if pr.get("state") == "OPEN":
+        return "3", "원본 main에 없음(열린 PR), 검토 거리"
+    return "2", "머지 없이 닫힌 PR"
+
+
 def classify_issue(issue: dict, here: Here, closed_by: dict[int, int]) -> tuple[str, str]:
     n, title = issue["number"], issue["title"]
     if here.cites_number(n):
         return "1", "우리 코드가 이 이슈를 인용"
-    if n in closed_by:
-        return "2", f"머지된 PR #{closed_by[n]}가 닫음(그 PR로 판단)"
+    # a merged PR's "Fixes #N" counts only while the issue stays closed: opened again, it is open work again
     if issue.get("state") != "OPEN":
-        return "2", "코드 없이 닫힘"
+        return "2", f"머지된 PR #{closed_by[n]}가 닫음(그 PR로 판단)" if n in closed_by else "코드 없이 닫힘"
     if ISSUE_HARNESS.search(title):
         return "2", "herdr 하네스"
-    if m := (OUTBOUND_TITLE.search(title) or AUTONOMY.search(title)):
-        return "3", f"바깥 발송·자율 범위({m.group(0)})"
-    return "4", "열린 이슈, 우리 쪽 재현 먼저"
+    return "3", "원본 main에 없음(열린 이슈), 검토 거리"
 
 
 def one_line(text: str, limit: int = 120) -> str:
@@ -370,16 +396,24 @@ def save_state(path: Path, state: dict) -> None:
     os.replace(tmp, path)
 
 
-def gather(repo: str, here: Here) -> list[dict]:
-    prs = sorted(merged_prs(repo), key=lambda p: p["number"])
+def gather(repo: str, branch: str, here: Here) -> list[dict]:
+    every = sorted(all_prs(repo), key=lambda p: p["number"])
+    prs = [p for p in every if in_main(p, branch)]
     closed_by = {i: p["number"] for p in prs for i in map(int, CLOSES.findall(p.get("body") or ""))}
     items = []
-    for pr in prs:
-        items.append({"key": f"pr:{pr['number']}", "label": f"PR #{pr['number']} 머지", "title": pr["title"],
-                      "url": pr["url"], "classify": lambda pr=pr: classify_pr(repo, pr, here)})
+    for pr in every:
+        if pr in prs:
+            items.append({"key": f"pr:{pr['number']}", "label": f"PR #{pr['number']} 머지", "title": pr["title"],
+                          "url": pr["url"], "classify": lambda pr=pr: classify_pr(repo, pr, here)})
+        else:
+            # its own key, so the same PR merged into main later is a new pr:N item; a merged one may already be on record
+            # as pr:N from before proposals had their own key
+            items.append({"key": f"pr-proposed:{pr['number']}", "label": f"PR #{pr['number']} 제안", "title": pr["title"],
+                          "url": pr["url"], "recheck": True, "classify": lambda pr=pr: classify_proposal(pr, here),
+                          **({"was": f"pr:{pr['number']}"} if pr.get("mergedAt") else {})})
     for issue in sorted(issues(repo), key=lambda i: i["number"]):
         items.append({"key": f"issue:{issue['number']}", "label": f"이슈 #{issue['number']}", "title": issue["title"],
-                      "url": issue["url"], "classify": lambda issue=issue: classify_issue(issue, here, closed_by)})
+                      "url": issue["url"], "recheck": True, "classify": lambda issue=issue: classify_issue(issue, here, closed_by)})
     merged = {p["number"] for p in prs}
     listed, reached_ours = [], False
     # Newest first: once one commit is in our history, every older one is too, even where our
@@ -428,15 +462,15 @@ def flag(argv: list[str], name: str) -> str | None:
         return None
     i = argv.index(name)
     if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
-        raise SystemExit(f"usage: upstream-watch.py [--seed] [--mark <pr:N|issue:N|commit:SHA> [--why TEXT]] ({name} needs a value)")
+        raise SystemExit(f"usage: upstream-watch.py [--seed] [--mark <pr:N|pr-proposed:N|issue:N|commit:SHA> [--why TEXT]] ({name} needs a value)")
     return argv[i + 1]
 
 
 def main(argv: list[str]) -> int:
     seed = "--seed" in argv
     mark, why = flag(argv, "--mark"), flag(argv, "--why")
-    if mark is not None and not re.fullmatch(r"(?:pr|issue):\d+|commit:[0-9a-f]{40}", mark):
-        raise SystemExit(f"upstream-watch: --mark takes pr:N, issue:N or commit:<40-hex sha>, not {mark!r}")
+    if mark is not None and not re.fullmatch(r"(?:pr|pr-proposed|issue):\d+|commit:[0-9a-f]{40}", mark):
+        raise SystemExit(f"upstream-watch: --mark takes pr:N, pr-proposed:N, issue:N or commit:<40-hex sha>, not {mark!r}")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(STATE_DIR, 0o700)
     lock = open(STATE_DIR / "lock", "w")
@@ -450,16 +484,32 @@ def main(argv: list[str]) -> int:
         print(f"UPSTREAM_MARKED {mark} {why or 'marked by hand'}")
         return 0
     try:
-        repo, aliases = upstream_repo()
+        repo, aliases, branch = upstream_repo()
         here = Here(aliases)
-        items = gather(repo, here)
-        fresh = [i for i in items if i["key"] not in state["items"]]
+        items = gather(repo, branch, here)
+        fresh = [i for i in items if i["key"] not in state["items"] and i.get("was") not in state["items"]]
+        # an issue or proposed PR follows upstream (opened again, merged into another branch, retitled): it is classified
+        # again every run from what was just read (no gh call), and asked once per time it turns class 3; a hand decision stays
+        for item in items:
+            # a merged proposal the old watcher recorded as pr:N is read through that record
+            record = state["items"].get(item["key"]) or (state["items"].get(item["was"]) if item.get("was") else None)
+            if item.get("recheck") and not seed and record is not None and record.get("class") != "decided":
+                # a record without "asked" (the old watcher's, or --seed's class 0): asked when it reached the lead or was seeded
+                asked = record.get("asked", record.get("class") in ("0", "3", "4"))
+                item["cls"], item["why"] = item["classify"]()
+                if item["cls"] == "3" and not asked:
+                    fresh.append(item)
+                elif item["cls"] != "3" and asked:
+                    record["asked"] = False
         for item in fresh:
             try:
+                if seed:
+                    # an issue or proposed PR is asked later only if it turns class 3; so the seed keeps what it is now
+                    item["asked"] = item.get("recheck") and item["classify"]()[0] == "3"
                 item["cls"], item["why"] = ("0", "seed") if seed else item["classify"]()
             except Incomplete as error:
-                # this item alone could not be read in full: it goes to the lead as a decision, the rest go on
-                item["cls"], item["why"] = "3", f"다 못 읽음({one_line(error, 160)}), 손으로 확인"
+                # this item alone could not be read in full: a port all the same, the lead checks it by hand; the rest go on
+                item["cls"], item["why"] = "4", f"다 못 읽음({one_line(error, 160)}), 리드가 손으로 확인"
     except (GhError, ValueError, KeyError) as error:
         state["fails"] += 1
         # a list cut short would lose items quietly: say so on the first such run, not after three
@@ -502,7 +552,7 @@ def main(argv: list[str]) -> int:
             state["minor"].append({"key": item["key"], "label": item["label"], "cls": cls})
         if cls in counts:
             counts[cls] += 1
-        state["items"][item["key"]] = {"class": cls, "why": item["why"], "at": stamp(now)}
+        state["items"][item["key"]] = {"class": cls, "why": item["why"], "at": stamp(now), **({"asked": item["asked"] if cls == "0" else cls == "3"} if item.get("recheck") else {})}
         save_state(state_path, state)
         print(f"UPSTREAM_ITEM {item['key']} class={cls} {item['why']}")
     weekly = False
