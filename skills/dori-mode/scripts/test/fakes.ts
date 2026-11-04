@@ -148,7 +148,7 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
     const row = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
     return row && Number(row[1]) !== 4000 ? [{ ProcessId: Number(row[1]), ParentProcessId: Number(row[2]), CommandLine: row[3] ?? "" }] : [];
   })]));
-  if (cmd === "ps" && a1 === "-A") return ok(argv.some((a) => a.includes("stat=")) ? w.ps.replace(/^(\s*\d+\s+\d+)\s+/gm, "$1 S ") : w.ps);
+  if (cmd === "ps" && a1 === "-A") return ok(argv.some((a) => a.includes("stat=")) ? w.ps.replace(/^(\s*\d+\s+\d+)\s+/gm, "$1 S+ ") : w.ps);
   if (cmd === "ps" && argv.includes("lstart=")) return ok(w.agentStart);
   return { code: 1, out: "", err: `unexpected ${argv.join(" ")}` };
 };

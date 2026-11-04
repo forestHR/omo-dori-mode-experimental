@@ -114,6 +114,15 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
   return agent?.stat?.startsWith("T") ? agent.pid : undefined;
 };
 
+// An agent left a background job of its shell (running, no "+" in its ps state: another process group holds its tty) reads
+// nothing either: the shell does, and its screen keeps a stale ❯ prompt. ps on Windows has no such mark.
+const backgroundAgent = async (run: Runner, pane: string): Promise<number | undefined> => {
+  if (process.platform === "win32") return undefined;
+  const shell = await tmuxPanePid(run, pane);
+  const agent = shell ? topAgent(await procTable(run), shell) : undefined;
+  return agent?.stat && !agent.stat.startsWith("T") && !agent.stat.includes("+") ? agent.pid : undefined;
+};
+
 // An aoe session, and a herdr pane (an id with ":", herdr.ts) of a Dori that runs omo there, get the same checks: a gone,
 // dead or frozen pane is named and nothing is typed, the text waits for omo's ❯ prompt, and the session's transcript is
 // evidence of delivery. A herdr Dori whose agentCommand is no omo keeps the bare herdr keys.
@@ -148,6 +157,8 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
       if (!life.live) return life.how === "gone" ? `PANE_GONE: there is no ${where} (it ended, or the name is wrong); nothing was typed` : `PANE_DEAD: the program in ${pane} exited (${life.status < 0 ? "no agent runs in it" : `status ${life.status}`}); nothing was typed`;
       const stopped = await stoppedAgent(run, pane);
       if (stopped) return `the agent in the pane is stopped (pid ${stopped}, frozen): nothing would read the text, so it was not typed`;
+      const behind = await backgroundAgent(run, pane);
+      if (behind) return `the agent in the pane is a background job of its shell (pid ${behind}): its shell, not omo, would read the text, so it was not typed`;
       // upstream #70: an omo question open in a herdr pane would take the text as its answer
       if (herdr && QUESTION_MARK.test(await captureTmux(run, pane))) return `PANE_BLOCKED: a question is open in ${pane} (Ask user); the text would answer it, so nothing was typed`;
       if (!(await waitForPrompt(run, clock, pane, 10, 1_000))) return "no ❯ prompt in the pane";

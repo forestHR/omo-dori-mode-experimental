@@ -1476,6 +1476,43 @@ test("a forcing run that finds a live run mid-move (its pending journal) logs no
   expect(takeovers()).toEqual([]);
 });
 
+test("a caller whose approval is refused takes nothing over and logs no row: the approved waiting run keeps the lane and its request stays the waiting one (review 333 round 5)", async () => {
+  // Given: an approved --wait-idle run (pid 77) holds the lane's lock for its request; it steps aside for any request left to it
+  const base = await setup();
+  const lanes = join(state.dir, "handover", "lanes");
+  let handed = 0;
+  const deps: LaneHandoverDeps = {
+    ...base,
+    reportOwner: async () => "msg-1",
+    clock: { ...base.clock, sleep: async () => {
+      const mine = takeovers()[0];
+      if (mine) {
+        handed++;
+        rmSync(join(lanes, mine));
+        live.delete(77);
+      }
+      simulate();
+    } },
+  };
+  appendRollover(state.dir, WAITING);
+  // When: a caller with a nonempty approval that says no reason, first with the lock free, then while 77 holds it
+  const free = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "lead:because" });
+  mkdirSync(lanes, { recursive: true });
+  writeFileSync(join(lanes, "demo.lock"), JSON.stringify({ pid: 77, at: "2026-10-11T16:30:00Z" }));
+  live.add(77);
+  const held = await laneHandover(deps, "demo", "aoe_lead_x", { approvedBy: "lead:because" });
+  // Then: both refused for the approval; the holder was handed nothing and still waits; the waiting request is the lane's last
+  expect([free.code, held.code]).toEqual([2, 2]);
+  expect(printed.filter((l) => l.startsWith("HANDOVER_REFUSED demo: a lane moves to a new session only with an approval"))).toHaveLength(2);
+  expect(handed).toBe(0);
+  expect(live.has(77)).toBe(true);
+  expect(printed.some((l) => l.startsWith("HANDOVER_TAKEN_OVER demo"))).toBe(false);
+  expect(rolloverRows()).toHaveLength(1);
+  expect(waitingRequest(readRollovers(state.dir), "demo", OLD)).toMatchObject({ at: WAITING.at, approvedBy: LEAD_STUCK, blocked: "busy" });
+  expect(takeovers()).toEqual([]);
+  expect(opened()).toBe(false);
+});
+
 test("a run that finds a dead journal while another run holds the lane's lock repairs nothing: the repair waits for the lock like any writer (review 320 round 12)", async () => {
   // Given: a dead run's journal, and a live run (77) that holds the lock and is repairing it
   const base = await setup();

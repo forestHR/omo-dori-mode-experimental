@@ -134,7 +134,7 @@ const readJson = <T>(file: string): T | undefined => {
 };
 
 // A handover of this lane (or of the lead) runs now: its lock or its journal names a live process.
-const handoverRunning = (stateDir: string, who: Who, key: string, alive: (pid: number) => boolean): boolean =>
+export const handoverRunning = (stateDir: string, who: Who, key: string, alive: (pid: number) => boolean): boolean =>
   (who === "lane" ? [join(stateDir, "handover", "lanes", `${key}.lock`), pendingFile(stateDir, key)] : [join(stateDir, "handover", "lock")]).some((f) => {
     const pid = readJson<{ pid?: number }>(f)?.pid;
     return typeof pid === "number" && pid !== process.pid && alive(pid);

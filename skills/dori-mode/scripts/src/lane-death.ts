@@ -1,5 +1,13 @@
-import { paneLife } from "./aoe.ts";
-import { isHerdrPane } from "./herdr.ts";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { paneLife, tmuxPanePid } from "./aoe.ts";
+import { pidAlive } from "./background.ts";
+import { handoverRunning } from "./freshness.ts";
+import { frozenPanes } from "./frozen.ts";
+import { herdrAgentPid, isHerdrPane } from "./herdr.ts";
+import { type Hold, holdOf, readStat, type StatOf } from "./job-control.ts";
+import { procTable, topAgent } from "./session-id.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { submitToPane } from "./panes.ts";
 import type { Submitted } from "./submit.ts";
@@ -34,6 +42,86 @@ export const oomLine = async (run: Runner, pane: string, sinceMs: number): Promi
 };
 
 export const laneDiedText = (key: string, reason: string): string => `[DORI] 레인 ${key} 꺼짐(${reason}) — 이어서 살릴지 정해`;
+
+// 2026-11-03 15:41Z a rolled-back handover thawed handover-simplify's omo into a background job of its shell, where the
+// next key stopped it again (T). Its screen kept its last "esc to interrupt", so every check reading screens took it for
+// busy for 18 hours (freshness refused 54 rollovers). dori watch now also reads the process of each open lane's agent and
+// of the lead's, the lead's first:
+// - LANE_SUSPENDED <key> <pane>: agent <pid> stopped|background, once seen so on two checks CONFIRM_MS apart, so a lane
+//   left stopped reads as stopped in the watch log instead of busy; a pane a handover froze on purpose (a frozen record,
+//   or a handover of that lane or of the lead running) is left alone;
+// - this check only reads: it sends no signal and types nothing into any pane, the lead's included;
+// - a mark per pane (<state>/suspended/<pane>.json, on disk so a restarted watch keeps it) names each incident once; it
+//   goes once that agent runs again (LANE_RUNNING_AGAIN). Another agent held in the pane is a new incident. A failed
+//   lookup or an unreadable process is no news: the mark stays.
+export type SuspendIO = {
+  readonly agentOf: (pane: string) => Promise<number | undefined>;
+  readonly stat: StatOf;
+};
+
+type SuspendMark = { readonly pane: string; readonly pid: number; readonly at: string; readonly hold: Hold };
+
+export const suspendIO = (deps: FlowDeps): SuspendIO => ({
+  agentOf: async (pane) => (isHerdrPane(pane) ? herdrAgentPid(deps.run, pane) : topAgent(await procTable(deps.run), await tmuxPanePid(deps.run, pane))?.pid),
+  stat: readStat,
+});
+
+const markFile = (stateDir: string, pane: string): string => join(stateDir, "suspended", `${pane.replace(/[^\w.-]/g, "_")}.json`);
+const readMark = (file: string): SuspendMark | undefined => {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as SuspendMark;
+  } catch {
+    return undefined;
+  }
+};
+
+// first check that found each pane's agent held, and which agent, for the second one (in memory, like notLive)
+const seenHeld = new Map<string, { readonly pid: number; readonly since: number }>();
+
+export const laneSuspendTick = async (deps: FlowDeps, io: SuspendIO = suspendIO(deps), alive: (pid: number) => boolean = pidAlive): Promise<string[]> => {
+  const out: string[] = [];
+  const now = deps.clock.now();
+  const { stateDir, leadPane: lead, ignorePanes } = deps.config;
+  const frozen = new Set(frozenPanes(stateDir));
+  const lanes = (await deps.registry.open()).filter((l) => l.pane && l.pane !== lead && !ignorePanes.includes(l.pane) && statusOf(l) !== "paused");
+  const targets = [...(lead ? [{ who: "lead" as const, key: "lead", pane: lead }] : []), ...lanes.map((l) => ({ who: "lane" as const, key: l.key, pane: l.pane as string }))];
+  for (const t of targets) {
+    if (frozen.has(t.pane) || handoverRunning(stateDir, t.who, t.key, alive)) {
+      seenHeld.delete(t.pane);
+      continue;
+    }
+    const pid = await io.agentOf(t.pane).catch(() => undefined);
+    if (!pid || !io.stat(pid)) {
+      seenHeld.delete(t.pane);
+      continue;
+    }
+    const file = markFile(stateDir, t.pane);
+    const hold = holdOf(io.stat, pid);
+    const marked = readMark(file);
+    if (!hold) {
+      seenHeld.delete(t.pane);
+      if (marked) {
+        rmSync(file, { force: true });
+        out.push(`LANE_RUNNING_AGAIN ${t.key} ${t.pane}`);
+      }
+      continue;
+    }
+    if (marked?.pid === pid) continue;
+    // another agent in the pane since the first check starts its own confirmation
+    const first = seenHeld.get(t.pane);
+    if (first?.pid !== pid) {
+      seenHeld.set(t.pane, { pid, since: now });
+      continue;
+    }
+    if (now - first.since < CONFIRM_MS) continue;
+    seenHeld.delete(t.pane);
+    const s = io.stat(pid);
+    mkdirSync(join(stateDir, "suspended"), { recursive: true });
+    writeFileSync(file, JSON.stringify({ pane: t.pane, pid, at: new Date(now).toISOString(), hold } satisfies SuspendMark));
+    out.push(`LANE_SUSPENDED ${t.key} ${t.pane}: agent ${pid} ${hold} (state ${s?.state ?? "?"}, tty foreground group ${s?.tpgid ?? "?"}, its group ${s?.pgrp ?? "?"}); its screen is stale, so it reads as stopped, not busy`);
+  }
+  return out;
+};
 
 export const laneDeathTick = async (deps: FlowDeps): Promise<string[]> => {
   const out: string[] = [];
