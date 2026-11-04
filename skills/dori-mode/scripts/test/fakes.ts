@@ -54,6 +54,8 @@ export type World = {
   // ps -A -o pid=,ppid=,command= ("pid ppid command" lines; asked with stat= the fake adds state S, as the host prints it)
   // and ps -o lstart= (the agent's start) as the host would print them
   ps: string;
+  // cat /proc/<pid>/cmdline: the arguments a pid runs with, NUL-separated (null: unreadable); default its ps command's words
+  cmdlines?: Record<number, readonly string[] | null>;
   agentStart: string;
   // herdr panes the fake server does not have (pane get fails), and those where no agent runs any more (a bare shell)
   herdrGone?: string[];
@@ -153,6 +155,13 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   })]));
   if (cmd === "ps" && a1 === "-A") return ok(argv.some((a) => a.includes("stat=")) ? w.ps.replace(/^(\s*\d+\s+\d+)\s+/gm, "$1 S+ ") : w.ps);
   if (cmd === "ps" && argv.includes("lstart=")) return ok(w.agentStart);
+  const proc = cmd === "cat" ? /^\/proc\/(\d+)\/cmdline$/.exec(a1 ?? "") : null;
+  if (proc) {
+    const pid = Number(proc[1]);
+    const row = w.ps.split("\n").map((l) => /^\s*(\d+)\s+\d+\s+(.*)$/.exec(l)).find((r) => Number(r?.[1]) === pid);
+    const args = w.cmdlines && pid in w.cmdlines ? w.cmdlines[pid] : row ? (row[2] ?? "").split(/\s+/) : null;
+    return args ? ok(`${args.join("\0")}\0`) : { code: 1, out: "", err: `cat: /proc/${pid}/cmdline: No such file or directory` };
+  }
   return { code: 1, out: "", err: `unexpected ${argv.join(" ")}` };
 };
 
