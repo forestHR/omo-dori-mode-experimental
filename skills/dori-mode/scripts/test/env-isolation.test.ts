@@ -48,7 +48,7 @@ test("a Dori whose wrapper names its own dori.env posts with its own token under
   try {
     okdoriHome(state.dir, `DORI_DISCORD_TOKEN=${tok(OK)}\nDORI_DISCORD_CHANNEL=ok-channel\nDORI_DISCORD_PAIR_BOT=${ZZANG}\n`);
     const r = await sendFrom(state.dir, { ...zzangEnv(state.dir), ...okSelectors(state.dir) });
-    expect({ code: r.code, out: r.out, auth: r.auth }).toEqual({ code: 0, out: "SENT 900", auth: [`Bot ${tok(OK)}`] });
+    expect({ code: r.code, out: r.out.split(" ").slice(0, 2).join(" "), auth: r.auth }).toEqual({ code: 0, out: "SENT 900", auth: [`Bot ${tok(OK)}`] });
     expect(r.err).toContain("DORI_ENV_FOREIGN");
     expect(r.err).toContain("DORI_DISCORD_INBOX");
   } finally {
@@ -61,7 +61,7 @@ test("a bare dori in the second Dori's directory (through its symlinked old name
   try {
     okdoriHome(state.dir, `DORI_DISCORD_TOKEN=${tok(OK)}\nDORI_DISCORD_CHANNEL=ok-channel\n`);
     const r = await sendFrom(state.dir, zzangEnv(state.dir));
-    expect({ code: r.code, out: r.out, auth: r.auth }).toEqual({ code: 0, out: "SENT 900", auth: [`Bot ${tok(OK)}`] });
+    expect({ code: r.code, out: r.out.split(" ").slice(0, 2).join(" "), auth: r.auth }).toEqual({ code: 0, out: "SENT 900", auth: [`Bot ${tok(OK)}`] });
   } finally {
     state.done();
   }

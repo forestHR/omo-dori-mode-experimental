@@ -32,8 +32,13 @@ export class Telegram {
   }
 
   async send(t: TgTarget, text: string, rich = false): Promise<number> {
-    const r = await this.call<{ message_id: number }>("sendMessage", { ...this.where(t), text: guardText(text), ...(rich ? { parse_mode: "HTML" } : {}) });
-    return r.message_id;
+    return (await this.post(t, text, rich)).id;
+  }
+
+  // send, with the text Telegram answered the new message holds (dori send prints it: send-dedupe.ts sentLine)
+  async post(t: TgTarget, text: string, rich = false): Promise<{ id: number; text?: string }> {
+    const r = await this.call<{ message_id: number; text?: unknown }>("sendMessage", { ...this.where(t), text: guardText(text), ...(rich ? { parse_mode: "HTML" } : {}) });
+    return { id: r.message_id, ...(typeof r.text === "string" ? { text: r.text } : {}) };
   }
 
   async edit(t: TgTarget, messageId: number, text: string, rich = false): Promise<void> {

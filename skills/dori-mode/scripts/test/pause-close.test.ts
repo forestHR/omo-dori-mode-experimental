@@ -222,6 +222,14 @@ test("a thread with an open question card is not marked done when its only lane 
   expect(JSON.stringify((await read()).receipt)).toContain("thread left open: open card Q7; summary posted");
 });
 
+test("a reply hook that finds the summary already the thread's last post (SEND_DUPLICATE, exit 3) counts it as there: the close goes through", async () => {
+  const base = at(T0, { openCards: (ref) => (ref === lane.thread ? ["Q7"] : []) });
+  const deps = { ...base, config: { ...base.config, hooks: { ...base.config.hooks, threadReply: ["repeat-hook", "{thread}", "{text}"] } } };
+  const r = await closeLane(deps, lane, "closed", SUMMARY);
+  expect(r.closed).toBe(true);
+  expect(JSON.stringify((await read()).receipt)).toContain("thread left open: open card Q7; summary already the thread's last post");
+});
+
 test("the reply hook a closing lane runs is told which lane closes, so the lane is not counted as working there", async () => {
   const deps = bothHooks(at(T0, { openCards: (ref) => (ref === lane.thread ? ["Q7"] : []) }));
   const envs: unknown[] = [];

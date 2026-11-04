@@ -337,7 +337,7 @@ test("a failed thread rename does not fail the ask: the card is already posted",
 test("the done thread hook posts without emoji, swaps the status word in the thread name, then archives", async () => {
   const f = fakeDiscord((req) => (req.method === "GET" ? { name: "[working] fix login", type: 11 } : req.method === "POST" && req.url.endsWith("/messages") ? { id: "901" } : {}));
   const t = "300000000000000003";
-  expect(await threadHook(f.dc, "done", `discord:${t}`, "merged 🎉 abc123", defaultDiscordWords)).toBe("901");
+  expect((await threadHook(f.dc, "done", `discord:${t}`, "merged 🎉 abc123", defaultDiscordWords)).id).toBe("901");
   expect(f.calls()).toEqual([`POST /channels/${t}/typing`, `POST /channels/${t}/messages`, `GET /channels/${t}`, `PATCH /channels/${t}`, `PATCH /channels/${t}`]);
   expect(f.json(1).content).toBe("merged abc123");
   expect(f.json(3)).toEqual({ name: "[done] fix login" });

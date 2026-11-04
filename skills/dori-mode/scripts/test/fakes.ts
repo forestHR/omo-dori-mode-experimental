@@ -7,6 +7,7 @@ import { type DoriConfig, defaultConfig } from "../src/config.ts";
 import type { FlowDeps } from "../src/done-flow.ts";
 import { Registry } from "../src/registry.ts";
 import type { Clock, Ran, Runner } from "../src/run.ts";
+import { duplicateLine, SEND_DUPLICATE_EXIT } from "../src/send-dedupe.ts";
 
 // A launch adds nvm's node and the agent's pi to the PATH aoe add runs with when the caller's PATH lacks them (a systemd
 // unit's bare PATH, as dori watch runs a lane's Done command). A test that checks what aoe add got sets PATH to what the
@@ -141,6 +142,8 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   if (cmd === "gh" && a1 === "pr") return ok(JSON.stringify({ state: w.prState, headRefOid: "f".repeat(40), mergedAt: w.prState === "MERGED" ? "2026-01-01T11:00:00Z" : null, mergeCommit: w.prState === "MERGED" ? { oid: "abc1234567890" } : null }));
   if (cmd === "gh" && a1 === "issue") return ok(JSON.stringify({ state: w.issueState }));
   if (cmd === "notify") return ok();
+  // a thread hook (dori thread reply) whose text is already the thread's last post: nothing posted, exit 3
+  if (cmd === "repeat-hook") return { code: SEND_DUPLICATE_EXIT, out: duplicateLine(argv[1] ?? "", { id: "900", ageMs: 60_000, last: true }), err: "" };
   if (cmd === "pwsh" && argv.includes("$PSVersionTable.PSVersion.ToString()")) return ok("7.4.0");
   if (cmd === "powershell" && argv.includes("-Command")) return ok(JSON.stringify([
     { ProcessId: 4000, ParentProcessId: 1, CommandLine: "pwsh.exe", ExecutablePath: "pwsh" },

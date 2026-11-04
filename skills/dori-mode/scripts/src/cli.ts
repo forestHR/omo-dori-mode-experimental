@@ -75,8 +75,8 @@ import { Telegram } from "./messenger/telegram.ts";
 import { Discord, discordPresence, tokenBotId } from "./messenger/discord.ts";
 import { openCardIds, QuestionCards, QuestionError, QuestionStore } from "./messenger/discord-cards.ts";
 import { DiscordListener, eyesOff } from "./messenger/discord-listener.ts";
-import { bareThreadName, discordThreadId, postInThread, postLaneStart, progressText, threadHook, threadName, ThreadRefError, type ThreadStatus, type ThreadVerb, VERB_STATUS } from "./messenger/discord-thread.ts";
-import { duplicateLine, sendKey, sendOnce } from "./send-dedupe.ts";
+import { bareThreadName, discordThreadId, postInThread, postLaneStart, progressText, threadName, ThreadRefError, type ThreadStatus, type ThreadVerb, VERB_STATUS, withoutEmoji } from "./messenger/discord-thread.ts";
+import { duplicateLine, SEND_DUPLICATE_EXIT, type Sent, sendKey, sendOnce, sentLine } from "./send-dedupe.ts";
 import { mapThread, standThread, threads, unstandThread } from "./messenger/thread-map.ts";
 import { archiveDoneThreads } from "./messenger/thread-archive.ts";
 import { ThreadStatusQueue } from "./messenger/thread-status-queue.ts";
@@ -381,10 +381,12 @@ const USAGE = `dori <command> [options]
                                        Discord posts show typing first (best effort); --no-typing skips it
                                        --ping USER_ID (digits only) mentions and pings only that user on a new Discord post
                                        --reply ID (Discord, digits only) posts it as a reply to that message, no ping
-                                       the same new message (place, --reply, --ping, text) within 10 minutes is not sent
-                                       again: SEND_DUPLICATE <first id>, exit 0, also for two sends at once (thread
-                                       reply|wait|done too); --again sends it anyway; an option send does not take is
-                                       refused (UNKNOWN_OPTION, exit 2)
+                                       the same new message (place, --reply, --ping, text) within 10 minutes, or the
+                                       place's last post at any age, is not sent again: SEND_DUPLICATE <place> <earlier
+                                       id>, exit 3, also for two sends at once (thread reply too; wait|done still set
+                                       their status, exit 0); --again sends it anyway; a post prints what the service
+                                       holds: SENT <id> len=<n> sha=<8 hex> first="<40 chars>"; an option send does not
+                                       take is refused (UNKNOWN_OPTION, exit 2)
   type <pane> --text TEXT | --text-file FILE
                                        type text into an agent pane and confirm it was submitted: Enter, an empty input
                                        box (one more Enter if not), a running turn. Prints SUBMITTED, or NOT_SUBMITTED
@@ -1041,7 +1043,7 @@ try {
         const line = !discordToken
           ? `DIRECTIVE_WAIVE_NOT_SENT ${r.lane.key} ${w.id}: DORI_DISCORD_TOKEN is not set, so the owner was not told`
           : await Promise.resolve()
-              .then(() => (r.lane.thread.startsWith("discord:") ? postInThread(ownDiscord(discordToken), r.lane.thread, text) : discordClient().send(env("DORI_DISCORD_CHANNEL"), text)))
+              .then((): Promise<unknown> => (r.lane.thread.startsWith("discord:") ? postInThread(ownDiscord(discordToken), r.lane.thread, text) : discordClient().send(env("DORI_DISCORD_CHANNEL"), text)))
               .then(() => `DIRECTIVE_WAIVE_SENT ${r.lane.key} ${w.id}: the owner was told`)
               .catch((e: unknown) => `DIRECTIVE_WAIVE_NOT_SENT ${r.lane.key} ${w.id}: ${e instanceof Error ? e.message : String(e)}`);
         console.log(line);
@@ -1791,10 +1793,19 @@ try {
       if (reply !== undefined && (platform !== "discord" || edit)) die("--reply is only supported for new Discord messages");
       if (flags.values.again && edit) die("--again is for a new message; an edit is never checked for repeats");
       const token = (name: string) => process.env[name] ?? die(`${name} is not set`);
-      // a new message goes out once per place, reply target, ping and text in SEND_DEDUPE_MS (src/send-dedupe.ts)
-      const once = async (post: () => Promise<string>) => {
-        const r = await sendOnce(join(config.stateDir, "sent"), sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, text, ...filesKey(discordFiles)]), post, { again: Boolean(flags.values.again) });
-        console.log(r.duplicate ? duplicateLine(r) : `SENT ${r.id}`);
+      // a new message goes out once per place, reply target, ping and text in SEND_DEDUPE_MS, and never when it is the
+      // place's last post (src/send-dedupe.ts); a repeat exits SEND_DUPLICATE_EXIT, a post prints what the service holds
+      const place = platform === "discord" ? `discord:${thread ?? to}` : `${platform}:${to}${thread ? `/${thread}` : ""}`;
+      const sentDir = join(config.stateDir, "sent");
+      // Discord puts a --ping in front of the text unless the text already has it, so both inputs key as the one message
+      // that goes out (review 8 of #338)
+      const keyText = platform === "discord" && ping !== undefined && !text.includes(`<@${ping}>`) ? `<@${ping}> ${text}` : text;
+      const dedupeKey = sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, keyText, ...filesKey(discordFiles)]);
+      // an edit is never checked and does not move the place's last-post record (docs/follow-ups.md)
+      const once = async (post: () => Promise<Sent>) => {
+        const r = await sendOnce(sentDir, place, dedupeKey, post, { again: Boolean(flags.values.again) });
+        console.log(r.duplicate ? duplicateLine(place, r) : sentLine("SENT", r));
+        if (r.duplicate) process.exitCode = SEND_DUPLICATE_EXIT;
         return r;
       };
       if (platform === "slack") {
@@ -1811,7 +1822,12 @@ try {
             known = slackRowIds(files.inbox, to);
             console.log(`SENT ${(await slack.upload(to, uploads, thread, text || undefined)).join(",")}`);
             posted = { channel: to, ts: "" };
-          } else await once(async () => (posted = await slack.post(to, text, thread)).ts);
+          } else
+            await once(async () => {
+              const p = await slack.post(to, text, thread);
+              posted = p;
+              return { id: p.ts, content: p.text };
+            });
           // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off
           if (posted && process.env.DORI_SLACK_TOKEN?.startsWith("xoxb-")) {
             for (const line of await clearEyes(slackUnreact(process.env.DORI_SLACK_TOKEN, process.env.DORI_SLACK_API?.trim() || undefined), files, posted, thread, 3000, known)) console.log(line);
@@ -1821,13 +1837,17 @@ try {
         const tg = new Telegram(fetchHttp, realClock, token("DORI_TELEGRAM_TOKEN"));
         const target = { chatId: to, ...(thread ? { threadId: Number(thread) } : {}) };
         if (edit) await tg.edit(target, Number(edit), text);
-        else await once(async () => String(await tg.send(target, text)));
+        else
+          await once(async () => {
+            const m = await tg.post(target, text);
+            return { id: String(m.id), content: m.text };
+          });
       } else if (platform === "discord") {
         const dc = new Discord(fetchHttp, realClock, checkedDiscordToken(token("DORI_DISCORD_TOKEN")), discordApi());
         await ownerSpeech(body, "send", () => ownerPlace(dc, edit ? to : (thread ?? to)));
         if (edit) await dc.edit(to, edit, text);
         else {
-          const r = await once(() => dc.send(thread ?? to, text, !flags.values["no-typing"], ping, reply, discordFiles));
+          const r = await once(() => dc.post(thread ?? to, text, !flags.values["no-typing"], ping, reply, discordFiles));
           if (!r.duplicate) await notePost(thread ?? to, r.id, withFileNames(body, discordFiles));
         }
       } else die(`unknown platform ${platform}`);
@@ -2095,8 +2115,10 @@ try {
       if (tooBig) die(tooBig, 2);
       const dc = discordClient();
       await ownerSpeech(body, `thread ${verb}`, () => ownerPlace(dc, discordThreadId(ref ?? "")));
-      // the same key as `dori send discord --to <thread id>`, so the two commands do not post one text twice either
-      const threadOnce = (post: () => Promise<string>) => sendOnce(join(config.stateDir, "sent"), sendKey(["discord", discordThreadId(ref ?? ""), undefined, undefined, body, ...filesKey(files)]), post, { again: Boolean(flags.values.again) });
+      // keyed on the text as it is posted (postInThread removes emoji, review 10 of #338): for a text without emoji the
+      // same key as `dori send discord --to <thread id>`, so the two commands do not post one text twice either
+      const place = `discord:${discordThreadId(ref ?? "")}`;
+      const threadOnce = (post: () => Promise<Sent>) => sendOnce(join(config.stateDir, "sent"), place, sendKey(["discord", discordThreadId(ref ?? ""), undefined, undefined, withoutEmoji(body), ...filesKey(files)]), post, { again: Boolean(flags.values.again) });
       if (verb === "done") {
         // the text is posted either way; with users left the thread keeps its mark and stays open
         const thread = `discord:${discordThreadId(ref ?? "")}`;
@@ -2104,7 +2126,7 @@ try {
         if (holders && !flags.values.force) {
           const r = await threadOnce(() => postInThread(dc, ref ?? "", body, files));
           if (!r.duplicate) await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
-          console.log(`${r.duplicate ? duplicateLine(r) : `POSTED ${r.id}`} THREAD_LEFT_OPEN ${thread}: ${holders}; not marked done (--force marks it done anyway)`);
+          console.log(`${r.duplicate ? duplicateLine(place, r) : sentLine("POSTED", r)} THREAD_LEFT_OPEN ${thread}: ${holders}; not marked done (--force marks it done anyway)`);
           break;
         }
         if (holders) console.log(`THREAD_DONE_FORCED ${thread}: ${holders}; marking it done anyway`);
@@ -2115,11 +2137,15 @@ try {
         if (verb === "done") unstandThread(cardDir(), t);
         return statuses.request(t, s);
       };
-      // a repeat is not posted, but the status still goes through: a done after a reply with the same words still closes
-      const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark, files));
-      if (r.duplicate) await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);
-      else await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
-      console.log(`${r.duplicate ? duplicateLine(r) : `POSTED ${r.id}`}${verb === "done" ? " THREAD_DONE" : verb === "wait" ? " THREAD_WAITING" : ""}`);
+      // only the post is inside the repeat check, so it is recorded as soon as Discord made it; the status step comes after
+      // (review 10 of #338: a slow status step left the post unrecorded past the claim's minute). A repeat is not posted,
+      // but the status still goes through: a done after a reply with the same words still closes
+      const r = await threadOnce(() => postInThread(dc, ref ?? "", body, files));
+      await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);
+      if (!r.duplicate) await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
+      console.log(`${r.duplicate ? duplicateLine(place, r) : sentLine("POSTED", r)}${verb === "done" ? " THREAD_DONE" : verb === "wait" ? " THREAD_WAITING" : ""}`);
+      // wait and done still set their status, so only a reply that posted nothing exits as a repeat
+      if (r.duplicate && verb === "reply") process.exitCode = SEND_DUPLICATE_EXIT;
       break;
     }
     case "handover": {
