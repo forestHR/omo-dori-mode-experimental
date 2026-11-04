@@ -611,7 +611,7 @@ test("a briefOnly entry reaches a brief only when its scope hits, and the lead's
   const entry = ledger.entries.find((e) => e.id === "pair-route")!;
   expect(entry.scope.briefOnly).toBe(true);
   expect(appliesWhy(entry, ctx("로그인 화면의 글자를 고친다"))).toBeUndefined();
-  expect(appliesWhy(entry, ctx("#dori-pair에 결과를 올린다"))).toStartWith("keyword ");
+  for (const room of ["#dori-pair에 결과를 올린다", "도리페어에 결과를 올린다", "도리 톡방에 올린다"]) for (const id of ["pair-route", "pair-efficient", "pair-owner-relay"]) expect(appliesWhy(ledger.entries.find((e) => e.id === id)!, ctx(room))).toStartWith("keyword ");
   expect(textDirectives("유돌한테 넘겨", ledger).map(({ e }) => e.id)).not.toContain("pair-route");
   const thread = textDirectives("로그인 화면의 글자를 고친다", ledger, { all: true });
   expect(thread.find(({ e }) => e.id === "pair-route")?.why).toBe("all lanes");
