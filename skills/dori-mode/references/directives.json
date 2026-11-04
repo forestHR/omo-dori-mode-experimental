@@ -683,13 +683,7 @@
       "date": "2026-11-03",
       "source": "형 2026-11-03 13:00 KST, herdr-switch 작업 스레드, 전달 짱돌 리드, 레인 herdr-switch",
       "scope": {
-        "repos": [
-          "omo-dori-mode-experimental"
-        ],
-        "keywords": [
-          "herdr|\\baoe\\b|tmux|dori-mode"
-        ],
-        "briefOnly": true
+        "all": true
       },
       "mode": "inject"
     },
