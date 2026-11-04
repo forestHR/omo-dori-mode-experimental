@@ -691,6 +691,22 @@ test("the model reads the whole brief, and a directive it never saw is decided b
   expect(huge.draft.directives?.pickFallback).toContain("too long");
 });
 
+test("directives apply on a lane with a pick: a directive added after the launch is sent, one the model left out is not, and the pick stays on the record", async () => {
+  const late = { id: "late-rule", name: "늦게 든 지침", by: "owner", basis: "fixture basis line", words: "로그인 일은 늘 두 번 본다", prompt: "로그인 일은 늘 두 번 본다.", date: "2026-10-16", source: "https://discord.com/channels/1/2/9", scope: { keywords: ["로그인"] }, mode: "inject" };
+  const deps = await ledgerDeps({ backend: "aoe", directives: { common: COMMON_LEDGER, local: await write("late.json", JSON.stringify({ ...local, entries: [...local.entries, late] })) } });
+  const ledger = loadLedger(deps.config);
+  const seen = ledger.entries.filter((e) => e.id !== "late-rule").map((e) => e.id);
+  const lane = await laneOf(deps, "pick-apply", await write("pick-apply.md", `${fields}유돌한테 넘긴다\n`));
+  const pick = { model: "m", picked: [{ id: "transcribe-yoodori", why: "w" }], runs: { asked: 3, answered: 3 }, evaluated: seen };
+  await deps.registry.patch("pick-apply", { directives: { applied: [], waived: [], pick } });
+  const r = await applyDirectives(deps, (await deps.registry.read("pick-apply"))!);
+  expect(r.ok).toBe(true);
+  expect(r.added).toEqual(expect.arrayContaining(["late-rule", "transcribe-yoodori", "docs-same-pr"]));
+  expect(r.added).not.toContain("pair-route");
+  expect((await deps.registry.read("pick-apply"))?.directives?.pick).toEqual(pick);
+  expect(lane.key).toBe("pick-apply");
+});
+
 test("directive-audit against a pick: what the model chose and the brief lacks is a gap, what it left out is listed and not counted", async () => {
   const deps = await ledgerDeps();
   const ledger = loadLedger(deps.config);
