@@ -6,7 +6,7 @@ import { applyDirectives, auditOrReport, auditStampPath, checkMeaning, dailyAudi
 import { loadConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
-import { APPLIED_HEADING, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
+import { APPLIED_HEADING, appliesWhy, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
 import type { Runner } from "../src/run.ts";
 import { DirectiveMissingError, eightSteps, launchLane, renderBrief, uiSteps } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -601,6 +601,28 @@ test("an owner message carries the directives its words call, the host's own fir
   expect(thread.slice(0, 2)).toEqual(["card-docs", "request-thread"]);
   expect(thread).toEqual(expect.arrayContaining(["docs-same-pr", "pair-route", "lane-thread"]));
   expect(thread.filter((id) => ["eight-steps", "four-fields", "ui-steps"].includes(id))).toEqual([]);
+});
+
+// owner Q480: every-lane entries narrowed for briefs. The lead's surfaces must not change: a keyword in an owner message
+// doubled his rows' hints and pushed out what his words called (replay 2026-11-04: 26 of 2,060 rows).
+test("a briefOnly entry reaches a brief only when its scope hits, and the lead's surfaces read it as an every-lane entry", async () => {
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
+  const ctx = (text: string) => scopeContext(text, ledger, { repo: "some-repo" });
+  const entry = ledger.entries.find((e) => e.id === "pair-route")!;
+  expect(entry.scope.briefOnly).toBe(true);
+  expect(appliesWhy(entry, ctx("로그인 화면의 글자를 고친다"))).toBeUndefined();
+  for (const room of ["#dori-pair에 결과를 올린다", "도리페어에 결과를 올린다", "도리 톡방에 올린다"]) for (const id of ["pair-route", "pair-efficient", "pair-owner-relay"]) expect(appliesWhy(ledger.entries.find((e) => e.id === id)!, ctx(room))).toStartWith("keyword ");
+  expect(textDirectives("유돌한테 넘겨", ledger).map(({ e }) => e.id)).not.toContain("pair-route");
+  const thread = textDirectives("로그인 화면의 글자를 고친다", ledger, { all: true });
+  expect(thread.find(({ e }) => e.id === "pair-route")?.why).toBe("all lanes");
+});
+
+test("no scope narrowed for briefs hits the eight-step template by itself: it would be every lane again", async () => {
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
+  const narrowed = ledger.entries.filter((e) => e.scope.briefOnly);
+  expect(narrowed.map((e) => e.id).sort()).toEqual(["herdr-only", "new-features-zzangdori", "pair-efficient", "pair-owner-relay", "pair-route"]);
+  const ctx = scopeContext(await eightSteps(), ledger, { repo: "some-repo" });
+  expect(narrowed.filter((e) => appliesWhy(e, ctx)).map((e) => e.id)).toEqual([]);
 });
 
 test("directive-audit: a thread the lead opened without reading the ledger and no lane works in is DIRECTIVE_LEAD; a checked one, a lane's and an older one are not", () => {

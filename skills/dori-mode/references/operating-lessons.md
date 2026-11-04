@@ -302,3 +302,11 @@ On 2026-11-03 the owner asked for every Dori's thread titles to be checked and m
 - **The mark follows the truth, not the last event.** A lane working in the thread keeps 🔄. Otherwise an open card, or our own reply (`dori thread reply` with no lane working there), makes it 🔔. Done is ✅ unless Autophagy recorded how the request ended (⛔, 💤, ❗), and then that mark stays, so a failure never shows ✅.
 - **Every name has exactly one mark.** Any leading mark of either side, the old ⏸️ and ⌛, and an orphaned closing word ("🔄 완료 · x") are stripped before the one mark is put on. The kind icon (✉️, 🔐, 📬) stays after it.
 - **A mark's meaning comes from the code path that sets it.** The proposal first called 💤 "folded with no answer". In fact an Autophagy mail card expires when a newer draft replaces it, it is withdrawn, its approval surface is retired or its Drive folder moved, never because the owner was silent. He asked what it meant before choosing.
+
+## 36. An every-lane directive is narrowed only where lanes' own records say nothing falls out
+
+On 2026-11-04 the owner chose to keep the ledger and narrow the 14 directives every lane got (Q480). His directives must not fall out of a lane that needs them, so each narrowing was replayed with the real picker on 432 lane briefs and checked against what those lanes did, from their session records.
+
+- **Recall is measured on behaviour, not on what the brief seemed to be about.** Narrowing the pair rules to wording about handing work over kept 21 of the 27 lanes that posted in the pair channel. Narrowing them to any Dori's name kept all 37 that did. Narrowing docs-same-pr missed lanes that edited code and docs with no matching word, so it stays for every lane.
+- **The template is in every brief.** Its words (구현, 코드, 외부 문서) would put a keyword scope back on every lane, so no narrowed scope may hit the eight steps by themselves (a test checks this).
+- **The lead's surfaces do not change with a lane's scope.** A keyword scope also enters the owner rows' hints. On a replay of 2,060 owner messages that doubled the hints and pushed out ones his words called in 26 rows. `briefOnly` keeps the owner rows and opened threads as they were.
