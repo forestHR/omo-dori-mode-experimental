@@ -803,7 +803,7 @@ test("scope replay 2026-11-02: a lane that runs node (Node.js) or edits a gate's
 });
 
 test("an owner entry amended by a later message moves its date: a brief holding the old tag and prompt lacks it, so apply sends the new one", () => {
-  const before = { id: "split", name: "n", by: "owner" as const, basis: "b", words: "공돌이 만들고", prompt: "영상은 공돌이 맡는다.", date: "2026-11-04", source: "s", scope: { keywords: ["영상"] }, mode: "inject" as const };
+  const before = { id: "split", name: "n", by: "owner" as const, basis: "b", words: "공돌이 만들고", prompt: "영상은 공돌이 맡는다.", date: "2026-11-04", source: "s", scope: { keywords: ["영상"] }, mode: "inject" as const, layer: "common" as const };
   const after = { ...before, words: "공돌이 만들고 / 회사 자료는 무돌", prompt: "연구 영상은 공돌이, 회사 자료는 무돌이 맡는다.", date: "2026-11-05" };
   const old = `${fields}\n## 형 지침\n\n${directiveText(before)}\n`;
   expect(hasDirective(old, before)).toBe(true);
