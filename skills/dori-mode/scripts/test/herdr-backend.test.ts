@@ -213,6 +213,11 @@ test.each([
   ["fish -C cmd", [{ name: "fish", argv: ["fish", "-C", "set x 1"] }], true],
   ["pwsh -NoExit -Command", [{ name: "pwsh", argv: ["pwsh", "-NoExit", "-Command", "ls"] }], true],
   ["pwsh -NoEx -Command (review 2)", [{ name: "pwsh", argv: ["pwsh", "-NoEx", "-Command", "ls"] }], true],
+  // upstream dori-superagent #94 (https://github.com/sisyphuslabs/dori-superagent/pull/94, issue #93): its keepsPrompt
+  // matched only -noe and -noexit; every other prefix PowerShell takes for -NoExit, with one or two dashes, also keeps a
+  // prompt. Here they hold without that list, as every shell in front does.
+  ["pwsh -noex -c keeps a prompt (upstream #94)", [{ name: "pwsh", argv: ["pwsh", "-noex", "-c", "ls"] }], true],
+  ["pwsh --noexi -Command keeps a prompt (upstream #94)", [{ name: "pwsh", argv: ["pwsh", "--noexi", "-Command", "ls"] }], true],
   ["pwsh -File - (review 1)", [{ name: "pwsh", argv: ["pwsh", "-File", "-"] }], true],
   ["cmd /k cmd /c (review 2)", [{ name: "cmd.exe", argv: ["cmd.exe", "/k", "cmd", "/c", "echo ready"] }], true],
   ["pwsh.exe by Windows path (review 1)", [{ name: "C:\\Program Files\\PowerShell\\7\\pwsh.exe", argv: ["C:\\Program Files\\PowerShell\\7\\pwsh.exe"] }], true],
