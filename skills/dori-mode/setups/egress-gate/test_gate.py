@@ -215,7 +215,9 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
             elif path.startswith("/api/v10/"):
                 route = path[len("/api/v10"):]
                 parts = route.split("/")
-                if route.endswith("/threads") and method == "POST":
+                if route.endswith("/threads") and method == "POST" and "messages" in parts and parts[4] in self.thread_meta:
+                    status, data = 400, {"code": 160004, "message": "A thread has already been created for this message"}
+                elif route.endswith("/threads") and method == "POST":
                     self.created_threads.append(route)
                     self.thread_names.append(json.loads(body)["name"])
                     data = {"id": parts[4] if "messages" in parts else str(776 + len(self.created_threads))}
@@ -228,6 +230,10 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
                 elif route.endswith("/messages") and method == "GET":
                     data = [{"id": m, "content": c, "author": {"bot": True}}
                             for m, c in sorted(self.cards.items(), reverse=True) if self.card_channels.get(m) == parts[2]]
+                elif (parts[1] == "channels" and len(parts) == 3 and parts[2] in self.thread_meta and method == "PATCH"
+                      and "name" in json.loads(body) and json.loads(body).get("archived") is not False
+                      and (self.thread_meta[parts[2]].get("thread_metadata") or {}).get("archived")):
+                    status, data = 400, {"code": 50083, "message": "Thread is archived"}  # Discord: unarchive to rename
                 elif parts[1] == "channels" and len(parts) == 3 and parts[2] in self.thread_meta:
                     if method == "PATCH":
                         self.thread_patches.append((parts[2], json.loads(body)))
@@ -513,6 +519,70 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
         self.approve()
         await self.service.poll_approvals()
         self.assertTrue(self.cards[entry["message"]].startswith("✅ 실행됨"))
+
+    def dori_thread(self, thread, name, owner="7"):
+        """A thread a Dori bot (or, with owner="1", the owner) opened before any card, as `dori thread open --from`."""
+        self.thread_meta[thread] = {"id": thread, "type": 11, "parent_id": "20", "guild_id": "10",
+                                    "owner_id": owner, "name": name}
+
+    async def test_a_card_joining_a_thread_a_dori_opened_gives_it_the_waiting_mark_and_the_card_kind(self):
+        # 2026-11-04 05:28Z: YooDori opened "🔔 정해영 OmO 문의 답장" on the owner's message, the card joined it
+        # and the name stayed without the kind, so the owner could not tell a card waits there.
+        for origin, thread in (("20/100", "100"), ("556/100", "556")):
+            with self.subTest(origin=origin):
+                self.thread_meta.clear()
+                self.thread_patches.clear()
+                self.dori_thread(thread, "🔔 정해영 OmO 문의 답장")
+                self.approval()
+                await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]},
+                                   origin=origin)
+                entry = self.service.pending()[-1]
+                self.assertEqual(self.created_threads, [])
+                self.assertEqual(self.card_channels[entry["message"]], thread)
+                self.assertEqual(self.thread_patches, [(thread, {"name": "🔔 🔐 정해영 OmO 문의 답장", "archived": False})])
+                self.approve()
+                await self.service.poll_approvals()
+                self.assertEqual(self.thread_patches[-1], (thread, {"name": "✅ 🔐 정해영 OmO 문의 답장", "archived": True}))
+
+    async def test_a_joined_thread_already_named_right_or_opened_by_the_owner_keeps_its_name(self):
+        for name, owner in (("🔔 🔐 정해영 OmO 문의 답장", "7"), ("🔔 ✉️ 정해영 OmO 문의 답장", "7"), ("📌 📬 Digest", "7"),
+                            ("🔄 ✉️ Reply", "7"), ("형의 요청", "1")):
+            with self.subTest(name=name, owner=owner):
+                self.thread_meta.clear()
+                self.thread_patches.clear()
+                for card in (self.state / "pending").glob("*.json"):
+                    card.unlink()  # else the next card joins the last one's thread (#319) and never looks at the name
+                self.dori_thread("100", name, owner)
+                self.approval()
+                await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]})
+                self.assertEqual(self.card_channels[self.service.pending()[-1]["message"]], "100")
+                self.assertEqual(self.thread_patches, [])
+
+    async def test_a_joined_archived_dori_thread_is_unarchived_by_the_rename(self):
+        # Discord renames an archived thread only together with archived: false.
+        self.dori_thread("100", "✉️ 정해영 OmO 문의 답장")
+        self.thread_meta["100"]["thread_metadata"] = {"archived": True}
+        self.approval()
+        await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]})
+        self.assertEqual(self.thread_meta["100"]["name"], "🔔 ✉️ 정해영 OmO 문의 답장")
+
+    async def test_an_unreadable_joined_thread_is_logged_and_the_card_still_goes_in(self):
+        self.dori_thread("556", "🔔 정해영 OmO 문의 답장")
+        self.approval()
+        self.thread_meta["100"] = {"id": "100"}  # Discord says the message has a thread ...
+        real_call = self.service.bot_call
+
+        async def call(method, path, data=None):  # ... but reading it fails
+            if method == "GET" and path == "/channels/100":
+                return 503, {}, b"{}"
+            return await real_call(method, path, data)
+
+        self.service.bot_call = call
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            await self.request(data={"summary": "Invite", "attendees": [{"email": "outside@example.net"}]})
+        self.assertIn("GATE_CARD_THREAD_RENAME_FAILED", err.getvalue())
+        self.assertEqual(self.card_channels[self.service.pending()[-1]["message"]], "100")
+        self.assertEqual(self.thread_patches, [])
 
     async def test_a_card_for_a_request_elsewhere_opens_its_own_thread(self):
         # Given / When: the owner's message lives in another channel of his server.
