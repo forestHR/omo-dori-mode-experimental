@@ -1,5 +1,5 @@
 import { repeatTick } from "./auto-signals.ts";
-import { type DoriConfig, fill } from "./config.ts";
+import type { DoriConfig } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { researchCheck, stuckTop } from "./explore.ts";
 import { omoPane, omoSession, paneTranscript, readScreen, sendVerified } from "./panes.ts";
@@ -71,16 +71,7 @@ export const transcriptReport = (lines: readonly string[], key: string): string 
   return null;
 };
 
-export const scrubForThread = (line: string, home: string): string =>
-  line
-    .replace(/^\[REPORT\]\s*[^|]*\|\s*[^|]*\|\s*/, "")
-    .split(home).join("~")
-    .replace(/\/(Users|home|Volumes|private)\/\S+/g, "(local path)")
-    .replace(/\bw\w+:p\w+\b/g, "(pane)")
-    .replace(/`/g, "'")
-    .trim();
-
-export type SweepAct = { readonly kind: "nudged" | "nudge-failed" | "posted" | "post-failed" | "no-report" | "stuck" | "research_started" | "research_not_started" | "rollover_due" | "rollover_auto" | "rollover_audit" | "audit_summary" | "lead_compaction_stuck" | "directive_audit" | "directive_links" | "lane_cap" | "stalled" | "usage_unknown" | "supervision_error" | "ready_resume"; readonly lane: string; readonly detail: string };
+export type SweepAct = { readonly kind: "nudged" | "nudge-failed" | "lead-told" | "lead-tell-failed" | "no-report" | "stuck" | "research_started" | "research_not_started" | "rollover_due" | "rollover_auto" | "rollover_audit" | "audit_summary" | "lead_compaction_stuck" | "directive_audit" | "directive_links" | "lane_cap" | "stalled" | "usage_unknown" | "supervision_error" | "ready_resume"; readonly lane: string; readonly detail: string };
 
 export type RolloverHooks = {
   // the length signals of the session in a pane: context use, compactions, age
@@ -515,31 +506,29 @@ export const freshnessTick = async (deps: FlowDeps, home: string, given: Rollove
       await deps.registry.patch(lane.key, { lastNudgeAt: now });
       acts.push({ kind: delivered ? "nudged" : "nudge-failed", lane: lane.key, detail: delivered ? `${silentMin} min silent` : `${silentMin} min silent; the nudge did not reach pane ${lane.pane}` });
     }
-    const hook = deps.config.hooks.threadReply;
-    if (silentMin >= deps.config.postAfterMin && hook && lane.thread !== "none" && (current.lastAutoReplyAt ?? 0) < heard) {
+    // nothing goes to the owner's thread on its own: a line counted from the lane's last report, blind to what the lead
+    // wrote since, told him nothing (owner, 2026-11-04: "시간도 안맞고 말이야 도움도 안돼"); the lead is told, once per silence
+    // (lastAutoReplyAt), with or without hooks.threadReply
+    if (silentMin >= deps.config.postAfterMin && lane.thread !== "none" && (current.lastAutoReplyAt ?? 0) < heard) {
       // a report seen before still stands once it left the screens; only a lane never heard from is NO-REPORT
       const known = report ?? current.lastReport;
       if (!known) {
         acts.push({ kind: "no-report", lane: lane.key, detail: "pane has no [REPORT] line" });
         continue;
       }
-      // the report is the lane's note to the lead; the owner gets a plain status line and the lead the note to retell
-      const words = deps.config.discord;
-      const text = words.postRawReports ? `Progress (from the lane's last report): ${scrubForThread(known, home)}` : words.quietText.replaceAll("{min}", String(silentMin));
-      const replied = await deps.run(fill(hook, { thread: lane.thread, text, key: lane.key }));
-      // a hook that failed posted nothing: say so, and leave the lane due so the next sweep tries again
-      if (replied.code !== 0) {
-        acts.push({ kind: "post-failed", lane: lane.key, detail: `threadReply hook exit ${replied.code}: ${(replied.err || replied.out).slice(0, 160)}` });
+      const pane = deps.config.leadPane;
+      // a lead not told leaves the lane due, so a lead configured later or a note that arrives on the next sweep still counts
+      if (!pane) {
+        acts.push({ kind: "lead-tell-failed", lane: lane.key, detail: `${silentMin} min silent; leadPane is not configured` });
+        continue;
+      }
+      const note = `[DORI] ${lane.key}: ${silentMin} min without a new report. Nothing was posted in its thread. If the owner needs to know where it stands, tell him in one plain line. Last report: ${known.replace(/`/g, "'").replaceAll("$(", "$ (")}`;
+      if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, note))) {
+        acts.push({ kind: "lead-tell-failed", lane: lane.key, detail: `${silentMin} min silent; the note did not reach pane ${pane}` });
         continue;
       }
       await deps.registry.patch(lane.key, { lastAutoReplyAt: now });
-      let lead = "";
-      if (!words.postRawReports) {
-        const pane = deps.config.leadPane;
-        const note = `[DORI] ${lane.key}: ${silentMin} min without a new report, so its thread got a short status line instead of the report. Tell the owner where it stands in plain words. Last report: ${known.replace(/`/g, "'").replaceAll("$(", "$ (")}`;
-        lead = !pane ? "; lead not told: leadPane is not configured" : (await sendVerified(deps.run, deps.clock, deps.config, pane, note)) ? "; lead told" : `; lead not told: the note did not reach pane ${pane}`;
-      }
-      acts.push({ kind: "posted", lane: lane.key, detail: `${text}${lead}` });
+      acts.push({ kind: "lead-told", lane: lane.key, detail: `${silentMin} min silent; nothing posted in its thread` });
     }
   }
   const lead = deps.config.leadPane;

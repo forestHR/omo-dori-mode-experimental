@@ -113,10 +113,8 @@ export const ownerSpeechOf = (locale: string, speech: OwnerSpeech = ""): OwnerSp
 
 // Words the Discord helpers write: thread status words, question-card labels, and how answer times are shown.
 // autoUnEye: the listener takes its eyes reaction off the owner's earlier messages once its bot writes in that channel.
-// quietText ({min} = minutes since the lane's last report) is what freshness posts in the owner's thread (hooks.threadReply,
-// any messenger) instead of the lane's own report, a note for the lead; it promises nothing the scripts do not do.
-// postRawReports brings back posting the report as it is. A close posts the lane's summary for the owner
-// (close-summary.ts), not fixed words. laneStartText is the first message
+// freshness posts nothing in the owner's thread on its own; a silent lane is the lead's to retell. A close posts the
+// lane's summary for the owner (close-summary.ts), not fixed words. laneStartText is the first message
 // dori launch posts in a discord:<id> work thread that has none ({title}, {goal}, {brief}, {done}, {key}, {pane}; a line
 // whose placeholder is empty is left out). waiveText is the line the owner gets when dori launch --waive leaves one of his
 // directives out of a brief ({key}, {id}, {name}, {reason}): in the lane's discord:<id> thread, else DORI_DISCORD_CHANNEL.
@@ -131,7 +129,6 @@ export const ownerSpeechOf = (locale: string, speech: OwnerSpeech = ""): OwnerSp
 export type DiscordWords = {
   readonly statusStyle: StatusStyle;
   readonly autoUnEye: boolean;
-  readonly quietText: string;
   readonly laneStartText: string;
   readonly waiveText: string;
   readonly leadRunawayText: string;
@@ -146,7 +143,6 @@ export type DiscordWords = {
   readonly leadBackText: string;
   // the owner's line when dori watch starts a lead that was down (lead-down.ts; {since}: when it went down, discord.timeZone)
   readonly leadDownText: string;
-  readonly postRawReports: boolean;
   // minutes a done (✅) thread in DORI_DISCORD_CHANNEL stays quiet before freshness archives it (0: never; a thread an open
   // lane, an open card or a pending rename holds is left open)
   readonly autoArchiveMin: number;
@@ -181,7 +177,6 @@ export type DiscordWords = {
 export const defaultDiscordWords: DiscordWords = {
   statusStyle: "words",
   autoUnEye: true,
-  quietText: "Still working on it. The last report came {min} min ago.",
   laneStartText: "{title}\nGoal, in your words: {goal}\n{brief}\nDone when: {done}\nLane {key}, pane {pane}",
   waiveText: "Lane {key} was launched without your directive {id} ({name}). The lead's reason: {reason}",
   leadRunawayText: "The lead {pane} has started {turns} turns on its own since its last user message ({since}). Other Dori: type one short check message into {pane}; do not stop it.",
@@ -192,7 +187,6 @@ export const defaultDiscordWords: DiscordWords = {
   leadLimitNoTimeText: "I can't answer right now: my model calls fail ({reason}). I'll read your messages once they work again.",
   leadBackText: "My model works again; reading your messages now.",
   leadDownText: "My session went down at {since}; I'm starting it again in the same conversation and will answer in a few minutes.",
-  postRawReports: false,
   autoArchiveMin: 30,
   working: "working",
   waiting: "waiting",
@@ -733,6 +727,8 @@ export const migrateOldKeys = (input: Raw): { readonly raw: Raw; readonly warnin
   drop("explore", "stagePattern", "the periodic check of lane reports it ordered was removed; lanes run dori intent-check at each stage change");
   drop("handover", "laneRepeats", "a stuck lane is due for a rollover at rung 4 of the stuck ladder");
   drop("discord", "doneText", "a close posts the lane's own summary for the owner (dori claim-done --summary, or one a model writes from its last report and REPORT.md), and a lane with a thread does not close without one");
+  // owner 2026-11-04 "이거 뭐야? 시간도 안맞고 말이야 도움도 안돼": freshness posts nothing in the owner's thread on its own
+  for (const key of ["quietText", "postRawReports"]) drop("discord", key, "dori freshness posts nothing in the owner's thread on its own; a silent lane's last report goes to the lead, who tells the owner in one plain line if he needs it");
   // owner 2026-10-20 "이건 왜 아직 기계적 구문 생성이 남아있어?": the rollover message is written, not filled in
   for (const key of ["reportText", "frozenText", "sizeText"]) drop("handover", key, "the owner's rollover message is one or two plain sentences the scripts write in discord.locale's language (what moved, why, nothing for him to do); panes and the thaw command are in the watch log");
   drop("handover", "proposalOptions", "dori rollover-propose no longer posts an owner card; the lead decides");

@@ -13,7 +13,7 @@ If you want the lane to do one more thing after it claimed:
 
 ## 2. Pausing a lane that waits on the owner
 
-`dori freshness` nudges every lane whose status is `working` and has been silent too long, and posts a short status line to the thread. For a lane that is deliberately waiting on an owner decision, that repeats a ping nobody can act on.
+`dori freshness` nudges every lane whose status is `working` and has been silent too long, and then tells the lead. For a lane that is deliberately waiting on an owner decision, that repeats a ping nobody can act on.
 
 Pause it instead: `dori pause <key> "waiting on the owner's decision about X"`. The lane's status becomes `paused` and the reason goes into its history; with aoe the omo goal of its session is paused first, so it starts no turn on its own (exit 3, `PAUSE_UNVERIFIED`: not confirmed, the lane is unchanged; look at the pane and pause again). From then on freshness neither nudges nor posts for it, `dori watch` reports no `LANE_BLOCKED` for it, `dori dead-panes` skips its pane, and a done claim it makes is announced (`LANE_DONE_CLAIMED_PAUSED`) but does not close it on a timer. When the owner answers, `dori resume <key>` puts back the status it had (working or not-done) and restarts its silence clock. Don't edit the registry file by hand for this any more.
 
@@ -55,10 +55,8 @@ To swap one inbound listener for another, run the new one as a shadow that write
 
 A lane's `[REPORT]` is a note for the lead: abbreviations, numbered items, an English head, written for someone who knows the plan. Posted as it is in the owner's thread it reads like an office memo, and the owner asked why it was written like that. Anything a script posts to the owner on its own must be in plain words, in the owner's language, and short.
 
-- `dori freshness` posts `discord.quietText` (`{min}` = minutes since the last report) after `postAfterMin`, not the report. The report goes to the lead pane as `[DORI] <key>: ... Last report: ...`; when you see it, tell the owner where the lane stands in your own words.
+- `dori freshness` posts nothing in the owner's thread on its own. The status line it used to post there after `postAfterMin` ("진행 중이야 — 마지막 보고는 21분 전.") counted from the lane's last report, blind to what the lead had written since, and told the owner nothing: "이거 뭐야? 시간도 안맞고 말이야 도움도 안돼" (2026-11-04). The report goes to the lead pane as `[DORI] <key>: N min without a new report. Nothing was posted in its thread. ... Last report: ...`; when the owner needs to know where the lane stands, tell him in one plain line.
 - A close (`dori close` and the automatic one in `dori watch`) posts the lane's summary for the owner, then marks the thread done: the lane's `claim-done --summary`, else one a model writes from its last report and `REPORT.md`. A lane with a thread and no summary does not close (`CLOSE_SUMMARY_MISSING`). This replaced a fixed `doneText` ("done, I'll sum up what changed for you"): the lead's follow-up never came, and the owner asked "왜 안알려주고 닫아?" (2026-10-19). Never post words that promise a later summary.
-- Set `quietText` in the owner's language, for example Korean in casual speech: `"quietText": "진행 중이야 — 마지막 보고는 {min}분 전."`.
-- `discord.postRawReports: true` brings back posting the raw report and evidence. Leave it off unless the owner reads those notes directly.
 
 ## 9. Stuck on one metric: branch the explanations, do not repeat the patch
 

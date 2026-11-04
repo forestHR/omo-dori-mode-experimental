@@ -315,7 +315,7 @@ const USAGE = `dori <command> [options]
                                        the day's token scorecard from session usage, the registry, the lanes log and the
                                        inbox (no model call), saved to <stateDir>/scorecard/<date>.json and latest.md;
                                        --post also sends it to scorecard.postTo or DORI_DISCORD_CHANNEL (off by default)
-  freshness [--loop MIN]               nudge silent lanes, post their last report via hooks.threadReply
+  freshness [--loop MIN]               nudge silent lanes, hand their last report to the lead
   dead-panes [--loop MIN]              print DEAD_PANE <id> for stopped agent panes
   guard [--loop MIN]                   host load, memory, disk and pane-count alerts
   heavy <label> [--mem SIZE] -- <command ...>

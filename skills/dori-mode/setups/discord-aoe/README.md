@@ -137,7 +137,7 @@ Every key is optional; the full list with defaults and what reads each one is in
 | `launchEnv` | `{"CUDA_VISIBLE_DEVICES": ""}` on a host whose GPU trains, else `{}` | Variables every lane session starts with: the GPU hidden from lanes and all they start; a lane launched with `--use-gpu` (or `dori set-gpu <key> on`) starts without them |
 | `watchLog`, `scorecard.lanesLog` | this Dori's lanes log | Sweep lines, update results, scorecard nudges |
 | `scorecard.sessions`, `scorecard.leadSessions` | this Dori's folder under `~/.omo/agent/sessions/` | `sessions` sets the total-cost scope (empty: every session on the host). `leadSessions` files are filtered by the lead's session ids in `<stateDir>/handover/*.json` (`from.session` and `to.session`, including the persisted current lead); no known ids: the whole folder. This filtering also applies to signals and repeat-check's lead files. |
-| `hooks.threadReply`, `hooks.threadDone` | `dori thread reply\|done` as in the template | Lane reports and closes in the owner's thread |
+| `hooks.threadReply`, `hooks.threadDone` | `dori thread reply\|done` as in the template | A lane's close summary and done mark in the owner's thread |
 | `hooks.transcribe` | absolute path of `transcribe.sh` | Voice notes |
 | `discord.botId` | this Dori's bot user id (the template ships it empty: no check until you set it) | Discord writes refuse another bot's token (`DISCORD_BOT_MISMATCH`) |
 | `discord.mentionRoleIds` | usually nothing: the listener reads its bot's own roles at start; list other role ids that should call this Dori | Which `@role` mentions anywhere in the guild reach the inbox (`scope:"mention"`) |
@@ -543,7 +543,7 @@ In the Dori's own session, arm these as persistent monitors (`references/setup.m
 |---|---|---|
 | owner messages and answers | `tail -n 0 -F ~/.dori/state/discord/inbox.jsonl` | `^\{` |
 | sessions waiting on a human | `tail -n 0 -F ~/.dori/state/session-events.jsonl` | `^\{` |
-| lane sweeps | `tail -n 0 -F ~/.dori/dori-lanes.log` | `LANE_\|DEAD_PANE\|HOST_GUARD ALERT\|NUDGED\|POSTED\|NO-REPORT\|FAIL\|STUCK\|INTENT_CHECK\|ROLLOVER_\|RESEARCH_NOT_STARTED\|NOT_SUBMITTED\|SAME_FIX` |
+| lane sweeps | `tail -n 0 -F ~/.dori/dori-lanes.log` | `LANE_\|DEAD_PANE\|HOST_GUARD ALERT\|NUDGED\|LEAD-TOLD\|NO-REPORT\|FAIL\|STUCK\|INTENT_CHECK\|ROLLOVER_\|RESEARCH_NOT_STARTED\|NOT_SUBMITTED\|SAME_FIX` |
 | listener health | `tail -n 0 -F ~/.dori/inbound.log ~/.dori/session-watch.log` | `FATAL\|_FAIL\|SESSION-WATCH-FAIL` |
 | KakaoTalk (only with `DORI_KAKAO_SELF_ID`) | `PATH=/absolute/node/bin:$PATH bun <fork>/skills/dori-mode/setups/discord-aoe/kakao-watch.ts` | `KAKAO_(MSG\|NEW_ROOM\|WATCH_OFF\|[A-Z_]*FAIL)` |
 | Slack as a bot (only with `DORI_SLACK_APP_TOKEN`, or `--wait` until it is set) | `bun <fork>/skills/dori-mode/setups/discord-aoe/slack-watch.ts --wait` | `SLACK_(MSG\|WATCH_OFF\|WATCH_READY\|[A-Z_]*FAIL)` |
@@ -642,7 +642,7 @@ dori ask --text "Lane fix-login asks: keep the old session cookie for 30 days?" 
 - If a typed answer is not really an answer, `dori reopen Q4` puts the buttons back and marks its thread 🔔 again. When the follow-up is done, `dori resolve Q4` forgets the question; the folded card stays in the chat as the record. If the owner answered in a message instead of a tap, `dori resolve Q4 --answer "Yes, 30 days"` folds the card into the same record first.
 - `dori questions --open` lists what is still waiting.
 
-Card and thread wording is in the `discord` section of `config.json` (`statusStyle`, `autoUnEye`, `quietText`, `postRawReports`, `working`, `waiting`, `done`, `other`, `pick`, `recommended`, `answered`, `ownerOnly`, `byButton`, `byText`, `byReply`, `repliedInText`, `locale`, `timeZone`), so a Dori that talks to its owner in another language can use that language's words and the owner's time zone.
+Card and thread wording is in the `discord` section of `config.json` (`statusStyle`, `autoUnEye`, `working`, `waiting`, `done`, `other`, `pick`, `recommended`, `answered`, `ownerOnly`, `byButton`, `byText`, `byReply`, `repliedInText`, `locale`, `timeZone`), so a Dori that talks to its owner in another language can use that language's words and the owner's time zone.
 
 ## Operating rules for this setup
 

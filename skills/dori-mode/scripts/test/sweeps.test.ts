@@ -27,38 +27,54 @@ afterEach(() => state.done());
 
 const working: Lane = { key: "quiet-lane", title: "quiet", thread: "chat:team/9", pane: "w:p7", brief: "/b.md", done: "merged acme/app#1", openedAt: new Date(T0).toISOString(), lastReplyAt: T0 };
 
-test("a thread reply hook that fails is recorded as failed, not posted, and the lane stays due", async () => {
-  // Given a reply hook whose command cannot run (as a bare dori on native Windows could not before #306).
-  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["no-such-hook", "{thread}", "{text}"] } });
+test("a lead note that does not reach the lead pane is reported as not told, and the next sweep tries again", async () => {
+  // Given a lead pane whose input line keeps the note unsent.
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir);
   await deps(T0).registry.write(working);
-  world.screen = "noise\n[REPORT] quiet-lane | milestone | tests green, PR open\n❯ ";
+  world.screens["w:p7"] = "noise\n[REPORT] quiet-lane | milestone | tests green, PR open\n❯ ";
+  world.screens["lead:p1"] = "❯ [DORI] quiet-lane: 21 min without a new report";
   expect(await freshnessTick(deps(T0), "/home/test")).toEqual([]);
   expect((await freshnessTick(deps(T0 + 16 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["nudged"]);
-  // When the sweep tries to post, and again on the next sweep.
+  // When the sweep tells the lead, and again on the next sweep.
   const first = await freshnessTick(deps(T0 + 21 * MIN), "/home/test");
   const again = await freshnessTick(deps(T0 + 23 * MIN), "/home/test");
-  // Then each says the post failed, and nothing claims the thread got its line.
-  expect(first.map((a) => a.kind)).toEqual(["post-failed"]);
-  expect(first[0]?.detail).toContain("exit 1");
-  expect(again.map((a) => a.kind)).toEqual(["post-failed"]);
+  // Then each says the lead was not told, and the lane stays due.
+  expect(first.map((a) => a.kind)).toEqual(["lead-tell-failed"]);
+  expect(first[0]?.detail).toContain("did not reach pane lead:p1");
+  expect(again.map((a) => a.kind)).toEqual(["lead-tell-failed"]);
   expect((await deps(T0).registry.read("quiet-lane"))?.lastAutoReplyAt).toBeUndefined();
 });
 
-test("a lane silent past the nudge time is nudged once, then its last report is posted for it", async () => {
+test("a silent lane with no leadPane configured stays due, so the lead configured later still gets the note for the same silence", async () => {
+  // Given a Dori whose leadPane is not set yet (review #339).
+  const noLead = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { leadPane: undefined });
+  await noLead(T0).registry.write({ ...working, lastReport: "[REPORT] quiet-lane | milestone | tests green, PR open", lastNudgeAt: T0 + 16 * MIN });
+  world.screens["w:p7"] = "working on it\n❯ ";
+  // When a sweep finds it silent without a lead, and one after the lead is set, with no new report in between.
+  const first = await freshnessTick(noLead(T0 + 21 * MIN), "/home/test");
+  const later = await freshnessTick(depsFor(world, fakeClock(T0 + 26 * MIN), state.dir), "/home/test");
+  // Then the first says the lead was not told, and the second tells it.
+  expect(first.map((a) => [a.kind, a.detail])).toEqual([["lead-tell-failed", "21 min silent; leadPane is not configured"]]);
+  expect(later.map((a) => a.kind)).toEqual(["lead-told"]);
+  expect(sent(world).filter((t) => t.startsWith("[DORI] quiet-lane: 26 min"))).toHaveLength(1);
+});
+
+test("a lane silent past the nudge time is nudged once, then the lead is told once and nothing is posted in its thread", async () => {
   const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
   await deps(T0).registry.write(working);
-  world.screen = "noise\n[REPORT] quiet-lane | milestone | tests green on /home/test/repo, PR open\n❯ ";
+  world.screen = "noise\n[REPORT] quiet-lane | milestone | tests green on /home/test/repo, PR open\n\n❯ ";
   expect(await freshnessTick(deps(T0), "/home/test")).toEqual([]);
   expect(await freshnessTick(deps(T0 + 10 * MIN), "/home/test")).toEqual([]);
   expect((await freshnessTick(deps(T0 + 16 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["nudged"]);
   expect((await freshnessTick(deps(T0 + 17 * MIN), "/home/test")).map((a) => a.kind)).toEqual([]);
-  const posted = await freshnessTick(deps(T0 + 21 * MIN), "/home/test");
-  expect(posted.map((a) => a.kind)).toEqual(["posted"]);
-  const call = world.calls.find((c) => c[0] === "notify");
-  expect(call?.[1]).toBe("chat:team/9");
-  expect(call?.[2]).toBe("Still working on it. The last report came 21 min ago.");
+  const told = await freshnessTick(deps(T0 + 21 * MIN), "/home/test");
+  expect(told.map((a) => a.kind)).toEqual(["lead-told"]);
+  expect((await freshnessTick(deps(T0 + 40 * MIN), "/home/test")).map((a) => a.kind)).toEqual([]);
+  // the owner's thread gets nothing from the sweep, even with a reply hook configured
+  expect(world.calls.some((c) => c[0] === "notify")).toBe(false);
   // one nudge to the lane, one note to the lead carrying the report
   expect(sent(world)).toHaveLength(2);
+  expect(sent(world)[1]).toBe("[DORI] quiet-lane: 21 min without a new report. Nothing was posted in its thread. If the owner needs to know where it stands, tell him in one plain line. Last report: [REPORT] quiet-lane | milestone | tests green on /home/test/repo, PR open");
 });
 
 test("a report the lane sent to the lead pane is found there, wrapped lines joined, and a new report resets the silence", async () => {
@@ -69,13 +85,13 @@ test("a report the lane sent to the lead pane is found there, wrapped lines join
   expect(await freshnessTick(deps(T0 + 14 * MIN), "/home/test")).toEqual([]);
   expect((await freshnessTick(deps(T0 + 28 * MIN), "/home/test")).map((a) => a.kind)).toEqual([]);
   const later = await freshnessTick(deps(T0 + 35 * MIN), "/home/test");
-  expect(later.map((a) => a.kind)).toEqual(["nudged", "posted"]);
-  // the owner's thread gets a plain status line in the configured words; the raw report goes to the lead pane
-  expect(world.calls.find((c) => c[0] === "notify")?.[2]).toBe("Still working on it. The last report came 21 min ago.");
+  expect(later.map((a) => a.kind)).toEqual(["nudged", "lead-told"]);
+  // the raw report goes to the lead pane, and nothing to the owner's thread
+  expect(world.calls.some((c) => c[0] === "notify")).toBe(false);
   const toLead = world.calls.find((c) => c[0] === "herdr" && c[2] === "send-text" && c[3] === "lead:p1")?.[4];
   expect(toLead).toContain("[DORI] quiet-lane: 21 min without a new report");
   expect(toLead).toContain("Last report: [REPORT] quiet-lane | blocker | CI is red on the flaky e2e job, rerunning");
-  expect(later[1]?.detail).toEndWith("; lead told");
+  expect(later[1]?.detail).toBe("21 min silent; nothing posted in its thread");
 });
 
 // omo runs in tmux's alternate screen (history_size 0): capture-pane -S -3000 returns only the visible rows, and omo's tail
@@ -106,13 +122,13 @@ const omoTail = [
 const userLine = (at: string, text: string): string => JSON.stringify({ type: "message", timestamp: at, message: { role: "user", content: [{ type: "text", text }] } });
 const noSignals = { signals: async () => ({}) };
 
-test("a lane that reported is not NO-REPORT once its report scrolled off both screens: the thread and the lead get its last report", async () => {
+test("a lane that reported is not NO-REPORT once its report scrolled off both screens: the lead gets its last report", async () => {
   const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
   await deps(T0).registry.write({ ...working, lastReport: "[REPORT] quiet-lane | milestone | recorder guard holds, PR open" });
   world.screens["w:p7"] = `v6-orig2 is recording.\n${omoTail}`;
   world.screens["lead:p1"] = omoTail;
   const acts = await freshnessTick(deps(T0 + 21 * MIN), "/home/test", { ...noSignals, leadTranscript: async () => undefined });
-  expect(acts.map((a) => a.kind)).toEqual(["nudged", "posted"]);
+  expect(acts.map((a) => a.kind)).toEqual(["nudged", "lead-told"]);
   expect(sent(world).find((t) => t.startsWith("[DORI] quiet-lane"))).toContain("Last report: [REPORT] quiet-lane | milestone | recorder guard holds, PR open");
 });
 
@@ -154,25 +170,20 @@ test("a report wrapped on the lane's screen with a status outside the four words
   expect((await deps(T0).registry.read("quiet-lane"))?.lastReport).toBe("[REPORT] quiet-lane | working | origin 이동(end-sync 머지: 대회 c6d071a, 비전 21631b1) 기록");
 });
 
-test("quietText is the configured words, and postRawReports posts the lane's report as before without telling the lead", async () => {
-  const korean = { ...defaultDiscordWords, quietText: "진행 중이야 — 마지막 보고는 {min}분 전. 정리해서 곧 알려 줄게." };
-  await depsFor(world, fakeClock(T0), state.dir).registry.write(working);
-  world.screens["lead:p1"] = " [REPORT] quiet-lane | milestone | (a) 승인 조건대로 ① `bun test` green, $(x) gone\n\n❯ ";
-  const ko = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] }, discord: korean });
-  await freshnessTick(ko(T0 + MIN), "/home/test");
-  await freshnessTick(ko(T0 + 22 * MIN), "/home/test");
-  expect(world.calls.find((c) => c[0] === "notify")?.[2]).toBe("진행 중이야 — 마지막 보고는 21분 전. 정리해서 곧 알려 줄게.");
-  // a report with a backtick or $( still reaches the lead, defused, instead of failing the sweep
-  expect(sent(world).find((t) => t.startsWith("[DORI] quiet-lane"))).toContain("① 'bun test' green, $ (x) gone");
-
-  world.calls = [];
-  await depsFor(world, fakeClock(T0), state.dir).registry.write({ ...working, key: "raw-lane" });
-  world.screens["lead:p1"] = " [REPORT] raw-lane | milestone | tests green on /home/test/repo, PR open\n\n❯ ";
-  const raw = { hooks: { threadReply: ["notify", "{thread}", "{text}"] }, discord: { ...defaultDiscordWords, postRawReports: true } };
-  await freshnessTick(depsFor(world, fakeClock(T0 + MIN), state.dir, raw), "/home/test");
-  await freshnessTick(depsFor(world, fakeClock(T0 + 22 * MIN), state.dir, raw), "/home/test");
-  expect(world.calls.filter((c) => c[0] === "notify").map((c) => c[2])).toContain("Progress (from the lane's last report): tests green on ~/repo, PR open");
-  expect(world.calls.some((c) => c[0] === "herdr" && c[2] === "send-text" && c[3] === "lead:p1")).toBe(false);
+test("a Dori with no thread reply hook still tells the lead about a silent lane, its report defused; a lane with no thread is left out", async () => {
+  // Given no hooks.threadReply (the case of every Dori but one on 2026-11-04).
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir);
+  await deps(T0).registry.write(working);
+  await deps(T0).registry.write({ ...working, key: "threadless", thread: "none", pane: "w:p8" });
+  world.screens["lead:p1"] = " [REPORT] quiet-lane | milestone | (a) 승인 조건대로 ① `bun test` green, $(x) gone\n [REPORT] threadless | milestone | step one\n\n❯ ";
+  await freshnessTick(deps(T0 + MIN), "/home/test");
+  // When it has been silent past postAfterMin.
+  const acts = await freshnessTick(deps(T0 + 22 * MIN), "/home/test");
+  // Then the lead gets one note for the lane with a thread, with a backtick or $( defused instead of failing the sweep.
+  expect(acts.filter((a) => a.kind === "lead-told").map((a) => a.lane)).toEqual(["quiet-lane"]);
+  const notes = sent(world).filter((t) => t.startsWith("[DORI]"));
+  expect(notes).toHaveLength(1);
+  expect(notes[0]).toContain("① 'bun test' green, $ (x) gone");
 });
 
 test("a done claim written while a sweep is nudging the lane survives the sweep's own registry write", async () => {

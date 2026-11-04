@@ -65,10 +65,10 @@ Dori はあなたの話し方に合わせます。短く、くだけた調子で
 | `ignorePanes`, `workspaces` | 監視から除外する pane と workspace のフィルター。aoe では tmux セッション名とプロファイル名を使い、`workspaces` は空でも構いません |
 | `defaultCwd` | レーンが始まるディレクトリで、レーンが worktree を作るリポジトリ |
 | `agentCommand` | エージェントの起動コマンド。`{model}` と `{prompt}` を含む argv のリスト |
-| `hooks.threadReply`, `hooks.threadDone` | メッセンジャー CLI を `{thread}` と `{text}` を含む argv のリストで。レーンの進捗投稿と完了表示に使います。 |
+| `hooks.threadReply`, `hooks.threadDone` | メッセンジャー CLI を `{thread}` と `{text}` を含む argv のリストで。レーンのクローズでまとめの投稿と完了表示に使います。 |
 | `discord.statusStyle` | Discord の状態マークを `"words"`(既定)または `"emoji"` に設定 |
 | `discord.autoUnEye` | `true`(既定)ならボットがそのチャンネルやスレッドに書き込んだとき、`dori inbound discord` が所有者のそれ以前のメッセージから目のリアクションを外す。`false` なら残す |
-| `discord.quietText`、`discord.postRawReports` | `freshness` が所有者のスレッドに投稿する文(`{min}` = 最後の報告からの分数)を所有者の言語で。レーンの報告はスレッドではなくリードへ。`postRawReports: true`(既定 `false`)ならそのまま投稿。クローズはレーンの所有者向けまとめ(`claim-done --summary`、なければモデルが書く)を先に投稿してからスレッドを完了にし、まとめがなければ閉じない |
+| `dori close` のまとめ | `freshness` は所有者のスレッドに自分からは何も投稿しない。クローズはレーンの所有者向けまとめ(`claim-done --summary`、なければモデルが書く)を先に投稿してからスレッドを完了にし、まとめがなければ閉じない |
 
 残り(時間、しきい値、heavy スロット数)は既定値で十分です。全項目の表は [`references/scripts.md`](skills/dori-mode/references/scripts.md) にあります。環境変数 `DORI_CONFIG`、`DORI_STATE_DIR`、`DORI_LEAD_PANE` はファイルより優先されます。
 
@@ -104,7 +104,7 @@ footer はレーンに `[REPORT] <key> | <milestone|blocker|question|done> | <te
 ["tmux", "send-keys", "-t", "=aoe_Dori_0a1b2c3d:", "Enter"]
 ```
 
-`dori freshness` はまずリードの画面から報告を読み、次にレーンの画面を見ます。新しい報告は沈黙のタイマーをリセットします。既定では 15 分後に声をかけ、20 分後に `hooks.threadReply` で所有者の言葉の短い状況一行(`discord.quietText`)を投稿し、それぞれ沈黙の期間につき 1 回実行します。レーンの報告そのものはリードの画面に送り、リードが人の言葉でまとめます。`discord.postRawReports: true` なら以前のように報告をそのまま投稿します。 レーンの上限と止まったように見える呼び出しも確認します(`supervision`。上限は既定でオフ)。上限に達するか呼び出しが止まったように見えると、リードに一度だけ知らせ、レーンを止めたりレーンに入力したりはしません。`close` はレーンの `COST` を表示します。
+`dori freshness` はまずリードの画面から報告を読み、次にレーンの画面を見ます。新しい報告は沈黙のタイマーをリセットします。既定では 15 分後に声をかけ、20 分後にレーンの最後の報告をリードの画面に送り(沈黙の期間につき 1 回)、スレッドには何も投稿していないと伝えます。所有者が知る必要があれば、リードが平易な一行で書きます。所有者のスレッドに自分からは何も投稿しません。 レーンの上限と止まったように見える呼び出しも確認します(`supervision`。上限は既定でオフ)。上限に達するか呼び出しが止まったように見えると、リードに一度だけ知らせ、レーンを止めたりレーンに入力したりはしません。`close` はレーンの `COST` を表示します。
 
 aoe では `dori watch` が、working または not-done のレーンが人を待って止まると `LANE_BLOCKED <key> <waiting|error|question|idle> <pane>` を出力します。`aoe ps --json` と画面を合わせて判断し、ターンの実行中は出力しません。idle は 45 秒続く必要があり、モニター、wake source、実行中や予約済みの goal を待つ状態は idle ではありません。セッション自身が始めた切り離し済みの eval セル、バックグラウンド bash セッション、バックグラウンド task を待つ状態も idle ではなく、監視ログに静かな `BG_WAITING` 行だけを残し、`blockedWaitMin`(既定 60 分)を過ぎると `LANE_BLOCKED` になります。閉じると aoe セッションを停止してゴミ箱に移し、完全削除はしません。
 
@@ -169,7 +169,7 @@ watcher はレーンを閉じるときに、シェルを通さずこの確認を
 | `dori claim-done` / `object-done` / `close` | 完了フロー。`DORI_DISCORD_TOKEN` があれば、close は `discord:` の作業スレッドを完了にしてアーカイブする |
 | `dori pause <key> <理由>` / `dori resume <key>` | 人を待っているレーンを止めておく。freshness の催促・投稿、`LANE_BLOCKED`、`DEAD_PANE` を出さず、完了申告が来ても自動では閉じない。aoe ではレーンのセッションの omo goal も止めて読み戻す(`/goal pause`、確認できなければ `PAUSE_UNVERIFIED`、exit 3)。`resume` で止める前の状態と止めた goal を戻す |
 | `dori watch` | 自動クローズの watcher と aoe の `LANE_BLOCKED` イベント。常駐モニターとして動かします |
-| `dori freshness [--loop MIN]` | 静かになったレーンに声をかけ、スレッドに短い状況一行を投稿し、最後の報告はリードに渡す |
+| `dori freshness [--loop MIN]` | 静かになったレーンに声をかけ、最後の報告をリードに渡す(スレッドには何も投稿しない) |
 | `dori dead-panes [--loop MIN]` | 止まったエージェントの pane を報告 |
 | `dori guard [--loop MIN]` | 負荷、メモリ、ディスク、pane 数の警告 |
 | `dori fix-attempt <key> --metric M --hypothesis H` | レーンに頼んだ修正を 1 回数える。レーンはそうした報告に `(fix: M / H)` を付け、同じ指標・同じ仮説で 3 回目になると `SAME_FIX_3` が根本原因の調査に切り替えるよう知らせる。記録の前に、その指標で既に試した仮説(`PRIOR_FIX`)を表示する |

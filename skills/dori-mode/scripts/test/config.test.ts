@@ -184,3 +184,21 @@ test("old keys of the stuck ladder, the reviewer list and the attempt patterns s
     fixture.done();
   }
 });
+
+test("discord.quietText and discord.postRawReports load with one CONFIG_OLD_KEY line each and are not kept; the other discord words stay", async () => {
+  // Given the words a Dori set when freshness still posted a status line in the owner's thread (before 2026-11-04).
+  const fixture = withState();
+  try {
+    const file = join(fixture.dir, "config.json");
+    writeFileSync(file, JSON.stringify({ discord: { quietText: "진행 중이야 — 마지막 보고는 {min}분 전.", postRawReports: false, locale: "ko-KR" } }));
+    const warned: string[] = [];
+    // When
+    const config = await loadConfig(file, "/home/ana", (line) => warned.push(line));
+    // Then
+    expect(warned.map((w) => w.split(" ").slice(0, 6).join(" "))).toEqual(["CONFIG_OLD_KEY discord.quietText is no longer read:", "CONFIG_OLD_KEY discord.postRawReports is no longer read:"]);
+    expect(["quietText", "postRawReports"].filter((k) => k in config.discord)).toEqual([]);
+    expect(config.discord.locale).toBe("ko-KR");
+  } finally {
+    fixture.done();
+  }
+});
