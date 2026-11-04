@@ -545,6 +545,113 @@ test("a bot's post is dropped when it holds no name or mention, is the Dori's ow
   expect(w.msgs()).toEqual(["SLACK_MSG D1 - dm name-UOWNER (owner): 끝"]);
 });
 
+test("every post in a watched channel wakes the lead as watched with no eyes, a bot's too; the Dori's own posts, edits, deletes and joins do not", async () => {
+  // Given two watched channels, written with stray spaces
+  const slack = fakeSlack();
+  const w = await watcher(slack, [], 30_000, { DORI_SLACK_WATCH_CHANNELS: " CW1, CW2 ," });
+  // When
+  slack.event({ type: "message", channel_type: "channel", channel: "CW1", user: "UGUEST", text: "내일 세미나 있어요", ts: "1700000000.000100" });
+  slack.event({ type: "message", channel_type: "channel", channel: "CW1", user: "UOWNER", text: "공지 확인", ts: "1700000000.000110" });
+  slack.event({ type: "message", channel: "CW1", user: "UOTHERAPP", bot_id: "BOTHER", text: "배포 끝", ts: "1700000000.000120" });
+  // a bot post whose words are all in its attachments has no text and still arrives
+  slack.event({ type: "message", subtype: "bot_message", channel: "CW1", bot_id: "BX", username: "ci-bot", ts: "1700000000.000130" });
+  slack.event({ type: "message", channel: "CW2", user: "UGUEST", text: "스레드 답", ts: "1700000000.000210", thread_ts: "1700000000.000200" });
+  slack.event({ type: "message", subtype: "file_share", channel: "CW2", user: "UGUEST", files: [{ name: "a.pdf" }], ts: "1700000000.000220" });
+  slack.event({ type: "message", channel: "CW1", user: "UBOT", bot_id: "BBOT", text: "내 글", ts: "1700000000.000300" });
+  slack.event({ type: "message", subtype: "bot_message", channel: "CW1", bot_id: "BBOT", text: "내 글, user 없이", ts: "1700000000.000310" });
+  slack.event({ type: "message", subtype: "message_changed", channel: "CW1", user: "UGUEST", text: "고침", ts: "1700000000.000320" });
+  slack.event({ type: "message", subtype: "message_deleted", channel: "CW1", ts: "1700000000.000330" });
+  slack.event({ type: "message", subtype: "channel_join", channel: "CW1", user: "UGUEST", text: "joined", ts: "1700000000.000340" });
+  // events are handled in order, so this DM means every post above has been decided
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UOWNER", text: "끝", ts: "1700000000.000400" });
+  await slack.until("the closing DM", () => w.msgs().some((l) => l.includes(" dm ")));
+  // Then
+  expect(w.rows().map((r) => [r.id, r.author_id, r.author_kind, r.addressed, r.mentions_self, r.reply_thread])).toEqual([
+    ["1700000000.000100", "UGUEST", "member", "watched", false, "1700000000.000100"],
+    ["1700000000.000110", "UOWNER", "owner", "watched", false, "1700000000.000110"],
+    ["1700000000.000120", "BOTHER", "bot", "watched", false, "1700000000.000120"],
+    ["1700000000.000130", "BX", "bot", "watched", false, "1700000000.000130"],
+    ["1700000000.000210", "UGUEST", "member", "watched", false, "1700000000.000200"],
+    ["1700000000.000220", "UGUEST", "member", "watched", false, "1700000000.000220"],
+    ["1700000000.000400", "UOWNER", "owner", "dm", false, null],
+  ]);
+  expect(w.msgs()).toEqual([
+    "SLACK_MSG CW1 1700000000.000100 watched name-UGUEST: 내일 세미나 있어요",
+    "SLACK_MSG CW1 1700000000.000110 watched name-UOWNER (owner): 공지 확인",
+    "SLACK_MSG CW1 1700000000.000120 watched name-UOTHERAPP (bot): 배포 끝",
+    "SLACK_MSG CW1 1700000000.000130 watched ci-bot (bot): ",
+    "SLACK_MSG CW2 1700000000.000200 watched name-UGUEST: 스레드 답",
+    "SLACK_MSG CW2 1700000000.000220 watched name-UGUEST: [file: a.pdf]",
+    "SLACK_MSG D1 - dm name-UOWNER (owner): 끝",
+  ]);
+  // the eyes went on the DM alone, and the watcher wrote nothing to any channel
+  expect(slack.calls.filter((c) => c.method === "reactions.add").map((c) => c.body.timestamp)).toEqual(["1700000000.000400"]);
+  expect(slack.calls.filter((c) => c.method === "chat.postMessage")).toEqual([]);
+});
+
+test("in a watched channel a stronger value wins (dm, mention, own-thread, name, then watched) and keeps its eyes; a bot's reply in the Dori's thread is only watched", async () => {
+  // Given a watched channel with a thread the Dori posted in, and names; D1 on the list as well, to show dm comes first
+  const slack = fakeSlack();
+  const w = await watcher(slack, [{ channel: "CW1", rootTs: "1700000000.000500", seenTs: "1700000000.000500" }], 30_000, { DORI_SLACK_WATCH_CHANNELS: "CW1,D1", DORI_SLACK_MENTION: "옥돌" });
+  // When: a mention that is also in the Dori's thread and holds the name, then a reply in the thread that holds the name
+  slack.event({ type: "message", channel_type: "im", channel: "D1", user: "UGUEST", text: "<@UBOT> 옥돌", ts: "1700000000.000100" });
+  slack.event({ type: "message", channel: "CW1", user: "UGUEST", text: "<@UBOT> 옥돌", ts: "1700000000.000510", thread_ts: "1700000000.000500" });
+  slack.event({ type: "message", channel: "CW1", user: "UGUEST", text: "옥돌 이것도", ts: "1700000000.000520", thread_ts: "1700000000.000500" });
+  slack.event({ type: "message", channel: "CW1", user: "UGUEST", text: "옥돌 봐줘", ts: "1700000000.000200" });
+  slack.event({ type: "message", channel: "CW1", user: "UGUEST", text: "그냥 글", ts: "1700000000.000210" });
+  slack.event({ type: "message", channel: "CW1", user: "UOTHERAPP", bot_id: "BOTHER", text: "<@UBOT> 옥돌", ts: "1700000000.000220" });
+  slack.event({ type: "message", channel: "CW1", user: "UOTHERAPP", bot_id: "BOTHER", text: "옥돌 끝", ts: "1700000000.000230" });
+  slack.event({ type: "message", channel: "CW1", user: "UOTHERAPP", bot_id: "BOTHER", text: "스레드 답", ts: "1700000000.000530", thread_ts: "1700000000.000500" });
+  // a bot's DM stays out even on the list
+  slack.event({ type: "message", channel: "D1", user: "UOTHERAPP", bot_id: "BOTHER", text: "DM", ts: "1700000000.000110" });
+  slack.event({ type: "message", channel_type: "im", channel: "D2", user: "UOWNER", text: "끝", ts: "1700000000.000900" });
+  await slack.until("the closing DM", () => w.msgs().some((l) => l.includes("SLACK_MSG D2 ")));
+  // Then
+  expect(w.rows().map((r) => [r.id, r.addressed, r.author_kind])).toEqual([
+    ["1700000000.000100", "dm", "member"],
+    ["1700000000.000510", "mention", "member"],
+    ["1700000000.000520", "own-thread", "member"],
+    ["1700000000.000200", "name", "member"],
+    ["1700000000.000210", "watched", "member"],
+    ["1700000000.000220", "mention", "bot"],
+    ["1700000000.000230", "name", "bot"],
+    ["1700000000.000530", "watched", "bot"],
+    ["1700000000.000900", "dm", "owner"],
+  ]);
+  // eyes on a person's dm, mention, own-thread and name, as before; none on watched and none on a bot's post
+  expect(slack.calls.filter((c) => c.method === "reactions.add").map((c) => c.body.timestamp)).toEqual(["1700000000.000100", "1700000000.000510", "1700000000.000520", "1700000000.000200", "1700000000.000900"]);
+});
+
+test("a channel not on the watch list stays as it was: a person's plain post is in the inbox only, a bot's plain post is dropped, a name still wakes", async () => {
+  // Given one watched channel and names
+  const slack = fakeSlack();
+  const w = await watcher(slack, [], 30_000, { DORI_SLACK_WATCH_CHANNELS: "CW1", DORI_SLACK_MENTION: "옥돌" });
+  // When
+  slack.event({ type: "message", channel: "C1", user: "UGUEST", text: "그냥 글", ts: "1700000000.000100" });
+  slack.event({ type: "message", channel: "C1", user: "UOTHERAPP", bot_id: "BOTHER", text: "배포 끝", ts: "1700000000.000110" });
+  slack.event({ type: "message", channel: "C1", user: "UGUEST", text: "옥돌 봐줘", ts: "1700000000.000120" });
+  await slack.until("the name SLACK_MSG", () => w.msgs().length === 1);
+  // Then
+  expect(w.rows().map((r) => [r.id, r.addressed])).toEqual([["1700000000.000100", null], ["1700000000.000120", "name"]]);
+  expect(w.msgs()).toEqual(["SLACK_MSG C1 1700000000.000120 name name-UGUEST: 옥돌 봐줘"]);
+});
+
+test("answering in a watched channel asks Slack to take off only the eyes that went on, never a watched post's", async () => {
+  // Given a post caught only by the list, before and after a mention in the same channel
+  const slack = fakeSlack();
+  const w = await watcher(slack, [], 30_000, { DORI_SLACK_WATCH_CHANNELS: "CW1" });
+  slack.event({ type: "message", channel: "CW1", user: "UGUEST", text: "그냥 글", ts: "1700000000.000100" });
+  slack.event({ type: "message", channel: "CW1", user: "UGUEST", text: "<@UBOT> 봐줘", ts: "1700000000.000110" });
+  slack.event({ type: "message", channel: "CW1", user: "UGUEST", text: "또 다른 글", ts: "1700000000.000120" });
+  await slack.until("three SLACK_MSG lines", () => w.msgs().length === 3);
+  // When the lead answers under the first post, and then in the channel itself
+  const under = await send(w, slack, ["--to", "CW1", "--thread", "1700000000.000100", "--text", "답"]);
+  const top = await send(w, slack, ["--to", "CW1", "--text", "답"]);
+  // Then
+  expect([under.code, top.code]).toEqual([0, 0]);
+  expect(unreacted(slack)).toEqual(["CW1 1700000000.000110 eyes bot"]);
+});
+
 test("a disconnect from Slack opens a fresh connection and messages keep arriving", async () => {
   // Given
   const slack = fakeSlack();

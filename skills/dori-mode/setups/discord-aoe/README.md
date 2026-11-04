@@ -16,7 +16,7 @@ What you get:
 | `self-restart.sh` | The one safe way to restart an aoe session, the Dori's own included, e.g. after an agent update. A lane restarts with `launchEnv` unless it uses the GPU (`dori launch-env`). |
 | `google-watch.ts` (unit `dori-google-watch`) | Read-only zele polling for new unread mail and upcoming calendar events; writes JSONL and remembers notified ids. |
 | `kakao-watch.ts`, `kakao-login.ts` | Optional, for a Dori with its own KakaoTalk account: polls its rooms through agent-messenger, appends new messages to the inbox, prints `KAKAO_MSG` for the Dori's monitor and marks the rooms read, again until it holds. Off unless `DORI_KAKAO_SELF_ID` is set. |
-| `slack-watch.ts`, `slack-app-manifest.yaml` | Optional, for a Dori that answers on Slack as its own Slack app (a bot, no member seat): Socket Mode, so no public port. Each human message the bot can see becomes an inbox row (`scope: "slack"`); a DM, a mention or a reply in a thread the Dori posted in also prints `SLACK_MSG` for the Dori's monitor, and so does another bot's channel post that mentions the bot or holds one of the Dori's names. Off unless `DORI_SLACK_APP_TOKEN` is set. |
+| `slack-watch.ts`, `slack-app-manifest.yaml` | Optional, for a Dori that answers on Slack as its own Slack app (a bot, no member seat): Socket Mode, so no public port. Each human message the bot can see becomes an inbox row (`scope: "slack"`); a DM, a mention or a reply in a thread the Dori posted in also prints `SLACK_MSG` for the Dori's monitor, and so does another bot's channel post that mentions the bot or holds one of the Dori's names, and every post in a channel on `DORI_SLACK_WATCH_CHANNELS`. Off unless `DORI_SLACK_APP_TOKEN` is set. |
 | `usage-snapshot.ts` | Captures the omo-usage TUI with ANSI colors and renders a PNG using headless Firefox. |
 | `dori.sh` | Starts `dori-inbound` and `dori-google-watch`, starts the current lead session if needed, then attaches to it. Requires the separate `dori lead` PR. |
 | `transcribe.sh`, `setup-asr.sh` | Local speech-to-text with whisper.cpp (CUDA when available) for `hooks.transcribe`. A whisper-cli that dies in a CUDA error gets one more try after `dori gpu-room` (`TRANSCRIBE_CUDA_RETRY`); a second failure fails with its code and the last lines of its error. |
@@ -106,7 +106,7 @@ One `KEY=VALUE` per line, `#` comments, absolute paths (neither systemd nor the 
 | `DORI_USAGE_DIR`, `DORI_USAGE_SNAP_DIR` | no | no | Usage screenshot ([below](#usage-screenshot)) |
 | `DORI_SLACK_TOKEN`, `DORI_SLACK_COOKIE`, `DORI_TELEGRAM_TOKEN` | no | yes | Other messengers: `dori send slack\|telegram`, `dori presence`, `dori inbound slack` |
 | `DORI_SLACK_APP_TOKEN` | no | yes | Turns the Slack watcher on (`slack-watch.ts`; an `xapp-` app-level token with `connections:write`); it also needs `DORI_SLACK_TOKEN` to be the app's `xoxb-` bot token ([section](#slack-as-a-bot)) |
-| `DORI_SLACK_OWNER_ID`, `DORI_SLACK_MENTION`, `DORI_SLACK_API`, `DORI_SLACK_WAIT_MS` | no | no | The owner's Slack member ids (rows get `author_kind: "owner"`), the Dori's names as a case-insensitive regex (a message holding one, a bot's channel post included, wakes the lead as `name`), the Web API base (a test server; default `https://slack.com/api`, also used by `dori send slack`), the token re-read interval of `--wait` (default 30000) |
+| `DORI_SLACK_OWNER_ID`, `DORI_SLACK_MENTION`, `DORI_SLACK_WATCH_CHANNELS`, `DORI_SLACK_API`, `DORI_SLACK_WAIT_MS` | no | no | The owner's Slack member ids (rows get `author_kind: "owner"`), the Dori's names as a case-insensitive regex (a message holding one, a bot's channel post included, wakes the lead as `name`), comma-separated channel ids whose every post wakes the lead as `watched`, the Web API base (a test server; default `https://slack.com/api`, also used by `dori send slack`), the token re-read interval of `--wait` (default 30000) |
 | `PATH` | no | no | The units' PATH (zele, node for agent-messenger); overrides the unit default |
 
 Not in `dori.env`; the wrapper, a unit or dori itself sets these for one run:
@@ -358,18 +358,20 @@ tokens are in `dori.env`, so the monitor can be armed before the owner has insta
   and no lock file sees it: run it on one machine only.
 - **Messages.** A person's message (plain, `thread_broadcast` or `file_share`) becomes one inbox row. The app's own
   posts (by user id or bot id), edits and deletes are not taken in, and neither is another bot's post unless it is a
-  channel post that mentions the bot or holds one of the Dori's names. A bot's DM or its reply in a thread the Dori
+  channel post that mentions the bot, holds one of the Dori's names or is in a channel on `DORI_SLACK_WATCH_CHANNELS`. A bot's DM or its reply in a thread the Dori
   posted in does not count by itself. A mention in a channel arrives twice (`app_mention` and
   `message.channels`) and Slack retries an envelope it thinks was lost: each message is taken in once.
 - **Waking the Dori.** Only an addressed message prints
-  `SLACK_MSG <channel> <reply thread or -> <dm|mention|own-thread|name> <name>[ (owner)| (bot)]: <text>`: a DM, a mention of the
+  `SLACK_MSG <channel> <reply thread or -> <dm|mention|own-thread|name|watched> <name>[ (owner)| (bot)]: <text>`: a DM, a mention of the
   bot, a reply in a thread `dori send slack` posted in (`<stateDir>/slack-threads.json`), or a message holding one of
   the Dori's names (`DORI_SLACK_MENTION`, a case-insensitive regex like `DORI_KAKAO_MENTION`: `옥돌아 들리면 대답해봐`
   with no @; such a message only reaches the app when it reads whole channels, `channels:history` /
-  `message.channels`). Other channel messages are in the inbox only. A `(bot)` line is not a request from anyone: the
+  `message.channels`). Every other post in a channel on `DORI_SLACK_WATCH_CHANNELS` (comma-separated ids, read at the
+  watcher's start, a bot's post included; the app must be in the channel and read whole channels, as above) prints as `watched`: it is for the lead to
+  follow, not a request to the Dori, and the watcher never answers it. Other channel messages are in the inbox only. A `(bot)` line is not a request from anyone: the
   watcher never answers it, the row has `author_kind: "bot"` and its `author_id` is the bot id even when an app posts
   with the owner's token, so it never counts as the owner's words.
-- **Read receipt.** The watcher puts the eyes reaction on every addressed message from a person itself (a bot's post gets none), before it prints
+- **Read receipt.** The watcher puts the eyes reaction on every addressed message from a person itself (a bot's post or a `watched` one gets none), before it prints
   `SLACK_MSG`, as the Discord listener does, so it shows while the lead is still in another turn (dori-superagent
   [#9](https://github.com/sisyphuslabs/dori-superagent/issues/9)). A failed reaction never holds the message back:
   `SLACK_REACT_FAIL <channel> <ts> <error>`, or `SLACK_REACT_SKIPPED` once when the app has no `reactions:write`.
@@ -574,7 +576,7 @@ A KakaoTalk message (`kakao-watch.ts`):
 {"ts":"...","id":"<log id>","channel_id":"<chat id>","scope":"kakao","room":"<room name>","author_id":"<kakao user id>","author_name":"<nickname>","author_kind":"owner","content":"...","sent_at":1791900000,"mentions_self":false}
 ```
 
-A Slack message (`slack-watch.ts`); `addressed` is `dm`, `mention`, `own-thread`, `name` or `null` (`mentions_self` is true for `mention` and `name`), `author_kind` is `owner`, `member` or `bot` (with a bot, `author_id` is its bot id), and `reply_thread` is the `--thread` of an answer (`null`: answer in the DM itself):
+A Slack message (`slack-watch.ts`); `addressed` is `dm`, `mention`, `own-thread`, `name`, `watched` or `null` (`mentions_self` is true for `mention` and `name`), `author_kind` is `owner`, `member` or `bot` (with a bot, `author_id` is its bot id), and `reply_thread` is the `--thread` of an answer (`null`: answer in the DM itself):
 
 ```json
 {"ts":"...","id":"<message ts>","channel_id":"<channel id>","thread_ts":null,"reply_thread":"<ts>","scope":"slack","author_id":"<member id>","author_name":"<display name>","author_kind":"member","addressed":"mention","mentions_self":true,"content":"..."}

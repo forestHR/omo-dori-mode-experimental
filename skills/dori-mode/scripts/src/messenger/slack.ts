@@ -108,7 +108,7 @@ export const readUneyed = (file: string): { readonly answered: ReadonlySet<strin
 };
 
 // The eyes read receipt slack-watch.ts puts on an addressed message comes off once the Dori answers it, as on Discord.
-// The watcher's inbox rows say which messages got eyes (addressed, a bot's post never) and where their answer goes
+// The watcher's inbox rows say which messages got eyes (addressed, a bot's post or a "watched" one never) and where their answer goes
 // (reply_thread); a post there, or in a thread under the message itself, answers every earlier one of them; a post with no thread answers
 // every earlier one in that channel that is not inside a thread (a DM, or a channel message answered in the channel
 // itself, as the owner asked OkDori to do: 2026-11-03 10:52 KST, the eyes stayed). reactions.remove with the bot
@@ -145,7 +145,7 @@ export const clearEyes = async (unreact: Unreact, files: { readonly inbox: strin
     } catch {
       continue;
     }
-    if (row.scope !== "slack" || !row.addressed || row.author_kind === "bot" || !row.id || row.channel_id !== posted.channel || !(known ? known.has(row.id) : tsAfter(posted.ts, row.id))) continue;
+    if (row.scope !== "slack" || !row.addressed || row.addressed === "watched" || row.author_kind === "bot" || !row.id || row.channel_id !== posted.channel || !(known ? known.has(row.id) : tsAfter(posted.ts, row.id))) continue;
     const answers = thread ? (row.reply_thread ?? null) === thread || row.id === thread : (row.reply_thread ?? null) === null || (row.thread_ts ?? null) === null;
     if (!answers) continue;
     if (!done.has(`${posted.channel}:${row.id}`) && !targets.includes(row.id)) targets.push(row.id);

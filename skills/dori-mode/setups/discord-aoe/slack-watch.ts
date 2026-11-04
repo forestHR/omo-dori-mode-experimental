@@ -3,7 +3,8 @@
 // set. Socket Mode: no public port, one outgoing WebSocket. Each human message the bot can see becomes one inbox row
 // (scope "slack"); a DM, a mention of the bot or a reply in a thread the Dori posted in also prints one SLACK_MSG line for
 // the lead's monitor. Another bot's channel post is taken in only when it mentions the bot or holds one of the names,
-// and is never answered from here. Replies go out with dori send slack --to <channel> [--thread <ts>] under the bot's name.
+// and is never answered from here. In a channel on DORI_SLACK_WATCH_CHANNELS every post, a bot's too, prints that line
+// as well, as "watched", with no eyes and no answer from here. Replies go out with dori send slack --to <channel> [--thread <ts>] under the bot's name.
 // --wait waits for the tokens instead of exiting; --set-tokens asks for them on the terminal and writes them to dori.env.
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -17,6 +18,8 @@ export type SlackWatchOptions = {
   readonly owner: readonly string[];
   // the Dori's names, as DORI_KAKAO_MENTION is for KakaoTalk: a person's message holding one wakes the lead like a mention
   readonly mention: RegExp | null;
+  // channels whose every post wakes the lead, call word or not (DORI_SLACK_WATCH_CHANNELS, comma separated ids)
+  readonly watched: ReadonlySet<string>;
   readonly api: string;
   readonly inbox: string;
   readonly threads: string;
@@ -29,6 +32,7 @@ export const slackWatchOptions = (env: Record<string, string | undefined>, state
   botToken: env.DORI_SLACK_TOKEN?.trim() ?? "",
   owner: (env.DORI_SLACK_OWNER_ID ?? "").split(",").map((x) => x.trim()).filter(Boolean),
   mention: env.DORI_SLACK_MENTION?.trim() ? new RegExp(env.DORI_SLACK_MENTION.trim(), "i") : null,
+  watched: new Set((env.DORI_SLACK_WATCH_CHANNELS ?? "").split(",").map((x) => x.trim()).filter(Boolean)),
   api: env.DORI_SLACK_API?.trim() || "https://slack.com/api",
   inbox: env.DORI_DISCORD_INBOX?.trim() || join(stateDir, "discord", "inbox.jsonl"),
   threads: join(stateDir, "slack-threads.json"),
@@ -62,7 +66,7 @@ export type SlackEvent = {
   readonly files?: readonly { readonly name?: string }[];
 };
 export type Self = { readonly userId: string; readonly botId: string };
-export type Addressed = "dm" | "mention" | "own-thread" | "name" | null;
+export type Addressed = "dm" | "mention" | "own-thread" | "name" | "watched" | null;
 
 // Subtypes that are someone writing. Edits, deletes and joins are not taken in. An app's post has bot_id, with a user
 // (chat.postMessage) or as subtype bot_message without one.
@@ -166,12 +170,17 @@ export class SlackWatch {
     return ev.channel_type === "im" || (ev.channel?.startsWith("D") ?? false);
   }
 
-  // Another bot's post counts only for a mention or a name: not a DM, and not a reply in the Dori's own thread, which
-  // would let two bots keep each other awake.
+  private isWatched(ev: SlackEvent): boolean {
+    return this.o.watched.has(ev.channel ?? "");
+  }
+
+  // Another bot's post counts only for a mention, a name or a watched channel: not a DM, and not a reply in the Dori's
+  // own thread as such, which would let two bots keep each other awake.
   private botAddressed(ev: SlackEvent): Addressed {
     if (this.isDm(ev)) return null;
     if (this.mentioned(ev)) return "mention";
-    return this.o.mention?.test(ev.text ?? "") ? "name" : null;
+    if (this.o.mention?.test(ev.text ?? "")) return "name";
+    return this.isWatched(ev) ? "watched" : null;
   }
 
   async addressed(ev: SlackEvent): Promise<Addressed> {
@@ -180,7 +189,7 @@ export class SlackWatch {
     if (ev.thread_ts && (await this.deps.threads()).some((t) => t.channel === ev.channel && t.rootTs === ev.thread_ts)) return "own-thread";
     // "옥돌아 들리면 대답해봐" in a channel, no @: only reaches the app when it reads the whole channel (channels:history)
     if (this.o.mention?.test(ev.text ?? "")) return "name";
-    return null;
+    return this.isWatched(ev) ? "watched" : null;
   }
 
   async handle(ev: SlackEvent): Promise<Record<string, unknown> | null> {
@@ -218,8 +227,9 @@ export class SlackWatch {
     };
     // the eyes go on before the row is written, so dori send slack, which reads the rows, never clears a message whose
     // eyes are still on their way (only a reactions.add past the deadline can, and that one is taken off again above).
-    // A bot's post gets none: nobody waits on the receipt, and it would stay on a post the lead does not answer.
-    if (addressed && !bot) await this.react(ev.channel, ev.ts);
+    // A bot's post gets none: nobody waits on the receipt, and it would stay on a post the lead does not answer. A post
+    // caught only by the watch list gets none either: it did not ask the Dori for anything.
+    if (addressed && addressed !== "watched" && !bot) await this.react(ev.channel, ev.ts);
     this.deps.append(row);
     // one line whatever a bot chose as its name: a line break in it could otherwise pass for a SLACK_MSG of its own
     if (addressed) this.deps.log(`SLACK_MSG ${ev.channel} ${replyThread ?? "-"} ${addressed} ${author ?? authorId}${row.author_kind === "owner" ? " (owner)" : bot ? " (bot)" : ""}: ${content.slice(0, 160)}`.replace(/\n/g, " "));
