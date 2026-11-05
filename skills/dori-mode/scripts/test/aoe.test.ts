@@ -275,20 +275,32 @@ test("a lane whose session ended within 20 s of its prompt is a STARTUP_ERROR, t
 
 // dori-superagent issue #50 reproduced here (MIT): https://github.com/sisyphuslabs/dori-superagent/issues/50
 // A lane that runs but never set its goal stops after its first turn, so a running agent is not yet a good start.
-const goalLaunch = async (reads: readonly GoalRead[], during?: (read: number) => void, config: Partial<DoriConfig> = {}, cwd = "/tmp/w") => {
+// late: when given, the clock moves with every sleep, each overrunning by late ms as on a loaded host; else it stands still
+const goalLaunch = async (reads: readonly GoalRead[], during?: (read: number) => void, config: Partial<DoriConfig> = {}, cwd = "/tmp/w", late?: number) => {
   const brief = join(state.dir, "brief.md");
   await Bun.write(brief, "# brief\n");
   let read = 0;
-  const deps: FlowDeps = { ...at(T0), config: { ...at(T0).config, ...config }, readGoal: async () => { during?.(read); return reads[Math.min(read++, reads.length - 1)] as GoalRead; } };
+  const still = fakeClock(T0);
+  const clock = late === undefined ? still : { now: () => still.at, sleep: async (ms: number) => void (still.at += ms + late) };
+  const deps: FlowDeps = { ...at(T0), clock, config: { ...at(T0).config, ...config }, readGoal: async () => { during?.(read); return reads[Math.min(read++, reads.length - 1)] as GoalRead; } };
   const r = await launchLane(deps, { noThread: "test lane", key: "smoke", title: "smoke", brief, done: "file /tmp/ok", cwd });
   return { startup: r.startup, read };
 };
 
 test("a lane whose first turn ended without a goal is STARTUP_NO_GOAL with its last lines after three idle reads", async () => {
   world.screen = "working on it\n❯ ";
-  const r = await goalLaunch(["none"]);
+  const r = await goalLaunch(["none"], undefined, {}, "/tmp/w", 0);
   expect(r.startup).toBe(`STARTUP_NO_GOAL smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}: the agent runs but no goal in its session: its first turn ended 40 s after its prompt; last lines: working on it / ❯`);
   expect(r.read).toBe(3);
+});
+
+// dori-superagent PR #83 (MIT): https://github.com/sisyphuslabs/dori-superagent/pull/83
+test("STARTUP_NO_GOAL names the time launch really waited, not the planned 40 s", async () => {
+  // Given a host where every sleep overruns by 5 s, and a first turn that ends with no goal.
+  world.screen = "working on it\n❯ ";
+  const r = await goalLaunch(["none"], undefined, {}, "/tmp/w", 5_000);
+  // Then the message gives the 20 s check plus two 10 s re-reads, each 5 s late.
+  expect(r.startup).toStartWith(`STARTUP_NO_GOAL smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}: the agent runs but no goal in its session: its first turn ended 55 s after its prompt;`);
 });
 
 test("a goal that shows up after the first check is still STARTUP_OK", async () => {
@@ -371,7 +383,7 @@ const FOOT_BUSY = ["reading the brief", `── • Working (3s • esc to inter
 
 test("pending goal footer scope: an idle first turn whose status lines read esc to interrupt is STARTUP_NO_GOAL", async () => {
   world.screen = FOOT_IDLE;
-  const idle = await goalLaunch(["none"]);
+  const idle = await goalLaunch(["none"], undefined, {}, "/tmp/w", 0);
   expect(idle.startup).toStartWith(`STARTUP_NO_GOAL smoke ${pendingPane}: the agent runs but no goal in its session: its first turn ended 40 s after its prompt`);
   expect(idle.read).toBe(3);
 });
