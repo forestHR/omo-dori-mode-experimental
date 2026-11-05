@@ -148,7 +148,7 @@ The CLI is a thin layer over typed modules you can import in your own scripts:
 | `src/messenger/voice.ts` | `transcribe`: voice note to text through your hook |
 | `src/messenger/thread-ledger.ts` | `ThreadLedger`: every thread the Dori posts in, persisted; given to `Slack`, it records each `chat.postMessage` (also raw `call`s) |
 | `src/messenger/slack-inbound.ts` | `pollSlackInbound`: threads view, the ledger's threads and unread counts, deduplicated, own messages filtered |
-| `src/messenger/telegram-inbound.ts` | `pollTelegramInbound`: owner-gated `getUpdates` long-poll, persisted offset, DMs and the group gate; `writeLineSync`: a whole line out (short writes continued, no progress or an error throws) |
+| `src/messenger/telegram-inbound.ts` | `pollTelegramInbound`: owner-gated `getUpdates` long-poll (messages and edits, media file ids), persisted offset, DMs and the group gate; `telegramInboundLoop`: one-shot or `--loop`; `envInt`: strict integer env ids; `writeLineSync`: a whole line out (short writes continued, no progress or an error throws) |
 | `src/messenger/slack-presence.ts` | `slackPresence`: hold a user account active |
 | `src/routing.ts` | `canLaunch`, `idleLaneFor`: the routing checks |
 
@@ -525,14 +525,17 @@ Prints `INBOUND <source> <channel> <thread> <ts> <user> <text>`. It reads from t
 The Dori's own messages and bot messages are skipped. Every message the Dori posts records its thread in `<stateDir>/slack-threads.json`, whichever helper sends it, so a guest's untagged reply under a root posted with a raw API call is still found.
 
 ### `dori inbound telegram [--loop MIN]`
-Prints `INBOUND <source> <chat> <thread> <update-id> <from> <text>` — `source` is `dm` or `topic`. Long-polls `getUpdates` (upstream dori-superagent #76):
+Prints `INBOUND <source> <chat> <thread> <update-id> <from> <text>[ file=<kind>:<file_id>]`, keeping Slack's field order — `source` is `dm`, `topic`, `edit:dm` or `edit:topic`. A media message appends ` file=<kind>:<file_id>` (voice, audio, video, video_note, animation, document, photo — the largest photo variant); the line carries the `file_id`, which a caller can pass to Telegram's `getFile`. Long-polls `getUpdates` (upstream dori-superagent #76, and [#79](https://github.com/sisyphuslabs/dori-superagent/pull/79) for edits and media):
 - only the configured owner's messages pass (`DORI_TELEGRAM_OWNER_ID`); bot messages never do;
 - DMs from the owner always pass; in a group (`DORI_TELEGRAM_GROUP_ID`) only the configured topic (`DORI_TELEGRAM_TOPIC_ID`) does — with a group but no topic, every owner message in the group passes — with no group configured, DMs only;
 - delivery is at-least-once: the offset in `<stateDir>/telegram-offset` advances past a message only after its `INBOUND` line is out (dropped updates advance immediately), so a crash replays at worst the unprinted lines — duplicates carry the same update id;
 - the full text is printed, JSON-escaped on one line: `getUpdates` cannot fetch a message again;
+- edits arrive too: `edited_message` updates are polled and printed as their own `edit` kind, carrying the edited text;
+- an offset file that is not a non-negative integer warns once on stderr (`WARN telegram-offset at <path> is unparseable ...`) and restarts from 0;
+- without `--loop` it polls once and exits; with `--loop MIN` it polls again at once after a poll that printed a line and waits MIN minutes only after an idle one (a failed poll prints `WARN <error>`);
 - reuses the bot token the skill already stores (`DORI_TELEGRAM_TOKEN`).
 
-Nothing starts it on its own (`dori serve` and the services run `inbound discord` only); without `DORI_TELEGRAM_TOKEN`, or with an id that is blank, not an integer, or (owner, topic) not positive, it exits 1 before any call. An `INBOUND` line that cannot be written whole (stdout closed, a write that stops partway) leaves the offset before its message.
+Nothing starts it on its own (`dori serve` and the services run `inbound discord` only); without `DORI_TELEGRAM_TOKEN`, or with an id that is blank, not a plain decimal integer after trimming (`1e3` and `0x10` are refused), or (owner, topic) not positive, it exits 1 before any call. An `INBOUND` line that cannot be written whole (stdout closed, a write that stops partway) leaves the offset before its message.
 
 ### `dori inbound discord`
 Runs until stopped (run it as a service, see `setups/discord-aoe/`). It connects to the gateway with the message-content intent and handles:
