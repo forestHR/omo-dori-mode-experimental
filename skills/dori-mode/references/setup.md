@@ -72,7 +72,7 @@ cd skills/dori-mode/scripts && bun install && bun link    # puts `dori` on PATH
 mkdir -p ~/.dori && cp ../references/config.example.json ~/.dori/config.json
 ```
 
-`install.sh` does the same and first updates `~/.dori/src` (`DORI_SRC`) with `git pull --ff-only`. If local changes or local commits there block that pull, it exits 1 with the checkout, its `git status --short` and both ways on: rerun with `DORI_NO_PULL=1` to install the checkout as it is, or drop the work (`git -C ~/.dori/src fetch && git -C ~/.dori/src reset --hard '@{u}'`) and rerun.
+`install.sh` does the same and first updates `~/.dori/src` (`DORI_SRC`) with `git pull --ff-only`. If local changes or local commits there block that pull, it exits 1 with the checkout, its `git status --short` and both ways on: rerun with `DORI_NO_PULL=1` (or `true`, `yes`) to install the checkout as it is, or drop the work (`git -C ~/.dori/src fetch && git -C ~/.dori/src reset --hard '@{u}'`) and rerun. A branch with no upstream gets git's own advice and no reset.
 
 Then edit `~/.dori/config.json`: at least `leadPane` (your own herdr pane, from `herdr pane current`; with aoe, your tmux session name), `laneWorkspace` (herdr only), `defaultCwd`, and the two hooks if you want lane threads updated automatically. `references/scripts.md` explains every field.
 
