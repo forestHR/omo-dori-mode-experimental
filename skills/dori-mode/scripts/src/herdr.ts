@@ -10,7 +10,8 @@ import { AGENT, type Proc, procTable, topAgent } from "./session-id.ts";
 // one (w1:p2, measured on herdr 0.9.5), so each primitive there picks the backend from the pane it is given: a lane opened
 // under aoe keeps working after its Dori's config names herdr, and dori handover --lane can move it from one to the other.
 // herdr's own agent_status is not used for omo (herdr 0.9.5 has no omo rule and falls back to idle; upstream #62/#63): the
-// state comes from omo's screen, the same marks the aoe side reads.
+// state comes from omo's screen, the same marks the aoe side reads (https://github.com/sisyphuslabs/dori-superagent/pull/63,
+// https://github.com/sisyphuslabs/dori-superagent/issues/62).
 export const isHerdrPane = (pane: string): boolean => pane.includes(":");
 
 export type HerdrPane = { readonly pane_id: string; readonly tab_id?: string; readonly workspace_id?: string; readonly cwd?: string; readonly agent?: string };
