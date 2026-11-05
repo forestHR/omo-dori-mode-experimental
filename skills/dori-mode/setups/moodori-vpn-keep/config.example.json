@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "pcSsh": "owner@pc.tailnet.example",
+  "vpnUrl": "https://vpn.company.example/",
+  "credsCommand": ["ssh", "vault@host.example", ". ~/secrets/vpn-login.env && printf '%s\\n%s\\n' \"$VPN_ID\" \"$VPN_PW\""],
+  "motpFile": "~/.moodori/secrets/otp-uri.txt",
+  "secuwayTask": "moodori-secuway",
+  "edgeTask": "moodori-edge",
+  "edgePort": 9222,
+  "cdpPort": 9224,
+  "days": [1, 2, 3, 4, 5],
+  "hours": [8, 20],
+  "timeZone": "Asia/Seoul",
+  "intervalMs": 60000,
+  "maxFails": 3,
+  "restMs": 900000,
+  "pauseFile": "/tmp/moodori-vpn-keep.pause"
+}

@@ -15,7 +15,7 @@ Before anything else, ask the owner what to call you. Plain "Dori" is fine, and 
 
 ## Setup
 
-Run once, in order. Details and commands: `references/setup.md`. For a Discord owner with lanes in aoe/tmux instead of herdr, there is a complete, ready setup (listener, question cards, services) in `setups/discord-aoe/README.md`. Several Doris on one host share one omo login (one login for the owner, not one per Dori) with `setups/omo-shared-login/README.md`.
+Run once, in order. Details and commands: `references/setup.md`. For a Discord owner with lanes in aoe/tmux instead of herdr, there is a complete, ready setup (listener, question cards, services) in `setups/discord-aoe/README.md`. Several Doris on one host share one omo login (one login for the owner, not one per Dori) with `setups/omo-shared-login/README.md`. MooDori alone keeps the owner's work-PC VPN logged in during work hours with `setups/moodori-vpn-keep/README.md` (off unless its config enables it).
 
 1. Run inside herdr, or inside an aoe/tmux session with `backend: "aoe"` in the config. That is how you open, read and message sessions, and they survive restarts. Which one, and how to set up each: `references/setup.md`.
 2. Install agent-messenger, ask the owner which platform (Telegram, Discord, Slack, ...), and wait for the answer. If it is Slack, also ask: user token (a real member with a paid seat the owner pays for, sees everything that member sees, can show online) or bot token (an app, no seat cost, only invited channels and its scopes). Give that trade-off in one short list and wait.

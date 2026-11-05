@@ -1,0 +1,17 @@
+[Unit]
+Description=MooDori workhours VPN keep (owner's work PC: Secuway SSL VPN, MOTP relogin)
+After=network-online.target
+
+[Service]
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# DORI_VPN_KEEP_CONFIG may be set here; keep.ts also reads dori.env (DORI_ENV_FILE) itself
+EnvironmentFile=-%h/.dori/dori.env
+ExecStart=%h/.bun/bin/bun %h/.dori/src/skills/dori-mode/setups/moodori-vpn-keep/keep.ts
+# exit 0 = VPN_KEEP_OFF (no config, or enabled is not true): the unit stays stopped instead of restarting
+Restart=on-failure
+RestartSec=60
+StandardOutput=append:%h/.dori/vpn-keep.log
+StandardError=append:%h/.dori/vpn-keep.log
+
+[Install]
+WantedBy=default.target
