@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { captureTmux, listAoePanes, liveSessions, paneLife, QUESTION_MARK, sessionFor, target, tmuxPanePid, waitForPrompt } from "./aoe.ts";
 import { sessionFile } from "./background.ts";
 import type { Backend, DoriConfig } from "./config.ts";
-import { herdrResult, isHerdrPane } from "./herdr.ts";
+import { herdrResult, isHerdrPane, shellInFrontName } from "./herdr.ts";
 import { replacementOf } from "./frozen.ts";
 import type { Clock, Runner } from "./run.ts";
 import { procTable, topAgent } from "./session-id.ts";
@@ -114,6 +114,15 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
   return agent?.stat?.startsWith("T") ? agent.pid : undefined;
 };
 
+// An agent left a background job of its shell (running, no "+" in its ps state: another process group holds its tty) reads
+// nothing either: the shell does, and its screen keeps a stale ❯ prompt. ps on Windows has no such mark.
+const backgroundAgent = async (run: Runner, pane: string): Promise<number | undefined> => {
+  if (process.platform === "win32") return undefined;
+  const shell = await tmuxPanePid(run, pane);
+  const agent = shell ? topAgent(await procTable(run), shell) : undefined;
+  return agent?.stat && !agent.stat.startsWith("T") && !agent.stat.includes("+") ? agent.pid : undefined;
+};
+
 // An aoe session, and a herdr pane (an id with ":", herdr.ts) of a Dori that runs omo there, get the same checks: a gone,
 // dead or frozen pane is named and nothing is typed, the text waits for omo's ❯ prompt, and the session's transcript is
 // evidence of delivery. A herdr Dori whose agentCommand is no omo keeps the bare herdr keys.
@@ -121,6 +130,9 @@ export const stoppedAgent = async (run: Runner, pane: string): Promise<number | 
 // moves), and the herdr panes of a Dori whose agentCommand is omo.
 export const omoSession = (config: Pick<DoriConfig, "backend" | "agentCommand">): boolean => config.backend === "aoe" || isOmoExecutable(config.agentCommand[0] ?? "");
 export const omoPane = (config: Pick<DoriConfig, "backend" | "agentCommand">, pane: string): boolean => !isHerdrPane(pane) || omoSession(config);
+
+// upstream #69: the states herdr reports for a pane whose agent is running (its others: unknown, or none over a shell)
+const ALIVE_STATUSES: ReadonlySet<string> = new Set(["idle", "working", "blocked", "done"]);
 
 const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, text: string): PaneKeys => {
   const herdr = isHerdrPane(pane);
@@ -133,6 +145,14 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
         if (!got) return `PANE_GONE: there is no herdr pane ${pane}; nothing was typed`;
         if (!got.agent) return `PANE_DEAD: no agent runs in ${pane} (only its shell, which would run the text); nothing was typed`;
         if (got.agent_status === "blocked") return `PANE_BLOCKED: the agent in ${pane} waits on a confirmation the text would answer; nothing was typed`;
+        // upstream #69 (https://github.com/sisyphuslabs/dori-superagent/pull/69): only an agent herdr reports in a running
+        // state reads the text, and herdr keeps calling an agent suspended with Ctrl+Z idle while its shell is in front
+        if (!ALIVE_STATUSES.has(got.agent_status ?? "")) return `the agent in ${pane} is in state ${got.agent_status ?? "none"}, not idle, working, blocked or done, so it may not be reading; nothing was typed`;
+        const info = await herdrResult(run, ["pane", "process-info", "--pane", pane]);
+        if (!info) return `herdr pane process-info could not be read for ${pane}, so a shell in front cannot be ruled out; nothing was typed`;
+        const shell = shellInFrontName(info.process_info);
+        if (shell === "") return `herdr pane process-info shows nothing readable in front of ${pane}, so a shell in front cannot be ruled out; nothing was typed`;
+        if (shell !== undefined) return `the agent in ${pane} is not in front: a shell (${shell}) is, after the agent exited or was suspended with Ctrl+Z, or as its child, and it could run the text; nothing was typed`;
         return (await run(["herdr", "pane", "send-text", pane, text])).code === 0 ? undefined : "herdr send-text failed";
       },
       enter: async () => { await run(["herdr", "pane", "send-keys", pane, "enter"]); },
@@ -148,6 +168,8 @@ const paneKeys = (run: Runner, clock: Clock, config: DoriConfig, pane: string, t
       if (!life.live) return life.how === "gone" ? `PANE_GONE: there is no ${where} (it ended, or the name is wrong); nothing was typed` : `PANE_DEAD: the program in ${pane} exited (${life.status < 0 ? "no agent runs in it" : `status ${life.status}`}); nothing was typed`;
       const stopped = await stoppedAgent(run, pane);
       if (stopped) return `the agent in the pane is stopped (pid ${stopped}, frozen): nothing would read the text, so it was not typed`;
+      const behind = await backgroundAgent(run, pane);
+      if (behind) return `the agent in the pane is a background job of its shell (pid ${behind}): its shell, not omo, would read the text, so it was not typed`;
       // upstream #70: an omo question open in a herdr pane would take the text as its answer
       if (herdr && QUESTION_MARK.test(await captureTmux(run, pane))) return `PANE_BLOCKED: a question is open in ${pane} (Ask user); the text would answer it, so nothing was typed`;
       if (!(await waitForPrompt(run, clock, pane, 10, 1_000))) return "no ❯ prompt in the pane";

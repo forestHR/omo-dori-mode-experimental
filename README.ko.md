@@ -65,10 +65,10 @@ Dori는 사용자의 말투를 따라갑니다. 짧고 편하게, 소문자로 �
 | `ignorePanes`, `workspaces` | 감시에서 제외할 pane과 workspace 필터. aoe에서는 tmux 세션 이름과 프로필 이름을 쓰며, `workspaces`는 비워 둬도 됩니다 |
 | `defaultCwd` | 레인이 시작하는 디렉터리이자, 레인이 worktree를 만드는 저장소 |
 | `agentCommand` | 에이전트 실행 명령. `{model}`, `{prompt}`가 들어간 argv 목록 |
-| `hooks.threadReply`, `hooks.threadDone` | 메신저 CLI를 `{thread}`, `{text}`가 들어간 argv 목록으로. 레인 진행 상황을 올리고 완료 표시를 할 때 씁니다. |
+| `hooks.threadReply`, `hooks.threadDone` | 메신저 CLI를 `{thread}`, `{text}`가 들어간 argv 목록으로. 레인을 닫을 때 정리 글을 올리고 완료 표시를 할 때 씁니다. |
 | `discord.statusStyle` | 디스코드 상태 표시를 `"words"`(기본값) 또는 `"emoji"`로 설정 |
 | `discord.autoUnEye` | `true`(기본값)면 봇이 그 채널이나 스레드에 글을 쓸 때 `dori inbound discord`가 소유자의 앞선 메시지에서 눈 리액션을 지움. `false`면 그대로 둠 |
-| `discord.quietText`, `discord.postRawReports` | `freshness`가 소유자 스레드에 올리는 글(`{min}` = 마지막 보고 뒤 지난 분), 소유자 언어로. 레인의 보고 원문은 스레드가 아니라 리드에게 감. `postRawReports: true`(기본 `false`)면 원문을 그대로 올림. 닫기는 레인의 소유자용 정리 글(`claim-done --summary`, 없으면 모델이 씀)을 먼저 올린 뒤에만 스레드를 완료로 표시하고, 정리가 없으면 닫지 않음 |
+| `dori close` 정리 글 | `freshness`는 소유자 스레드에 스스로 아무것도 올리지 않음. 닫기는 레인의 소유자용 정리 글(`claim-done --summary`, 없으면 모델이 씀)을 먼저 올린 뒤에만 스레드를 완료로 표시하고, 정리가 없으면 닫지 않음 |
 
 나머지(시간, 임계값, heavy 슬롯 수)는 기본값으로 충분합니다. 전체 표는 [`references/scripts.md`](skills/dori-mode/references/scripts.md)에 있습니다. `DORI_CONFIG`, `DORI_STATE_DIR`, `DORI_LEAD_PANE` 환경변수를 주면 파일 값 대신 그 값을 씁니다.
 
@@ -104,7 +104,7 @@ footer는 레인이 `[REPORT] <key> | <milestone|blocker|question|done> | <text>
 ["tmux", "send-keys", "-t", "=aoe_Dori_0a1b2c3d:", "Enter"]
 ```
 
-`dori freshness`는 리드 화면에서 먼저 보고를 읽고, 없으면 레인 화면을 봅니다. 새 보고는 무응답 시간을 초기화합니다. 기본값으로 15분 뒤 알림을 보내고 20분 뒤 `hooks.threadReply`로 소유자 말투의 짧은 상태 한 줄(`discord.quietText`)을 올리며, 무응답 구간마다 한 번씩 실행합니다. 레인의 보고 원문은 리드 화면으로 보내 리드가 사람 말로 정리하게 하고, `discord.postRawReports: true`면 예전처럼 원문을 올립니다. 레인 상한과 멈춘 듯한 호출도 봅니다(`supervision`, 상한은 기본값 꺼짐). 상한에 닿거나 호출이 멈춘 듯하면 리드에게 한 번 알리고, 레인을 멈추거나 레인에 입력하지는 않습니다. `close`는 레인의 `COST`를 출력합니다.
+`dori freshness`는 리드 화면에서 먼저 보고를 읽고, 없으면 레인 화면을 봅니다. 새 보고는 무응답 시간을 초기화합니다. 기본값으로 15분 뒤 알림을 보내고 20분 뒤 레인의 마지막 보고를 리드 화면으로 보내며(무응답 구간마다 한 번), 스레드에는 아무것도 올리지 않았다고 알립니다. 소유자가 알아야 하면 리드가 쉬운 말 한 줄로 씁니다. 소유자 스레드에는 스스로 아무것도 올리지 않습니다. 레인 상한과 멈춘 듯한 호출도 봅니다(`supervision`, 상한은 기본값 꺼짐). 상한에 닿거나 호출이 멈춘 듯하면 리드에게 한 번 알리고, 레인을 멈추거나 레인에 입력하지는 않습니다. `close`는 레인의 `COST`를 출력합니다.
 
 aoe에서 `dori watch`는 working 또는 not-done 레인이 사람을 기다리며 멈추면 `LANE_BLOCKED <key> <waiting|error|question|idle> <pane>`을 출력합니다. `aoe ps --json`과 화면을 함께 확인하며, 턴이 실행 중이면 출력하지 않습니다. idle은 45초간 지속돼야 하고, 모니터나 wake source, 진행 중이거나 예약된 goal을 기다리는 경우는 idle이 아닙니다. 세션이 직접 띄운 분리된 eval 셀, 백그라운드 bash 세션, 백그라운드 task를 기다리는 경우도 idle이 아니며, 감시 로그에 조용한 `BG_WAITING` 줄만 남고 `blockedWaitMin`(기본 60분)이 지나면 `LANE_BLOCKED`가 됩니다. 닫을 때는 aoe 세션을 멈추고 휴지통으로 옮기며 영구 삭제하지 않습니다.
 
@@ -170,7 +170,7 @@ watcher는 레인을 닫을 때 셸 없이 이 확인을 직접 다시 돌리고
 | `dori claim-done` / `object-done` / `close` | 완료 흐름; 쓸 수 있는 스레드가 없으면 스레드 훅을 조용히 건너뛰지 않고 `THREAD_MISSING <key>`를 출력; `DORI_DISCORD_TOKEN`이 있으면 close가 `discord:` 작업 스레드를 완료로 표시하고 보관; 다른 열린 lane이나 열린 질문 카드가 그 스레드를 아직 쓰면 lane 결과만 올리고 스레드 상태는 그대로 |
 | `dori pause <key> <이유>` / `dori resume <key>` | 사람을 기다리는 레인을 멈춰 둠: freshness 알림·게시, `LANE_BLOCKED`, `DEAD_PANE`이 나오지 않고 완료 요청이 와도 자동으로 닫지 않음; aoe에서는 레인 세션의 omo goal도 멈추고 다시 읽어 확인함(`/goal pause`, 확인 안 되면 `PAUSE_UNVERIFIED`, exit 3); `resume`은 멈추기 전 상태와 멈췄던 goal을 되돌림 |
 | `dori watch` | 자동 닫기 watcher와 aoe `LANE_BLOCKED` 이벤트. 지속 모니터로 돌립니다 |
-| `dori freshness [--loop MIN]` | 조용해진 레인을 깨우고, 스레드에 짧은 상태 한 줄을 올리고 마지막 보고는 리드에게 넘김 |
+| `dori freshness [--loop MIN]` | 조용해진 레인을 깨우고, 마지막 보고를 리드에게 넘김(스레드에는 아무것도 올리지 않음) |
 | `dori dead-panes [--loop MIN]` | 멈춘 에이전트 pane 보고 |
 | `dori guard [--loop MIN]` | 부하, 메모리, 디스크, pane 수 경고 |
 | `dori fix-attempt <key> --metric M --hypothesis H` | 레인에 시킨 수정 한 번을 셈; 레인은 그런 보고에 `(fix: M / H)`를 붙이고, 같은 지표·같은 가설로 세 번째가 되면 `SAME_FIX_3`이 근본 원인 조사로 바꾸라고 알림; 기록하기 전에 그 지표에 이미 시도한 가설 목록(`PRIOR_FIX`)을 먼저 출력 |

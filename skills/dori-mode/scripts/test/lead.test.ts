@@ -227,6 +227,49 @@ test("self-restart starts the account's own tmux unit before aoe when that unit 
   });
 });
 
+// 2026-11-04: the herdr branch started only dori-herdr.service (ZzangDori's name), so `--start` on SooDori, OkDori and
+// the other accounts, whose server unit is <user>-herdr.service, left the herdr server down after a reboot
+test("self-restart starts the account's herdr unit: DORI_HERDR_UNIT, else dori-herdr.service, else the one *-herdr.service; several or none start nothing and are logged", async () => {
+  const run = async (name: string, units: string, env: Record<string, string> = {}) => {
+    const home = join(state.dir, name);
+    const bin = join(home, ".bun/bin");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(home, ".dori"));
+    const log = join(home, "commands");
+    writeFileSync(log, "");
+    executable(join(bin, "systemctl"), `printf '%s\\n' "systemctl $*" >> "${log}"\ncase "$2" in\n  cat) for u in ${units}; do [ "$u" = "$3" ] && exit 0; done; exit 1 ;;\n  list-unit-files) for a; do p=$a; done; for u in ${units}; do case "$u" in $p) printf '%s enabled enabled\\n' "$u" ;; esac; done ;;\nesac`);
+    executable(join(bin, "herdr"), "exit 0");
+    executable(join(bin, "dori"), `printf '%s\\n' "dori $*" >> "${log}"`);
+    executable(join(bin, "sleep"), "exit 0");
+    const p = Bun.spawn(["bash", join(import.meta.dir, "../../setups/discord-aoe/self-restart.sh"), "--start", "sess-1", "w1:p1", ""], {
+      env: { ...process.env, HOME: home, DORI_ENV_FILE: join(home, "missing.env"), DORI_HERDR_UNIT: "", ...env }, stdout: "pipe", stderr: "pipe",
+    });
+    const code = await p.exited;
+    const lines = (f: string) => (existsSync(f) ? readFileSync(f, "utf8").split("\n") : []);
+    return {
+      code,
+      started: lines(log).filter((l) => l.startsWith("systemctl --user start ")).map((l) => l.slice("systemctl --user start ".length)),
+      logged: lines(join(home, ".dori/self-restart.log")).filter((l) => l.includes("HERDR_UNIT")).map((l) => l.replace(/^\S+ /, "")),
+      revived: lines(log).includes("dori revive w1:p1 --text "),
+    };
+  };
+  expect({
+    env: await run("env", "qa-env-herdr.service dori-herdr.service", { DORI_HERDR_UNIT: "qa-env-herdr.service" }),
+    envMissing: await run("env-missing", "dori-herdr.service", { DORI_HERDR_UNIT: "qa-missing.service" }),
+    dori: await run("dori", "dori-herdr.service soodori-herdr.service"),
+    own: await run("own", "herdr-web@.service herdr-web-yoodori.service okdori-herdr.service"),
+    several: await run("several", "okdori-herdr.service moodori-herdr.service"),
+    none: await run("none", "herdr-web@.service"),
+  }).toEqual({
+    env: { code: 0, started: ["qa-env-herdr.service"], logged: [], revived: true },
+    envMissing: { code: 0, started: [], logged: ["HERDR_UNIT_MISSING qa-missing.service (DORI_HERDR_UNIT)"], revived: true },
+    dori: { code: 0, started: ["dori-herdr.service"], logged: [], revived: true },
+    own: { code: 0, started: ["okdori-herdr.service"], logged: [], revived: true },
+    several: { code: 0, started: [], logged: ["HERDR_UNIT_AMBIGUOUS okdori-herdr.service moodori-herdr.service: set DORI_HERDR_UNIT"], revived: true },
+    none: { code: 0, started: [], logged: ["HERDR_UNIT_NONE no dori-herdr.service or *-herdr.service"], revived: true },
+  });
+});
+
 // omo runs memory reflection with #!/usr/bin/env node, and the pinned PATH has no nvm (it is set up in ~/.bashrc only)
 test("self-restart puts nvm's default node on the session's PATH through the alias chain, else the newest version whose node runs", async () => {
   const bin = join(state.dir, ".bun/bin");

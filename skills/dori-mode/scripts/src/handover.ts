@@ -23,9 +23,10 @@ import { type Lane, statusOf } from "./registry.ts";
 import { iso } from "./run.ts";
 import { descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, ROUND_TRIES, section, seedRestatement, wholeBullet, words } from "./restatement.ts";
-import { appendRollover, approvalProblem, autoReason, type Candidate, clearQuiet, COMMITTED, decidedBy, inboxMessages, LEAD_PREFIX, lastProposal, limitsFor, ownerQuotes, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Signals, sessionSignals, setQuiet, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
+import { appendRollover, approvalProblem, autoReason, type Candidate, clearQuiet, COMMITTED, decidedBy, filledApproval, inboxMessages, measuredSignal, LEAD_PREFIX, lastProposal, limitsFor, ownerQuotes, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type Signals, sessionSignals, setQuiet, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { turnRunning } from "./submit.ts";
 import { watchLog } from "./watch-log.ts";
+import { Worklog, worklogLines } from "./worklog.ts";
 
 export type HandoverDeps = FlowDeps & Pick<FreezeDeps, "procs"> & {
   readonly signal: (pid: number, sig: Sig | "SIGTERM" | "SIGKILL") => boolean;
@@ -98,6 +99,8 @@ export type HandoverFacts = {
   readonly watchers: readonly HandoverWatcher[];
   readonly cards: readonly Question[];
   readonly todos: readonly string[];
+  // the lead's open owner requests from dori worklog (upstream dori-superagent#96), one OPEN line each with its Next line
+  readonly worklog?: WorklogFacts;
   readonly goal?: string;
   readonly timers: readonly string[];
   readonly leadNote: string;
@@ -111,6 +114,21 @@ export type HandoverFacts = {
 
 // the newest quotes the note carries
 const QUOTES_MAX = 60;
+
+export type WorklogFacts = { readonly markdown: string; readonly open: number; readonly lines: readonly string[] };
+
+// Upstream https://github.com/sisyphuslabs/dori-superagent/pull/96 lists these in dori boot, which this fork does not have:
+// here the new lead reads them in its handover note. A damaged or unreadable record is named, never a refusal.
+export const worklogFacts = (stateDir: string): WorklogFacts => {
+  const log = new Worklog(stateDir);
+  try {
+    const read = log.read();
+    const [, ...open] = worklogLines(read.items);
+    return { markdown: log.markdownPath, open: open.length, lines: [...open, ...read.problems.map((p) => `WORKLOG damaged ${p}`), ...read.warnings.map((w) => `WORKLOG warning ${w}`)] };
+  } catch (error) {
+    return { markdown: log.markdownPath, open: 0, lines: [`WORKLOG unreadable ${log.path}: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+};
 
 export type OwnerWord = { readonly at: string; readonly where: string; readonly text: string };
 
@@ -491,9 +509,9 @@ export const renderNote = (f: HandoverFacts, at: string): string => [
   "## Do this first",
   "1. Arm every monitor under Monitors again as a persistent monitor, with the same command and filter; one marked LAUNCHES_WORK gets the watch-only monitor its line describes instead, never its own command. Take each command, filter and description from its line under Monitors, where they are JSON strings: put them into the tool call as they are (a JSON string is a valid JS string), not retyped and not from the conversation summary, where a copy can differ. Arm each one once. Start each watcher under Watchers that says how. The handover checks that the monitors run in this session and runs each watcher's check.",
   `2. A line with ${PROBE} <id>, typed into this session or arriving as an inbox event, is a check of this handover: run the dori handover ack command the line gives (with its --state) and nothing else.`,
-  `3. A [LEAD] ${UNDERSTAND} <id> line asks what you understood. Read this whole note first, then write it to the file the line names, under the headings ${LEAD_UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}: under Goal the old session's goal quoted; under Owner's words each of the owner's recent messages and each quote in the old lead's notes, quoted exactly; under Open lanes every lane key of the table with what it waits on; under Open work each todo; under Open cards each card id with its question; under Timers each timer's unit name; under Promised follow-ups what the old lead promised the owner; under Questions only what neither this note nor the old log answers, or none. The handover already wrote into that file, word for word, what its records and the old lead's notes hold under those headings: keep those lines as they are (do not translate, shorten or merge them), add what you understood below them, and write ## ${LEAD_OWN.join(" and ## ")} yourself. Then run the ack command the line gives. A [LEAD] HANDOVER_SUPPLEMENT <id> line names a file with what your restatement left out and the old log lines behind it: add those items to the same file, keep the rest, and run the ack command it gives.`,
+  `3. A [LEAD] HANDOVER_SUPPLEMENT <id> line comes from the audit after the commit: it names a file with what you were missing and the old log lines behind it; write those items into the file it names (create it if it is not there), keep them in mind as the note's, and run the ack command it gives. No restatement is asked before the commit.`,
   `4. Until a [LEAD] ${COMMITTED} line arrives answer no one, act on no event and change nothing besides that file: the handover can still roll back. The old session stays quiet meanwhile and is closed once the checks pass.`,
-  `5. After ${COMMITTED}, carry on: open lanes, owner questions, todos, timers, promised follow-ups and the old lead's notes; answer the owner where his last messages left off. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you or a lane find later that an old session knew something its handover did not carry and it cost something (asking again, redoing, guessing), run dori handover gap <lane key or lead> --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>".`,
+  `5. After ${COMMITTED}, carry on: open lanes, owner questions, todos, open worklog items (each from its Next line, and keep it with dori worklog next|note|close), timers, promised follow-ups and the old lead's notes; answer the owner where his last messages left off. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you or a lane find later that an old session knew something its handover did not carry and it cost something (asking again, redoing, guessing), run dori handover gap <lane key or lead> --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>".`,
   "",
   `## Monitors (${f.monitors.length})`,
   ...(f.monitors.length ? f.monitors.map(monitorLine) : ["none"]),
@@ -511,6 +529,7 @@ export const renderNote = (f: HandoverFacts, at: string): string => [
   "",
   "## Todos left in the old session",
   ...(f.todos.length ? f.todos.map((t) => `- ${t}`) : ["none"]),
+  ...(f.worklog ? ["", `## Open worklog items (${f.worklog.open}, dori worklog list --open; ${f.worklog.markdown})`, ...(f.worklog.lines.length ? f.worklog.lines.map((l) => `- ${l}`) : ["none"])] : []),
   ...(f.goal ? ["", "## Goal of the old session", f.goal] : []),
   "",
   "## Timers and reminders",
@@ -658,32 +677,13 @@ const verify = async (deps: HandoverDeps, facts: HandoverFacts, to: Target, veri
     await deps.clock.sleep(POLL_MS);
   }
   if (problems.length) return { reasons: problems, session };
-  // the new lead says what it understood before the old one is gone: a gap is filled in from the records and the old
-  // log for supplementRounds rounds, and only a gap that outlasts them rolls the move back
-  // what the handover holds goes into the restatement before the new lead writes, word for word, so it starts there
-  // instead of coming back in supplement rounds
-  if (!existsSync(understood)) writeFileSync(understood, seedRestatement("lead: what the new session understood", LEAD_UNDERSTOOD_HEADINGS, LEAD_OWN, (t) => missingLeadFrom(t, facts)));
-  const id = deps.nonce();
-  if (!(await sendVerified(deps.run, deps.clock, deps.config, to.pane, `[LEAD] ${UNDERSTAND} ${id}: write what you understood to ${understood} (${LEAD_UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds what the handover carried word for word: keep it, add yours) as step 3 of the handover note says, then run ${ack(id)} and nothing else for this line.`)))
-    return { reasons: [`the restatement request did not reach ${to.pane}`], session };
-  emit(`${UNDERSTAND}_SENT ${id} -> ${to.pane}`);
-  let by: string | undefined;
-  for (let j = 0; j < Math.max(tries - i, ROUND_TRIES) && by === undefined; j++) {
-    await deps.clock.sleep(POLL_MS);
-    by = ackedBy(deps.config.stateDir, id);
-  }
-  if (by === undefined) return { reasons: [`no ack for the restatement request ${id}`], session };
-  if (by !== to.pane) return { reasons: [`the restatement request was acked from ${by || "an unknown pane"}, not ${to.pane}`], session };
-  const gaps = await fillGaps({ clock: deps.clock, stateDir: deps.config.stateDir, nonce: deps.nonce, tell: (pane, text) => sendVerified(deps.run, deps.clock, deps.config, pane, text).catch(() => false), ackedBy: (x) => ackedBy(deps.config.stateDir, x) },
-    { who: "lead", pane: to.pane, understood, headings: LEAD_UNDERSTOOD_HEADINGS, rounds: deps.config.handover.supplementRounds, oldLog: facts.oldLog, check: (text) => missingLeadFrom(text, facts), emit });
-  if (gaps.reasons.length) return { reasons: gaps.reasons, session, supplements: gaps.supplements };
+  // No restatement before the commit (owner Q476, 2026-11-03): the probes' acks show the new lead reads its pane and its
+  // inbox and runs dori; the note carries the owner's words word for word, and the audit after the commit checks the rest.
   // checked again before the old lead goes: a monitor that ran at the first check can end before the move commits (a
   // remote tail whose ssh dropped), and a new session is not told when a monitor ends
   const stopped = facts.monitors.length ? missingMonitors(facts.monitors, readManifest(manifestPath(deps.config.sessionsDir, facts.cwd, session)), deps.alive, deps.home, deps.clock.now()) : [];
-  if (stopped.length) return { reasons: [`monitors stopped in ${to.pane} after the first check: ${stopped.join(", ")}`], session, supplements: gaps.supplements };
-  const asks = section(gaps.text, "Questions");
-  if (asks && !/^none\.?$/i.test(asks)) emit(`HANDOVER_QUESTIONS lead: ${asks.replace(/\s+/g, " ").slice(0, 400)} (the old log is ${facts.oldLog ?? "not found"})`);
-  return { reasons: [], session, supplements: gaps.supplements };
+  if (stopped.length) return { reasons: [`monitors stopped in ${to.pane} after the first check: ${stopped.join(", ")}`], session };
+  return { reasons: [], session };
 };
 
 export type HandoverResult = { readonly code: number; readonly note?: string; readonly to?: string };
@@ -771,6 +771,20 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
   if (opts.note && !existsSync(opts.note)) return refuse(`note file not found: ${opts.note}`);
   const lacking = opts.note ? missingHeadings(readFileSync(opts.note, "utf8"), LEAD_SUMMARY_HEADINGS) : [];
   if (lacking.length) return refuse(`the old lead's summary ${opts.note} lacks ${lacking.map((h) => `## ${h}`).join(", ")} (dori handover --template prints the headings)`);
+  // the signal of the lead's approval is the one measured for this lead session: the threshold freshness saw crossed in
+  // its pane (lead-due.json) or the last rollover proposal for it (owner Q475)
+  const due = (() => {
+    try {
+      return JSON.parse(readFileSync(join(config.stateDir, "handover", "lead-due.json"), "utf8")) as { pane: string; crossed: string[] };
+    } catch {
+      return undefined;
+    }
+  })();
+  const filled = filledApproval(opts.approvedBy, measuredSignal({ pane: config.leadPane, ...(due?.pane && Array.isArray(due.crossed) ? { due } : {}), proposal: lastProposal(readRollovers(config.stateDir), "lead") }));
+  if (filled) {
+    emit(`HANDOVER_APPROVAL_FILLED lead: ${JSON.stringify(filled)} (the signal read from the records)`);
+    opts = { ...opts, approvedBy: filled };
+  }
   // a dry run needs no approval, but a given one is checked the same way, so it can be tried before the real run
   const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLead, key: "handover.autoRolloverLead", granted }, "lead", config.leadPane, readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox, deps.ownerIds ?? []));
   if (unapproved) return refuse(`the lead moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
@@ -800,6 +814,7 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
     watchers: config.handover.watchers,
     cards: new QuestionStore(deps.cardDir).all().filter((q) => q.status === "open"),
     todos: session ? openTodos(sessionDir, session) : [],
+    worklog: worklogFacts(config.stateDir),
     goal: session ? openGoal(sessionDir, session) : undefined,
     timers: await deps.timers().catch(() => []),
     leadNote: opts.note ? readFileSync(opts.note, "utf8") : "",
@@ -818,7 +833,7 @@ export const handover = async (deps: HandoverDeps, opts: HandoverOptions = {}): 
   const note = join(dir, `${stamp}.md`);
   writeFileSync(note, renderNote(facts, at));
   writeFileSync(join(dir, `${stamp}.json`), JSON.stringify(facts, null, 1));
-  emit(`HANDOVER_NOTE ${note}: ${facts.lanes.length} lanes, ${facts.monitors.length} monitors, ${facts.watchers.length} watchers, ${facts.cards.length} open questions, ${facts.todos.length} todos, ${facts.timers.length} timers, ${facts.ownerWords.length} owner messages, ${facts.quotes?.length ?? 0} quotes from the old conversation, old log ${facts.oldLog ? "yes" : "no"}${opts.note ? "" : "; HANDOVER_NO_LEAD_NOTE (pass --note FILE with your summary, dori handover --template)"}`);
+  emit(`HANDOVER_NOTE ${note}: ${facts.lanes.length} lanes, ${facts.monitors.length} monitors, ${facts.watchers.length} watchers, ${facts.cards.length} open questions, ${facts.todos.length} todos, ${facts.worklog?.open ?? 0} open worklog items, ${facts.timers.length} timers, ${facts.ownerWords.length} owner messages, ${facts.quotes?.length ?? 0} quotes from the old conversation, old log ${facts.oldLog ? "yes" : "no"}${opts.note ? "" : "; HANDOVER_NO_LEAD_NOTE (pass --note FILE with your summary, dori handover --template)"}`);
   const units = config.handover.services.length ? config.handover.services : config.update.services.map((s) => s.unit);
   const model = opts.model || config.handover.model || config.defaultModel;
   const title = opts.title || config.handover.title || `${old.title.replace(/-\d{8}$/, "")}-${stamp.slice(4, 8)}${stamp.slice(9, 13)}`;

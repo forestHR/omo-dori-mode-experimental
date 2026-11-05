@@ -166,17 +166,18 @@ export const postLaneStart = async (dc: Discord, ref: string, text: string): Pro
 
 // Posts in a work thread (typing first, emoji removed) and leaves its status mark alone: a lane closing in a thread
 // that another open lane or an open card still uses. With files the text may be empty.
-export const postInThread = async (dc: Discord, ref: string, text: string, files: readonly DiscordFile[] = []): Promise<string> => {
+// the new message's id and the content Discord answered it holds
+export const postInThread = async (dc: Discord, ref: string, text: string, files: readonly DiscordFile[] = []): Promise<{ id: string; content?: string }> => {
   const id = discordThreadId(ref);
   const plain = withoutEmoji(text);
   if (!plain && !files.length) throw new ThreadRefError("nothing to post after removing emoji");
   await dc.typing(id).catch(() => {});
-  return dc.send(id, plain, false, undefined, undefined, files);
+  return dc.post(id, plain, false, undefined, undefined, files);
 };
 
 // With `mark` (the thread status queue) the status goes through it, so it is coalesced, survives a 429 and an open
 // question card keeps the thread waiting; without it the status is set directly.
-export const threadHook = async (dc: Discord, verb: ThreadVerb, ref: string, text: string, words: DiscordWords, mark?: (thread: string, status: ThreadStatus) => Promise<unknown>, files: readonly DiscordFile[] = []): Promise<string> => {
+export const threadHook = async (dc: Discord, verb: ThreadVerb, ref: string, text: string, words: DiscordWords, mark?: (thread: string, status: ThreadStatus) => Promise<unknown>, files: readonly DiscordFile[] = []): Promise<{ id: string; content?: string }> => {
   const id = discordThreadId(ref);
   const posted = await postInThread(dc, ref, text, files);
   await (mark ? mark(id, VERB_STATUS[verb]) : setThreadStatus(dc, id, VERB_STATUS[verb], words));

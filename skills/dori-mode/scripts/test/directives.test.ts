@@ -6,7 +6,7 @@ import { laneGapSplit, applyDirectives, auditOrReport, auditStampPath, checkMean
 import { loadConfig } from "../src/config.ts";
 import { freshnessTick } from "../src/freshness.ts";
 import { run as realRun } from "../src/run.ts";
-import { APPLIED_HEADING, appliesUnder, appliesWhy, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, ledgerProblems, loadLedger, messageLines, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
+import { APPLIED_HEADING, appliesUnder, appliesWhy, briefGaps, checkedLedger, COMMON_LEDGER, DirectiveError, directiveLine, directiveText, hasDirective, ledgerProblems, loadLedger, messageLines, planDirectives, requireMissing, retiredError, scopeContext, textDirectives, trimProblem } from "../src/directives.ts";
 import type { Runner } from "../src/run.ts";
 import { DirectiveMissingError, eightSteps, launchLane, renderBrief, uiSteps } from "../src/launch.ts";
 import { depsFor, fakeClock, fakeRunner, newWorld, sent, withState, type World } from "./fakes.ts";
@@ -206,7 +206,7 @@ test("directive-audit: gaps of the day go to the watch log and one summary to th
   await deps.registry.write({ ...clean, key: "old", thread: "none", brief: "/nope.md", openedAt: "2026-10-14T00:00:00.000Z" });
   const inbox = await write("inbox.jsonl", "");
   const quiet = await runDirectiveAudit(deps, { since: "2026-10-15T06:00:00.000Z", inbox, owner: "7" });
-  expect(quiet.lines).toEqual(["DIRECTIVE_AUDIT_OK since 2026-10-15T06:00:00.000Z: 1 lanes and the owner's messages read against 39 directives, no gap"]);
+  expect(quiet.lines).toEqual(["DIRECTIVE_AUDIT_OK since 2026-10-15T06:00:00.000Z: 1 lanes and the owner's messages read against 41 directives, no gap"]);
   expect(await Bun.file(deps.config.watchLog).exists()).toBe(false);
   expect(sent(world)).toEqual([]);
   // a lane whose brief lacks a directive and has no thread, and a standing directive of the owner nobody put in the ledger
@@ -234,6 +234,27 @@ test("directive-audit: gaps of the day go to the watch log and one summary to th
   await deps.registry.write({ ...clean, key: "gappy", thread: "none", openedAt: afterLedger, noThread: "an internal check", brief: await write("gappy.md", fields) });
   const threadGaps = (await runDirectiveAudit(deps, { since: "2026-10-15T06:00:00.000Z", inbox, owner: "7", dryRun: true })).gaps.filter((g) => g.lane === "gappy" && (g.id === "lane-thread" || g.id === "long-work-thread"));
   expect(threadGaps).toEqual([]);
+});
+
+test("directive-audit: a local entry enters the ledger no earlier than the earliest owner message its source links, so a lane opened that morning is not its gap; a fork entry keeps its date and commits", async () => {
+  const flake = (at: string) => String((BigInt(Date.parse(at)) - 1420070400000n) << 22n);
+  // guild and channel are older than the day; the owner spoke at 16:30 and again at 18:00 KST on 2026-10-16
+  const link = (at: string) => `https://discord.com/channels/${flake("2025-01-01T00:00:00Z")}/${flake("2026-10-01T00:00:00Z")}/${flake(at)}`;
+  const said = `${link("2026-10-16T09:00:00Z")} ${link("2026-10-16T07:30:00Z")}`;
+  const withLinks = { ...local, entries: local.entries.map((e) => (e.id === "options-ledger" || e.id === "docs-same-pr" ? { ...e, source: said } : e)) };
+  const deps = await ledgerDeps({ directives: { common: COMMON_LEDGER, local: await write("links.json", JSON.stringify(withLinks)) } });
+  const inbox = await write("inbox.jsonl", "");
+  const lane = { title: "g", thread: "discord:42", done: "x", cwd: "/work/hr35-isaac" };
+  // 09:30 KST, before he said it; 17:00 KST, after his first message and before the second
+  await deps.registry.write({ ...lane, key: "morning", brief: await write("morning.md", fields), openedAt: "2026-10-16T00:30:00.000Z" });
+  await deps.registry.write({ ...lane, key: "after", brief: await write("after.md", fields), openedAt: "2026-10-16T08:00:00.000Z" });
+  const r = await runDirectiveAudit(deps, { since: "2026-10-15T15:00:00.000Z", inbox, owner: "7", dryRun: true });
+  const ids = r.gaps.map((g) => `${g.lane} ${g.id}`);
+  expect(ids).not.toContain("morning options-ledger");
+  expect(r.lines.some((l) => l.startsWith("DIRECTIVE_LATE morning options-ledger:") && l.includes("2026-10-16T07:30:00.000Z"))).toBe(true);
+  expect(ids).toContain("after options-ledger");
+  // docs-same-pr is a fork entry: the local line's links do not move it
+  expect(ids).toEqual(expect.arrayContaining(["morning docs-same-pr", "after docs-same-pr"]));
 });
 
 test("directive-audit: a directive that entered the ledger after the lane opened, or that the lead relayed to the lane in a [LEAD] line, is not its gap; one it never got still is", async () => {
@@ -621,6 +642,23 @@ test("a briefOnly entry reaches a brief only when its scope hits, and the lead's
   expect(thread.find(({ e }) => e.id === "pair-route")?.why).toBe("all lanes");
 });
 
+// the owner's "없는 건 없애" has no clause boundary to trim at: his entry stays on record for the lead and never goes
+// into a brief as text (the lead writes the limit in; launch/audit enforcement is a follow-up)
+test("upstream-released-only is a lead record: no brief gets its text from the ledger", async () => {
+  const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
+  const task = "원본 main 커밋 이식: 원본 PR #37을 우리 쪽에 들이는 이식 레인. upstream 링크를 주석으로 단다.";
+  for (const pick of [undefined, { model: "m", picked: [{ id: "upstream-released-only", why: "x" }] }]) {
+    const plan = planDirectives(task, ledger, scopeContext(task, ledger, { repo: "r" }), {}, pick);
+    expect([...plan.add.map(({ e }) => e.id), ...plan.missing.map(({ e }) => e.id)]).not.toContain("upstream-released-only");
+  }
+  expect(textDirectives("원본 main에 들어간 것만 이식", ledger).map(({ e }) => e.id)).toContain("upstream-released-only");
+  // what the lead reads (inbox hints, dori thread open) never says to remove without the limit
+  const hint = messageLines("원본 main에 들어간 것만 이식", ledger).find((l) => l.includes("upstream-released-only"))!;
+  const thread = textDirectives("원본 코드 적용", ledger, { all: true }).filter(({ e }) => e.id === "upstream-released-only").map(({ e }) => directiveLine(e));
+  expect(thread).toHaveLength(1);
+  for (const line of [hint, ...thread]) expect(line).not.toMatch(/없애|없앤/);
+});
+
 test("no scope narrowed for briefs hits the eight-step template by itself: it would be every lane again", async () => {
   const ledger = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } });
   const narrowed = ledger.entries.filter((e) => e.scope.briefOnly);
@@ -783,4 +821,20 @@ test("scope replay 2026-11-02: a lane that runs node (Node.js) or edits a gate's
   // jev-shadow, jev-howto: a local model on the GPU, which only node made GPU work before
   expect(Object.keys(scopeContext("[목표] 로컬 JEV-9B로 형 글을 판단한다. GPU 메모리를 재고 GPU 한 장에서 JEV-9B를 돌린다.", ledger, { repo: "x" }).kinds)).toContain("gpu");
   expect(Object.keys(scopeContext("노드에서 GPU 학습을 돌리고 노드 두 대를 쓴다.", ledger, { repo: "x" }).kinds)).toContain("gpu");
+});
+
+test("an owner entry amended by a later message moves its date: a brief holding the old tag and prompt lacks it, so apply sends the new one", () => {
+  const before = { id: "split", name: "n", by: "owner" as const, basis: "b", words: "공돌이 만들고", prompt: "영상은 공돌이 맡는다.", date: "2026-11-04", source: "s", scope: { keywords: ["영상"] }, mode: "inject" as const, layer: "common" as const };
+  const after = { ...before, words: "공돌이 만들고 / 회사 자료는 무돌", prompt: "연구 영상은 공돌이, 회사 자료는 무돌이 맡는다.", date: "2026-11-05" };
+  const old = `${fields}\n## 형 지침\n\n${directiveText(before)}\n`;
+  expect(hasDirective(old, before)).toBe(true);
+  expect(hasDirective(old, after)).toBe(false);
+  expect(hasDirective(`${fields}\n${directiveText(after)}\n`, after)).toBe(true);
+});
+
+test("video-split amended at 00:13 KST (owner 2026-11-05): a brief launched with the 2026-11-04 split lacks the amended one", () => {
+  const e = loadLedger({ directives: { common: COMMON_LEDGER, local: "" } }).entries.find((x) => x.id === "video-split")!;
+  const old = `${fields}\n[형 지침 video-split, 2026-11-04]\n영상 만드는 일은 공돌이 맡는다. 영상 도구 rv는 짱돌이 맡다가 수돌에게 넘긴다.\n`;
+  expect(hasDirective(old, e)).toBe(false);
+  expect(hasDirective(`${fields}\n${directiveText(e)}\n`, e)).toBe(true);
 });

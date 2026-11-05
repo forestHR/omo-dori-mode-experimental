@@ -1,5 +1,6 @@
 import { cpus, loadavg } from "node:os";
 
+import { parseMeminfo } from "./heavy-mem.ts";
 import type { Runner } from "./run.ts";
 
 // Percent used of each resource. gpu and gpuMem are null when the host has no GPU nvidia-smi can read; gpuMem is also null
@@ -92,9 +93,9 @@ export const sampleUsage = async (run: Runner, jobPids: readonly number[]): Prom
   ]);
   const gpu = q.code === 0 ? parseGpuQuery(q.out) : null;
   const unified = gpu !== null && gpu.memTotalMib === null;
-  const kb = (name: string) => Number(new RegExp(`^${name}:\\s+(\\d+)`, "m").exec(meminfo.out)?.[1]);
-  const memTotalKb = meminfo.code === 0 && kb("MemTotal") > 0 ? kb("MemTotal") : 0;
-  const mem = memTotalKb ? 100 * (1 - kb("MemAvailable") / memTotalKb) : await macMemUsed(run);
+  const info = meminfo.code === 0 ? parseMeminfo(meminfo.out) : undefined;
+  const memTotalKb = info?.totalKb ?? 0;
+  const mem = info ? 100 * (1 - info.availKb / info.totalKb) : await macMemUsed(run);
   const ncpu = Math.max(1, cpus().length);
   const host: Usage = {
     gpu: gpu ? gpu.util : null,

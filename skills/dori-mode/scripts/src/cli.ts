@@ -8,12 +8,14 @@ import { fileURLToPath } from "node:url";
 
 import { currentTmuxSession, paneActivity, paneLife } from "./aoe.ts";
 import { isHerdrPane } from "./herdr.ts";
+import { jobSignal, resumeAfterThaw } from "./job-control.ts";
 import { reviveHerdr } from "./herdr-sessions.ts";
 import { fileLog, installTaskRefusal, serve, serveLoops, spawnLoop, TASK_NAME, taskArgv } from "./serve.ts";
 import { winSignal } from "./win-suspend.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { CheckpointError, Checkpoints } from "./checkpoints.ts";
 import { isLessonOutcome, LessonError, Lessons } from "./lessons.ts";
+import { Worklog, WorklogError } from "./worklog.ts";
 import { type BudgetLimits, laneLimits } from "./supervision.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
@@ -68,14 +70,15 @@ import { clearEyes, Slack, slackRowIds, slackUnreact } from "./messenger/slack.t
 import type { UploadFile } from "./messenger/slack.ts";
 import { type DiscordFile, discordMessageProblem, filesKey, readDiscordFiles, readUploads, UploadRefused } from "./messenger/upload-files.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
+import { envInt, fileTgInboundStore, telegramInboundLoop, writeLineSync } from "./messenger/telegram-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
 import { Telegram } from "./messenger/telegram.ts";
 import { Discord, discordPresence, tokenBotId } from "./messenger/discord.ts";
 import { openCardIds, QuestionCards, QuestionError, QuestionStore } from "./messenger/discord-cards.ts";
 import { DiscordListener, eyesOff } from "./messenger/discord-listener.ts";
-import { bareThreadName, discordThreadId, postInThread, postLaneStart, progressText, threadHook, threadName, ThreadRefError, type ThreadStatus, type ThreadVerb, VERB_STATUS } from "./messenger/discord-thread.ts";
-import { duplicateLine, sendKey, sendOnce } from "./send-dedupe.ts";
+import { bareThreadName, discordThreadId, postInThread, postLaneStart, progressText, threadName, ThreadRefError, type ThreadStatus, type ThreadVerb, VERB_STATUS, withoutEmoji } from "./messenger/discord-thread.ts";
+import { duplicateLine, SEND_DUPLICATE_EXIT, type Sent, sendKey, sendOnce, sentLine } from "./send-dedupe.ts";
 import { mapThread, standThread, threads, unstandThread } from "./messenger/thread-map.ts";
 import { archiveDoneThreads } from "./messenger/thread-archive.ts";
 import { ThreadStatusQueue } from "./messenger/thread-status-queue.ts";
@@ -296,6 +299,11 @@ const USAGE = `dori <command> [options]
   lesson list [--cwd DIR]              current lessons, newest first; a damaged journal line is a LESSON_WARNING
   lesson mark <id> --outcome pending|helped|no-effect|harmful|encoded
                                        only pending and helped ones reach new briefs
+  worklog add <title> --source REF     record an owner request when it arrives (upstream dori-superagent#96)
+  worklog next|note <id> <text>        set the item's next step, or add a note (a decision, an owner)
+  worklog close <id> --result TEXT     close the item with what came of it
+  worklog list [--open]                items as JSON; <stateDir>/worklog.md holds the same for reading, and the
+                                       dori handover note lists the open ones
   close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK] [--lesson TEXT [--evidence PATH]]...
                                        close now (Done signals must read back live); a lane with a work thread first posts
                                        its summary for the owner there (--summary, the claim's, else one a model writes from
@@ -314,7 +322,7 @@ const USAGE = `dori <command> [options]
                                        the day's token scorecard from session usage, the registry, the lanes log and the
                                        inbox (no model call), saved to <stateDir>/scorecard/<date>.json and latest.md;
                                        --post also sends it to scorecard.postTo or DORI_DISCORD_CHANNEL (off by default)
-  freshness [--loop MIN]               nudge silent lanes, post their last report via hooks.threadReply
+  freshness [--loop MIN]               nudge silent lanes, hand their last report to the lead
   dead-panes [--loop MIN]              print DEAD_PANE <id> for stopped agent panes
   guard [--loop MIN]                   host load, memory, disk and pane-count alerts
   heavy <label> [--mem SIZE] -- <command ...>
@@ -380,10 +388,12 @@ const USAGE = `dori <command> [options]
                                        Discord posts show typing first (best effort); --no-typing skips it
                                        --ping USER_ID (digits only) mentions and pings only that user on a new Discord post
                                        --reply ID (Discord, digits only) posts it as a reply to that message, no ping
-                                       the same new message (place, --reply, --ping, text) within 10 minutes is not sent
-                                       again: SEND_DUPLICATE <first id>, exit 0, also for two sends at once (thread
-                                       reply|wait|done too); --again sends it anyway; an option send does not take is
-                                       refused (UNKNOWN_OPTION, exit 2)
+                                       the same new message (place, --reply, --ping, text) within 10 minutes, or the
+                                       place's last post at any age, is not sent again: SEND_DUPLICATE <place> <earlier
+                                       id>, exit 3, also for two sends at once (thread reply too; wait|done still set
+                                       their status, exit 0); --again sends it anyway; a post prints what the service
+                                       holds: SENT <id> len=<n> sha=<8 hex> first="<40 chars>"; an option send does not
+                                       take is refused (UNKNOWN_OPTION, exit 2)
   type <pane> --text TEXT | --text-file FILE
                                        type text into an agent pane and confirm it was submitted: Enter, an empty input
                                        box (one more Enter if not), a running turn. Prints SUBMITTED, or NOT_SUBMITTED
@@ -392,6 +402,10 @@ const USAGE = `dori <command> [options]
   transcribe <audio-file>              run hooks.transcribe and print the text
   inbound slack [--loop MIN]           print INBOUND lines: unread thread replies (threads view), replies in threads
                                        the Dori posted in (any helper), DMs and channels with unread mentions
+  inbound telegram [--loop MIN]        print INBOUND lines: the owner's Telegram DMs and his messages in the configured
+                                       group topic (DORI_TELEGRAM_TOKEN, DORI_TELEGRAM_OWNER_ID, optional
+                                       DORI_TELEGRAM_GROUP_ID, DORI_TELEGRAM_TOPIC_ID), owner-gated getUpdates; his
+                                       edits as edit:dm / edit:topic, media with file=<kind>:<file_id>
   inbound discord                      long-running gateway listener: the owner's messages get an eyes reaction and an
                                        inbox row, voice is transcribed, question-card answers are recorded; with
                                        DORI_DISCORD_WATCH_CHANNELS + DORI_DISCORD_WATCH_BOTS a monitoring bot's problem
@@ -450,10 +464,16 @@ const USAGE = `dori <command> [options]
                                        Qn or message link, kept in the note and log: refuses while a local chain of the
                                        lane's agent or eval kernel (not the session's own launcher shell or idle kernel), a
                                        background eval cell, a running turn or an open question would die, unless the lane
-                                       ran handover ready (or --force); an automatic start (auto:) never moves a lane that
+                                       ran handover ready (or --force); a lead's or owner's request refused that way waits
+                                       (HANDOVER_PENDING): the lane is asked for its safe point and freshness starts it again
+                                       by itself; a run that finds a waiting run of the lane makes it step aside and moves
+                                       the lane itself (HANDOVER_TAKEN_OVER); an automatic start (auto:) never moves a lane that
                                        runs or watches a training or eval chain (handover.trainingTags, trainingWatch);
                                        --wait-idle MIN (freshness's automatic start): waits up to MIN minutes for a running
                                        turn to end and freezes the old agent at that idle moment, before the new session opens;
+                                       under the lane's lock an automatic run gives way to a lead's waiting request
+                                       (HANDOVER_YIELDED); --request-at AT --request-pane PANE (freshness's start again of a
+                                       waiting request): moves only while that request still waits in PANE (HANDOVER_REQUEST_GONE);
                                        writes a note (brief, owner goal, Done, the owner's messages since the last handover, todos, goal,
                                        monitors, local chains, detached jobs, last reports, model and thinking), opens a
                                        session in the same real path with --model and --thinking, points the registry and
@@ -575,7 +595,7 @@ const flags = parseArgs({
     goal: { type: "string" }, "challenge-before": { type: "string", multiple: true }, plan: { type: "string" }, kind: { type: "string" }, result: { type: "string" },
     direction: { type: "string" }, next: { type: "string" }, gpu: { type: "string", multiple: true }, "gpu-all": { type: "boolean" }, mode: { type: "string" }, minutes: { type: "string" },
     summary: { type: "string" }, file: { type: "string", multiple: true }, all: { type: "boolean" }, check: { type: "boolean" }, send: { type: "boolean" },
-    "keep-old": { type: "boolean" }, "wait-idle": { type: "string" }, "no-monitors": { type: "boolean" }, state: { type: "string" }, "text-file": { type: "string" },
+    "keep-old": { type: "boolean" }, "wait-idle": { type: "string" }, "request-at": { type: "string" }, "request-pane": { type: "string" }, "no-monitors": { type: "boolean" }, state: { type: "string" }, "text-file": { type: "string" },
     force: { type: "boolean" }, thinking: { type: "string" }, "approved-by": { type: "string" }, window: { type: "string" }, reread: { type: "boolean" },
     answer: { type: "string" }, repo: { type: "string", multiple: true }, since: { type: "string" }, until: { type: "string" }, backtest: { type: "boolean" },
     static: { type: "boolean" }, dir: { type: "string", multiple: true }, "no-thread": { type: "string" }, "why-new": { type: "string" },
@@ -586,6 +606,7 @@ const flags = parseArgs({
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
     "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
     "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
+    source: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -685,7 +706,8 @@ const reportOwner = discordToken && process.env.DORI_DISCORD_CHANNEL?.trim()
   ? { reportOwner: async (thread: string | null, text: string): Promise<string> => discordClient().send(thread ?? env("DORI_DISCORD_CHANNEL"), text) }
   : {};
 const sessionOfPane = async (pane: string, cwd: string): Promise<string> => (await resolveSession(pane, cwd, await procTable(run), { run, sessionsDir: config.sessionsDir, backend: config.backend })).id;
-const sendSignal: HandoverDeps["signal"] = (pid, sig) => {
+// a shell's foreground job is stopped with its shell and resumed before it, so the tty stays with it (job-control.ts)
+const sendSignal: HandoverDeps["signal"] = jobSignal((pid, sig) => {
   if (process.platform === "win32" && (sig === "SIGSTOP" || sig === "SIGCONT")) return winSignal(pid, sig);
   try {
     process.kill(pid, sig);
@@ -693,7 +715,7 @@ const sendSignal: HandoverDeps["signal"] = (pid, sig) => {
   } catch {
     return false;
   }
-};
+});
 const freezeDeps = { run, procs: () => procTable(run), signal: sendSignal };
 const laneDepsFor = (print: (line: string) => void = (line) => console.log(line)): LaneHandoverDeps => ({
   ...deps,
@@ -1033,7 +1055,7 @@ try {
         const line = !discordToken
           ? `DIRECTIVE_WAIVE_NOT_SENT ${r.lane.key} ${w.id}: DORI_DISCORD_TOKEN is not set, so the owner was not told`
           : await Promise.resolve()
-              .then(() => (r.lane.thread.startsWith("discord:") ? postInThread(ownDiscord(discordToken), r.lane.thread, text) : discordClient().send(env("DORI_DISCORD_CHANNEL"), text)))
+              .then((): Promise<unknown> => (r.lane.thread.startsWith("discord:") ? postInThread(ownDiscord(discordToken), r.lane.thread, text) : discordClient().send(env("DORI_DISCORD_CHANNEL"), text)))
               .then(() => `DIRECTIVE_WAIVE_SENT ${r.lane.key} ${w.id}: the owner was told`)
               .catch((e: unknown) => `DIRECTIVE_WAIVE_NOT_SENT ${r.lane.key} ${w.id}: ${e instanceof Error ? e.message : String(e)}`);
         console.log(line);
@@ -1405,13 +1427,13 @@ try {
           },
           // a lead's lane handover refused while the lane was busy, started again once the lane marked ready: a detached run
           // with the same approval and options that waits for the lane's idle moment like an automatic one
-          resume: async (k: string, approvedBy: string, request: RolloverRequest) => {
+          resume: async (k: string, approvedBy: string, request: RolloverRequest, serves: { readonly at: string; readonly pane: string }) => {
             const refused = windowsDetachRefusal();
             if (refused) return { started: false, line: `could not start: ${refused}` };
             const unit = `dori-rollover-${k}-${Date.now()}`;
             const log = join(config.stateDir, "handover", "run.log");
             mkdirSync(join(config.stateDir, "handover"), { recursive: true });
-            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...(decidedBy(approvedBy) === "auto" ? [`--setenv=${AUTO_GRANT_ENV}=${mintAutoGrant(config.stateDir, "lane", k, Date.now())}`] : []), ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "--lane", k, "--wait-idle", String(config.handover.autoWaitMin), "--approved-by", approvedBy, ...resumeArgs(request)]);
+            const r = await run(["systemd-run", "--user", "--collect", `--unit=${unit}`, "--setenv=DORI_HANDOVER_DETACHED=1", ...(decidedBy(approvedBy) === "auto" ? [`--setenv=${AUTO_GRANT_ENV}=${mintAutoGrant(config.stateDir, "lane", k, Date.now())}`] : []), ...passEnv(), `--property=StandardOutput=append:${log}`, `--property=StandardError=append:${log}`, process.execPath, import.meta.path, "handover", "--lane", k, "--wait-idle", String(config.handover.autoWaitMin), "--approved-by", approvedBy, ...resumeArgs(request), "--request-at", serves.at, "--request-pane", serves.pane]);
             return r.code === 0 ? { started: true, line: `unit=${unit} log=${log}` } : { started: false, line: `could not start: ${(r.err || r.out).trim().slice(0, 160)}` };
           },
           // the audit after a committed handover: a detached run, so its supplement round does not hold up the sweep
@@ -1787,10 +1809,19 @@ try {
       if (reply !== undefined && (platform !== "discord" || edit)) die("--reply is only supported for new Discord messages");
       if (flags.values.again && edit) die("--again is for a new message; an edit is never checked for repeats");
       const token = (name: string) => process.env[name] ?? die(`${name} is not set`);
-      // a new message goes out once per place, reply target, ping and text in SEND_DEDUPE_MS (src/send-dedupe.ts)
-      const once = async (post: () => Promise<string>) => {
-        const r = await sendOnce(join(config.stateDir, "sent"), sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, text, ...filesKey(discordFiles)]), post, { again: Boolean(flags.values.again) });
-        console.log(r.duplicate ? duplicateLine(r) : `SENT ${r.id}`);
+      // a new message goes out once per place, reply target, ping and text in SEND_DEDUPE_MS, and never when it is the
+      // place's last post (src/send-dedupe.ts); a repeat exits SEND_DUPLICATE_EXIT, a post prints what the service holds
+      const place = platform === "discord" ? `discord:${thread ?? to}` : `${platform}:${to}${thread ? `/${thread}` : ""}`;
+      const sentDir = join(config.stateDir, "sent");
+      // Discord puts a --ping in front of the text unless the text already has it, so both inputs key as the one message
+      // that goes out (review 8 of #338)
+      const keyText = platform === "discord" && ping !== undefined && !text.includes(`<@${ping}>`) ? `<@${ping}> ${text}` : text;
+      const dedupeKey = sendKey([platform, platform === "discord" ? (thread ?? to) : `${to}/${thread ?? ""}`, reply, ping, keyText, ...filesKey(discordFiles)]);
+      // an edit is never checked and does not move the place's last-post record (docs/follow-ups.md)
+      const once = async (post: () => Promise<Sent>) => {
+        const r = await sendOnce(sentDir, place, dedupeKey, post, { again: Boolean(flags.values.again) });
+        console.log(r.duplicate ? duplicateLine(place, r) : sentLine("SENT", r));
+        if (r.duplicate) process.exitCode = SEND_DUPLICATE_EXIT;
         return r;
       };
       if (platform === "slack") {
@@ -1807,7 +1838,12 @@ try {
             known = slackRowIds(files.inbox, to);
             console.log(`SENT ${(await slack.upload(to, uploads, thread, text || undefined)).join(",")}`);
             posted = { channel: to, ts: "" };
-          } else await once(async () => (posted = await slack.post(to, text, thread)).ts);
+          } else
+            await once(async () => {
+              const p = await slack.post(to, text, thread);
+              posted = p;
+              return { id: p.ts, content: p.text };
+            });
           // only the watcher's bot puts eyes on; a member's token (xoxp-) must never take a reaction off
           if (posted && process.env.DORI_SLACK_TOKEN?.startsWith("xoxb-")) {
             for (const line of await clearEyes(slackUnreact(process.env.DORI_SLACK_TOKEN, process.env.DORI_SLACK_API?.trim() || undefined), files, posted, thread, 3000, known)) console.log(line);
@@ -1817,13 +1853,17 @@ try {
         const tg = new Telegram(fetchHttp, realClock, token("DORI_TELEGRAM_TOKEN"));
         const target = { chatId: to, ...(thread ? { threadId: Number(thread) } : {}) };
         if (edit) await tg.edit(target, Number(edit), text);
-        else await once(async () => String(await tg.send(target, text)));
+        else
+          await once(async () => {
+            const m = await tg.post(target, text);
+            return { id: String(m.id), content: m.text };
+          });
       } else if (platform === "discord") {
         const dc = new Discord(fetchHttp, realClock, checkedDiscordToken(token("DORI_DISCORD_TOKEN")), discordApi());
         await ownerSpeech(body, "send", () => ownerPlace(dc, edit ? to : (thread ?? to)));
         if (edit) await dc.edit(to, edit, text);
         else {
-          const r = await once(() => dc.send(thread ?? to, text, !flags.values["no-typing"], ping, reply, discordFiles));
+          const r = await once(() => dc.post(thread ?? to, text, !flags.values["no-typing"], ping, reply, discordFiles));
           if (!r.duplicate) await notePost(thread ?? to, r.id, withFileNames(body, discordFiles));
         }
       } else die(`unknown platform ${platform}`);
@@ -1898,7 +1938,45 @@ try {
         listener.start();
         await new Promise(() => {});
       }
-      if (key !== "slack") die("inbound supports slack and discord");
+      // upstream dori-superagent #76 (https://github.com/sisyphuslabs/dori-superagent/pull/76): telegram inbound; #79
+      // (https://github.com/sisyphuslabs/dori-superagent/pull/79): edits, media file ids, envInt and its inbound loop
+      if (key === "telegram") {
+        const tg = new Telegram(fetchHttp, realClock, process.env.DORI_TELEGRAM_TOKEN ?? die("DORI_TELEGRAM_TOKEN is not set"));
+        const store = fileTgInboundStore(`${config.stateDir}/telegram-offset`);
+        // review 1 of #350: a blank id is refused rather than read as 0, and so are ids Telegram never gives; #79's envInt
+        // also refuses 1e3 and 0x10
+        const num = (name: string, positive?: string): number => {
+          const raw = process.env[name];
+          let n = 0;
+          try {
+            n = envInt(name, raw);
+          } catch (e) {
+            die(e instanceof Error ? e.message : String(e));
+          }
+          if (positive && n <= 0) die(`${name} must be a positive ${positive} id, got: ${JSON.stringify(raw)}`);
+          return n;
+        };
+        const ownerId = num("DORI_TELEGRAM_OWNER_ID", "user");
+        const groupChatId = process.env.DORI_TELEGRAM_GROUP_ID === undefined ? undefined : num("DORI_TELEGRAM_GROUP_ID");
+        const topicId = process.env.DORI_TELEGRAM_TOPIC_ID === undefined ? undefined : num("DORI_TELEGRAM_TOPIC_ID", "topic");
+        console.log(`INBOUND_READY telegram owner=${ownerId} group=${groupChatId ?? "-"} topic=${topicId ?? "-"}`);
+        // Full text, JSON-escaped on one line: getUpdates cannot fetch a message twice. writeLineSync, not console.log,
+        // which drops a failed write (a closed stdout): the whole line is out before the offset moves past its message.
+        await telegramInboundLoop(
+          tg,
+          store,
+          { ownerId, groupChatId, topicId },
+          loopMin,
+          (i) =>
+            void writeLineSync(
+              `INBOUND ${i.kind === "edit" ? "edit:" : ""}${i.source} ${i.chat} ${i.thread ?? "-"} ${i.updateId} ${i.from} ${JSON.stringify(i.text ?? "")}` +
+                `${i.media === undefined ? "" : ` file=${i.media.kind}:${i.media.fileId}`}\n`,
+            ),
+          (m) => console.log(`WARN ${m}`.slice(0, 300)),
+        );
+        break;
+      }
+      if (key !== "slack") die("inbound supports slack, discord and telegram");
       const auth = { token: process.env.DORI_SLACK_TOKEN ?? die("DORI_SLACK_TOKEN is not set"), cookie: process.env.DORI_SLACK_COOKIE };
       const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
       const slack = new Slack(fetchHttp, realClock, auth, process.env.DORI_SLACK_API?.trim() || undefined, ledger);
@@ -2091,8 +2169,10 @@ try {
       if (tooBig) die(tooBig, 2);
       const dc = discordClient();
       await ownerSpeech(body, `thread ${verb}`, () => ownerPlace(dc, discordThreadId(ref ?? "")));
-      // the same key as `dori send discord --to <thread id>`, so the two commands do not post one text twice either
-      const threadOnce = (post: () => Promise<string>) => sendOnce(join(config.stateDir, "sent"), sendKey(["discord", discordThreadId(ref ?? ""), undefined, undefined, body, ...filesKey(files)]), post, { again: Boolean(flags.values.again) });
+      // keyed on the text as it is posted (postInThread removes emoji, review 10 of #338): for a text without emoji the
+      // same key as `dori send discord --to <thread id>`, so the two commands do not post one text twice either
+      const place = `discord:${discordThreadId(ref ?? "")}`;
+      const threadOnce = (post: () => Promise<Sent>) => sendOnce(join(config.stateDir, "sent"), place, sendKey(["discord", discordThreadId(ref ?? ""), undefined, undefined, withoutEmoji(body), ...filesKey(files)]), post, { again: Boolean(flags.values.again) });
       if (verb === "done") {
         // the text is posted either way; with users left the thread keeps its mark and stays open
         const thread = `discord:${discordThreadId(ref ?? "")}`;
@@ -2100,7 +2180,7 @@ try {
         if (holders && !flags.values.force) {
           const r = await threadOnce(() => postInThread(dc, ref ?? "", body, files));
           if (!r.duplicate) await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
-          console.log(`${r.duplicate ? duplicateLine(r) : `POSTED ${r.id}`} THREAD_LEFT_OPEN ${thread}: ${holders}; not marked done (--force marks it done anyway)`);
+          console.log(`${r.duplicate ? duplicateLine(place, r) : sentLine("POSTED", r)} THREAD_LEFT_OPEN ${thread}: ${holders}; not marked done (--force marks it done anyway)`);
           break;
         }
         if (holders) console.log(`THREAD_DONE_FORCED ${thread}: ${holders}; marking it done anyway`);
@@ -2111,11 +2191,15 @@ try {
         if (verb === "done") unstandThread(cardDir(), t);
         return statuses.request(t, s);
       };
-      // a repeat is not posted, but the status still goes through: a done after a reply with the same words still closes
-      const r = await threadOnce(() => threadHook(dc, verb as ThreadVerb, ref ?? "", body, config.discord, mark, files));
-      if (r.duplicate) await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);
-      else await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
-      console.log(`${r.duplicate ? duplicateLine(r) : `POSTED ${r.id}`}${verb === "done" ? " THREAD_DONE" : verb === "wait" ? " THREAD_WAITING" : ""}`);
+      // only the post is inside the repeat check, so it is recorded as soon as Discord made it; the status step comes after
+      // (review 10 of #338: a slow status step left the post unrecorded past the claim's minute). A repeat is not posted,
+      // but the status still goes through: a done after a reply with the same words still closes
+      const r = await threadOnce(() => postInThread(dc, ref ?? "", body, files));
+      await mark(discordThreadId(ref ?? ""), VERB_STATUS[verb as ThreadVerb]);
+      if (!r.duplicate) await notePost(discordThreadId(ref ?? ""), r.id, withFileNames(body, files));
+      console.log(`${r.duplicate ? duplicateLine(place, r) : sentLine("POSTED", r)}${verb === "done" ? " THREAD_DONE" : verb === "wait" ? " THREAD_WAITING" : ""}`);
+      // wait and done still set their status, so only a reply that posted nothing exits as a repeat
+      if (r.duplicate && verb === "reply") process.exitCode = SEND_DUPLICATE_EXIT;
       break;
     }
     case "handover": {
@@ -2134,7 +2218,12 @@ try {
         break;
       }
       if (key === "thaw") {
-        const line = thawFrozen(freezeDeps, config.stateDir, flags.positionals[1]?.trim() || die("usage: dori handover thaw <pane>"));
+        const pane = flags.positionals[1]?.trim() || die("usage: dori handover thaw <pane>");
+        const agent = readFrozen(config.stateDir).find((r) => r.pane === pane)?.agentPid;
+        const thawed = thawFrozen(freezeDeps, config.stateDir, pane);
+        // checked once resumed: the agent is again its tty's running foreground job, or is brought back to it
+        const fg = agent && !thawed.startsWith("FROZEN_NONE") ? await resumeAfterThaw({ run, clock: realClock, signal: sendSignal }, pane, agent) : "";
+        const line = fg ? `${thawed}; ${fg}` : thawed;
         watchLog(config.watchLog, realClock, { source: "handover", line });
         console.log(line);
         if (line.startsWith("FROZEN_NONE")) process.exit(1);
@@ -2189,7 +2278,7 @@ try {
         if (minutes !== undefined && !(minutes > 0)) die("--minutes must be a positive number");
         const waitIdle = opt("wait-idle") ? Number(opt("wait-idle")) : undefined;
         if (waitIdle !== undefined && !(waitIdle > 0)) die("--wait-idle must be a positive number of minutes");
-        const r = await laneHandover(laneDeps, opt("lane") ?? "", here, { approvedBy: opt("approved-by"), ...(autoGrant ? { autoGrant } : {}), note: opt("note"), model: opt("model"), thinking: opt("thinking"), force: Boolean(flags.values.force), keepOld: Boolean(flags.values["keep-old"]), dryRun: Boolean(flags.values["dry-run"]), verifyMin: minutes, ...(waitIdle ? { waitIdleMin: waitIdle } : {}) });
+        const r = await laneHandover(laneDeps, opt("lane") ?? "", here, { approvedBy: opt("approved-by"), ...(autoGrant ? { autoGrant } : {}), note: opt("note"), model: opt("model"), thinking: opt("thinking"), force: Boolean(flags.values.force), keepOld: Boolean(flags.values["keep-old"]), dryRun: Boolean(flags.values["dry-run"]), verifyMin: minutes, ...(waitIdle ? { waitIdleMin: waitIdle } : {}), ...(opt("request-at") && opt("request-pane") ? { serves: { at: opt("request-at") ?? "", pane: opt("request-pane") ?? "" } } : {}) });
         process.exit(r.code);
       }
       if (flags.values.template) {
@@ -2334,6 +2423,36 @@ try {
       }
       break;
     }
+    // The lead's record of owner requests, from upstream https://github.com/sisyphuslabs/dori-superagent/pull/96.
+    case "worklog": {
+      const worklog = new Worklog(config.stateDir);
+      const id = () => flags.positionals[1] ?? die(`worklog ${key} needs an item id`);
+      const text = () => flags.positionals.slice(2).join(" ").trim() || die(`worklog ${key} needs text`);
+      const now = realClock.now();
+      switch (key) {
+        case "add":
+          console.log(JSON.stringify(worklog.add(flags.positionals.slice(1).join(" ").trim() || die("worklog add needs a title"), need("source"), now)));
+          break;
+        case "next":
+          console.log(JSON.stringify(worklog.next(id(), text(), now)));
+          break;
+        case "note":
+          console.log(JSON.stringify(worklog.note(id(), text(), now)));
+          break;
+        case "close":
+          console.log(JSON.stringify(worklog.close(id(), need("result"), now)));
+          break;
+        case "list": {
+          const read = worklog.read();
+          for (const problem of [...read.problems, ...read.warnings]) console.error(`WORKLOG_WARNING ${problem}`);
+          console.log(JSON.stringify(flags.values.open ? read.items.filter((item) => item.closedAt === undefined) : read.items, null, 2));
+          break;
+        }
+        default:
+          die("worklog needs add, next, note, close or list");
+      }
+      break;
+    }
     case "checkpoint": {
       const target = await lane(key ?? die("checkpoint needs a lane key"));
       // parseArgs takes one value per flag; a second bare receipt would otherwise be dropped and its effect repeated later.
@@ -2369,6 +2488,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError || e instanceof LessonError) die(e.message);
+  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError || e instanceof LessonError || e instanceof WorklogError) die(e.message);
   throw e;
 }

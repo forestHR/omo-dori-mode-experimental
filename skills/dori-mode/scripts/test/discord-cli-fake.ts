@@ -35,7 +35,8 @@ globalThis.fetch = Object.assign(async (input: string | URL | Request, init?: Re
     }
     if (typeof body.name === "string") state.name = body.name;
     if (typeof body.archived === "boolean") state.archived = body.archived;
-  } else if (method === "POST" && path.endsWith("/messages")) result = { id: "900" };
+  // as Discord does: the new message comes back with the content it holds (empty for files alone)
+  } else if (method === "POST" && path.endsWith("/messages")) result = { id: "900", content: typeof body.content === "string" ? body.content : "" };
   else if (method !== "POST" || !path.endsWith("/typing")) throw new Error(`unexpected Discord request: ${method} ${path}`);
   writeFileSync(file, JSON.stringify(state));
   return Response.json(result);

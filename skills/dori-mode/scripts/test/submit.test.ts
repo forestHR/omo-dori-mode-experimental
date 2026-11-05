@@ -169,6 +169,21 @@ test("a pane whose agent is stopped (frozen mid-turn, its screen still showing t
   expect(world.calls.some((c) => c[0] === "tmux" && c[1] === "send-keys")).toBe(false);
 });
 
+test("a pane whose agent runs as a background job of its shell (its stale ❯ prompt still showing) is NOT_SUBMITTED and nothing is typed", async () => {
+  // Given: omo was left a background job (no + in its ps state) while its screen still shows an empty prompt
+  const world = newWorld();
+  world.screen = "❯ ";
+  const base = fakeRunner(world);
+  const run: typeof base = async (argv, opts) => (argv[0] === "ps" && argv[1] === "-A" ? { code: 0, out: "   11    10 Sl   /home/u/.bun/bin/bun /x/senpi/dist/bundle/cli.js\n", err: "" } : base(argv, opts));
+  const config = { ...defaultConfig("/home/test"), backend: "aoe" as const, stateDir: state.dir, watchLog: join(state.dir, "lanes.log") };
+  // When
+  const r = await submitToPane(run, fakeClock(0), config, "aoe_lead_old", "[REPORT] demo | milestone | done");
+  // Then: refused before typing (a later tick may send it again), and no key went to the shell
+  expect(r.status).toBe("NOT_SUBMITTED");
+  expect(r.reason).toBe("the agent in the pane is a background job of its shell (pid 11): its shell, not omo, would read the text, so it was not typed");
+  expect(world.calls.some((c) => c[0] === "tmux" && c[1] === "send-keys")).toBe(false);
+});
+
 test("the text echoed in the transcript above the box is not unsent text", async () => {
   const echoed = ["❯ [paste #1 +13 lines]", busyBox("❯ ")].join("\n");
   const { keys, log } = keysFor([echoed]);

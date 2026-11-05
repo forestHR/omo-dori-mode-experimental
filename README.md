@@ -24,7 +24,7 @@ The default backend is herdr. For aoe/tmux:
 curl -fsSL https://raw.githubusercontent.com/orientpine/omo-dori-mode-experimental/main/install.sh | DORI_BACKEND=aoe bash
 ```
 
-`DORI_BACKEND=aoe` copies a config with `backend: "aoe"` when no config exists; an existing config is kept, including its backend. Set `leadPane` to the lead's aoe/tmux session name. `DORI_REPO` overrides the clone URL. The installer warns when neither herdr nor aoe + tmux is on PATH; missing `gh` and `agent-messenger` are optional warnings. If an existing install's origin is not the fork (or your `DORI_REPO` override), it warns and shows the command to repoint it, without silently changing the remote or pulling from the old origin. When local changes or local commits in an existing checkout block `git pull --ff-only`, it stops (exit 1), names the checkout and lists that work, and gives both ways on: `DORI_NO_PULL=1` installs the checkout as it is without pulling, or drop the work with `git -C <checkout> fetch && git -C <checkout> reset --hard '@{u}'` and run it again. A branch that follows no upstream (or a detached HEAD) gets the command to follow `origin/main` again instead of the reset. `DORI_NO_PULL` takes `1`, `true`, `yes` or `on` to skip the pull and `0`, `false`, `no` or `off` to pull; any other value stops the install rather than pulling quietly.
+`DORI_BACKEND=aoe` copies a config with `backend: "aoe"` when no config exists; an existing config is kept, including its backend. Set `leadPane` to the lead's aoe/tmux session name. `DORI_REPO` overrides the clone URL. The installer warns when neither herdr nor aoe + tmux is on PATH; missing `gh` and `agent-messenger` are optional warnings. If an existing install's origin is not the fork (or your `DORI_REPO` override), it warns and shows the command to repoint it, without silently changing the remote or pulling from the old origin. When local changes or local commits in an existing checkout block `git pull --ff-only`, it stops (exit 1), names the checkout and lists that work, and gives both ways on: `DORI_NO_PULL=1` (or `true`, `yes`) installs the checkout as it is without pulling, or drop the work with `git -C <checkout> fetch && git -C <checkout> reset --hard '@{u}'` and run it again (a branch with no upstream gets git's own advice and no reset).
 
 Then open your agent inside herdr, or inside an aoe session for the aoe backend, and say "Dori mode". The complete Discord + aoe/tmux service setup is in [`setups/discord-aoe`](skills/dori-mode/setups/discord-aoe/README.md). Lessons from running a Dori day to day (a done claim closes the lane, pausing a lane that waits on the owner, applying script updates, swapping a listener through a shadow run) are in [`references/operating-lessons.md`](skills/dori-mode/references/operating-lessons.md).
 
@@ -38,7 +38,7 @@ For native Windows installation, skill registration and `dori serve`, follow the
 - `gh` (the GitHub CLI) for checking merged PRs and closed issues; `npm` for published versions
 - [agent-messenger](https://github.com/agent-messenger/agent-messenger) for the bot itself
 
-macOS gets the full host guard. On Linux, load and disk work, and memory and swap read as unknown.
+macOS gets the full host guard. On Linux, load, memory (MemAvailable in `/proc/meminfo`) and disk work, and swap reads as unknown.
 
 ## Naming your Dori
 
@@ -67,11 +67,11 @@ Everything lives in `~/.dori/config.json`, and every field is optional. The ones
 | `ignorePanes`, `workspaces` | panes to skip and workspace filters; with aoe use tmux session names and profile names (or leave `workspaces` empty) |
 | `defaultCwd` | where lanes start, and the repo whose worktrees they own |
 | `agentCommand` | how to start an agent, as an argv list with `{model}` and `{prompt}` |
-| `hooks.threadReply`, `hooks.threadDone` | your messenger CLI, as argv lists with `{thread}` and `{text}`, so lanes can post progress and be marked done |
+| `hooks.threadReply`, `hooks.threadDone` | your messenger CLI, as argv lists with `{thread}` and `{text}`, so a lane's close can post its summary and mark the thread done |
 | `discord.statusStyle` | `"words"` (default) or `"emoji"` for Discord status marks |
 | `discord.autoUnEye` | `true` (default): `dori inbound discord` removes its eyes reaction from the owner's earlier messages once the bot writes in that channel or thread; `false` leaves it on |
 | `discord.callNames` | `[]` (default). The names the owner calls this Dori by, e.g. `["짱돌", "짱도리", "ZzangDori"]`. If the owner posts in the pair channel without one of these names, without mentioning this Dori's bot or role, and without replying to its post, this Dori loses its eyes on that message as soon as another Dori replies to it or links it. Empty: those eyes stay until this Dori writes there |
-| `discord.quietText`, `discord.postRawReports` | what `freshness` posts in the owner's thread (`{min}` = minutes since the last report), in the owner's language; the lane's own report goes to the lead, not the thread. `postRawReports: true` (default `false`) posts it as it is. A close posts the lane's summary for the owner (`claim-done --summary`, else one a model writes) before it marks the thread done, and does not close without one |
+| `dori close` summary | `freshness` posts nothing in the owner's thread on its own. A close posts the lane's summary for the owner (`claim-done --summary`, else one a model writes) before it marks the thread done, and does not close without one |
 
 The rest (timings, thresholds, heavy-slot count) has sensible defaults. The full table is in [`references/scripts.md`](skills/dori-mode/references/scripts.md). `DORI_CONFIG`, `DORI_STATE_DIR` and `DORI_LEAD_PANE` override the file.
 
@@ -107,7 +107,7 @@ The footer tells lanes to send `[REPORT] <key> | <milestone|blocker|question|don
 ["tmux", "send-keys", "-t", "=aoe_Dori_0a1b2c3d:", "Enter"]
 ```
 
-`dori freshness` reads reports from the lead first, then the lane screen. A new report resets the silence timer; by default it nudges after 15 minutes and after 20 posts a short status line in the owner's words (`discord.quietText`) through `hooks.threadReply`, once per silence. The lane's report itself goes to the lead pane for the lead to retell in plain words; `discord.postRawReports: true` posts the report as before. It also checks lane caps and hung calls (`supervision`; the caps are off by default): at a cap, or a call that looks hung, it tells the lead once and never stops or types into the lane. `close` prints the lane's `COST`.
+`dori freshness` reads reports from the lead first, then the lane screen. A new report resets the silence timer; by default it nudges after 15 minutes and after 20 sends the lane's last report to the lead pane, once per silence, saying nothing was posted in its thread; the lead tells the owner in one plain line if he needs it. It never posts in the owner's thread on its own. It also checks lane caps and hung calls (`supervision`; the caps are off by default): at a cap, or a call that looks hung, it tells the lead once and never stops or types into the lane. `close` prints the lane's `COST`.
 
 With aoe, `dori watch` emits `LANE_BLOCKED <key> <waiting|error|question|idle> <pane>` when a working or not-done lane stops for a human. It combines `aoe ps --json` with the screen: no blocked event during a running turn; idle must last 45 seconds, and a monitor, wake source or active/scheduled goal is not idle, nor is a lane whose session still waits on a detached eval cell, background bash session or background task it started (a quiet `BG_WAITING` log line; `LANE_BLOCKED` after `blockedWaitMin`, 60 minutes). Closing stops the aoe session and moves it to trash, never purges it.
 
@@ -173,7 +173,7 @@ The watcher runs each check itself when it closes the lane, with no shell, and n
 | `dori claim-done` / `object-done` / `close` | the done flow; a close with no usable thread prints `THREAD_MISSING <key>` instead of skipping the thread hook silently; with `DORI_DISCORD_TOKEN` set, a close also marks a `discord:` work thread done and archives it, unless another open lane or an open question card still uses it: then it only posts the lane's result there |
 | `dori pause <key> <reason>` / `dori resume <key>` | park a lane that waits on you: no freshness nudge or post, `LANE_BLOCKED` or `DEAD_PANE` for it, and a done claim doesn't close it; with aoe it also pauses the omo goal of the lane's session (`/goal pause`, read back; `PAUSE_UNVERIFIED`, exit 3, if not confirmed); `resume` puts back the status it had and the goal it paused |
 | `dori watch` | the auto-close watcher, plus aoe `LANE_BLOCKED` events; run it as a persistent monitor |
-| `dori freshness [--loop MIN]` | nudge lanes that went quiet, then post a short status line to their thread and hand the last report to the lead |
+| `dori freshness [--loop MIN]` | nudge lanes that went quiet, then hand the last report to the lead (nothing is posted in their thread) |
 | `dori dead-panes [--loop MIN]` | report agent panes that stopped |
 | `dori guard [--loop MIN]` | alert on load, memory, disk and pane count |
 | `dori fix-attempt <key> --metric M --hypothesis H` | count a fix you asked a lane for; lanes tag such reports `(fix: M / H)`, and from the third attempt on one metric with one hypothesis `SAME_FIX_3` tells you to switch the lane to a root-cause hunt; it first prints the hypotheses already tried on that metric (`PRIOR_FIX`) |

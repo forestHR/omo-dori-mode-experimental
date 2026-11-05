@@ -7,7 +7,7 @@ import { autoturnTick } from "./autoturn.ts";
 import { laneBackground } from "./background.ts";
 import { BACKUP_REMOTE, type DoriConfig, fill } from "./config.ts";
 import type { Question } from "./messenger/discord-cards.ts";
-import { laneDeathTick } from "./lane-death.ts";
+import { laneDeathTick, laneSuspendTick } from "./lane-death.ts";
 import { leadDownTick } from "./lead-down.ts";
 import { leadLimitTick, limitResumeTick } from "./lead-limit.ts";
 import { missedAnswersTick } from "./missed-answers.ts";
@@ -24,6 +24,7 @@ import { ownerSummary } from "./close-summary.ts";
 import { CostRecordBusy, laneSessionUsage, Supervision } from "./supervision.ts";
 import { Lessons, type LessonInput } from "./lessons.ts";
 import { appendRollover, outcomeLine, outcomeMissing, pendingStuck, readRollovers } from "./rollover.ts";
+import { isRepeat } from "./send-dedupe.ts";
 
 export type FlowDeps = {
   readonly run: Runner;
@@ -418,12 +419,16 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string, summar
       // straight to Discord, so a waiting (or any) mark stays; the reply hook would mark the thread working
       const why = await deps.postInThread(lane.thread, text).then(() => "", errText);
       if (why) return notSent(why);
+      cleanup.push(`thread left open: ${holders.join("; ")}; summary posted`);
     } else if (reply) {
       // the closing lane is still open while its hook runs: DORI_CLOSING_LANE tells dori thread reply not to count it as working
       const r = await deps.run(fill(reply, { thread: lane.thread, text, key: lane.key }), { env: { DORI_CLOSING_LANE: lane.key } });
-      if (r.code !== 0) return notSent(`reply hook failed: ${r.err}`);
+      // the summary already the thread's last post (dori thread reply: SEND_DUPLICATE, exit 3) is there: not a failure
+      if (isRepeat(r)) {
+        cleanup.push(`thread left open: ${holders.join("; ")}; summary already the thread's last post`);
+      } else if (r.code !== 0) return notSent(`reply hook failed: ${r.err}`);
+      else cleanup.push(`thread left open: ${holders.join("; ")}; summary posted`);
     } else return notSent("no Discord token and no threadReply hook: nothing can post in the thread");
-    cleanup.push(`thread left open: ${holders.join("; ")}; summary posted`);
   } else if (deps.postInThread && deps.markThreadDone && hasThread(lane) && lane.thread.startsWith("discord:")) {
     // straight to Discord, then the done mark and the archive below; the threadDone hook would post a second time
     const why = await deps.postInThread(lane.thread, threadText).then(() => "", errText);
@@ -565,6 +570,7 @@ export const watchTick = async (deps: FlowDeps): Promise<string[]> => {
     out.push(...(await missedAnswersTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN missed answer check: ${String(e).slice(0, 200)}`])));
     out.push(...(await leadDownTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN lead down check: ${String(e).slice(0, 200)}`])));
     out.push(...(await laneDeathTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN lane death check: ${String(e).slice(0, 200)}`])));
+    out.push(...(await laneSuspendTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN lane suspend check: ${String(e).slice(0, 200)}`])));
     out.push(...(await leadLimitTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN lead limit check: ${String(e).slice(0, 200)}`])));
     out.push(...(await limitResumeTick(deps).catch((e: unknown) => [`LANE_WATCH_WARN limit resume check: ${String(e).slice(0, 200)}`])));
   }

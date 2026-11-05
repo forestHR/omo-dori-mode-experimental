@@ -19,13 +19,16 @@ Service: DORI_FILE_RELAY_DORIS names the Dori accounts as space-separated <dori>
 path may start with ~/, the receiving account's home), e.g. zzangdori=oriclaw:~/.zzangdori/inbox.jsonl
 okdori=okdori:~/.okdori/state/discord/inbox.jsonl. Each account gets ~/outbox/to-<other dori>/ (0700). A file put
 there, in subfolders too, goes to the other's ~/inbox/from-<dori>/<same relative path> with the same checks as by hand;
+subfolders go DORI_FILE_RELAY_MAX_DEPTH (12) folders deep, and a folder deeper than that is set aside whole like a refused
+file (reason path-too-deep, max_depth in its .why; by hand <file> and dest may have DORI_FILE_RELAY_MAX_DEPTH + 2 parts);
 a file of the same name there is replaced by the new one. A file is taken only when it is not being written: names
 starting with . or ending in .part .tmp .crdownload .swp ~ are skipped, and it must look the same (size, mtime, inode)
 on two scans in a row, be unchanged for DORI_FILE_RELAY_SETTLE_SEC (10) and not be open for writing by any process of
 its account. Scans run every DORI_FILE_RELAY_INTERVAL seconds (10). Delivered: the receiver's lead inbox gets one
 kind "file-delivered" line (dori names, relative path, bytes, sha256; never the content), then the sender's file moves
 to ~/outbox/sent/<KST date>/to-<dori>/<path>. Refused, or failing 3 times: the file moves to
-~/outbox/to-<dori>/.failed/<path> with <path>.why next to it (the reason).
+~/outbox/to-<dori>/.failed/<path> with <path>.why next to it (the reason); one that cannot be moved there is logged once
+and tried again quietly on each scan.
 
 Every hand call and every delivery appends one JSON line to ~/.local/state/dori-file-relay/relay.log: names, bytes,
 sha256 and the result only, never the file's content.
@@ -43,6 +46,14 @@ import time
 
 DEFAULT_ACCOUNTS = ("oriclaw", "okdori", "moodori", "yoodori", "gongdori")
 DEFAULT_MAX = 100 * 1024 * 1024
+# Folders under to-<dori>/: 12 holds a 3D model package (URDF meshes sat 7 deep
+# on 2026-11-04) with room to spare; a file path then has at most MAX_DEPTH + 2 parts (to-<dori>/ or from-<dori>/, the file).
+try:
+    MAX_DEPTH = int(os.environ.get("DORI_FILE_RELAY_MAX_DEPTH", 12))
+except ValueError:
+    MAX_DEPTH = 12
+if MAX_DEPTH < 1:
+    MAX_DEPTH = 12
 STATE = os.environ.get("DORI_FILE_RELAY_STATE") or os.path.expanduser("~/.local/state/dori-file-relay")
 LOG = os.path.join(STATE, "relay.log")
 CHUNK = 1 << 20
@@ -64,7 +75,7 @@ def parts(rel):
     if not rel or rel.startswith("/") or "\x00" in rel:
         raise Refused("bad-path")
     ps = rel.split("/")
-    if len(ps) > 8 or any(p in ("", ".", "..") for p in ps):
+    if len(ps) > @MAX_PARTS@ or any(p in ("", ".", "..") for p in ps):
         raise Refused("path-escape")
     return ps
 
@@ -271,7 +282,7 @@ def main():
             if stat.S_ISDIR(st.st_mode):
                 if st.st_uid != me:
                     rows.append(dict(row, type="folder-not-owned"))
-                elif depth >= 6:
+                elif depth >= @MAX_DEPTH@:
                     rows.append(dict(row, type="path-too-deep"))
                 else:
                     sub = os.open(name, NOFOLLOW_DIR, dir_fd=dfd)
@@ -393,7 +404,7 @@ def under(path: str, account: str, folder: str) -> str:
 
 
 def helper(account: str, role: str, code: str, args: list) -> tuple:
-    data = code.encode()
+    data = code.replace("@MAX_PARTS@", str(MAX_DEPTH + 2)).replace("@MAX_DEPTH@", str(MAX_DEPTH)).encode()
     if TEST_HOMES:
         prefix, home = [], os.path.join(TEST_HOMES, account)
     elif account == pwd.getpwuid(os.getuid()).pw_name:
@@ -448,7 +459,7 @@ def relay(src_acct: str, src: str, dst_acct: str, dest: str | None, replace: boo
     entry["dest"] = f"{dst_acct}:inbox/{drel}"
     for r in (rel, drel):
         ps = r.split("/")
-        if not r or len(ps) > 8 or any(p in ("", ".", "..") for p in ps) or "\x00" in r:
+        if not r or len(ps) > MAX_DEPTH + 2 or any(p in ("", ".", "..") for p in ps) or "\x00" in r:
             raise Refused("path-escape")
 
     stage = tempfile.mkdtemp(prefix="dori-file-relay.")
@@ -532,7 +543,7 @@ class Server:
     def __init__(self, doris: dict, cap: int, settle: float, interval: float):
         self.doris, self.cap, self.settle, self.interval = doris, cap, settle, interval
         self.accounts = tuple(a for a, _ in doris.values())
-        self.prev, self.errors, self.delivered, self.scan_errors = {}, {}, {}, {}
+        self.prev, self.errors, self.delivered, self.scan_errors, self.unmoved = {}, {}, {}, {}, {}
 
     def kst_date(self) -> str:
         return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 9 * 3600))
@@ -558,13 +569,21 @@ class Server:
                        json.dumps(why or {}, ensure_ascii=False).encode())
         return line.split(" ", 1)[1] if line.startswith("MOVED ") else ""
 
-    def fail(self, name: str, row: dict, reason: str, entry: dict) -> None:
+    def fail(self, name: str, row: dict, reason: str, entry: dict, key: tuple, sig: tuple) -> None:
         why = {"reason": reason, "to": row["to"], "path": row["rel"], "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        if reason == "path-too-deep":
+            why["max_depth"] = MAX_DEPTH
         try:
             moved = self.move(name, row, "failed", None, why)
             entry.update(result="failed", reason=reason, failed_as=f".failed/{moved}" if moved else "")
+            self.unmoved.pop(key, None)
         except (Refused, RuntimeError) as e:
             entry.update(result="failed", reason=reason, failed_move=str(e)[:200])
+            # still in the way: logged once while the file is unchanged (reason and move error may differ each scan:
+            # an error count, a fresh collision name)
+            if self.unmoved.get(key) == sig:
+                return
+            self.unmoved[key] = sig
         log(entry)
 
     def wake(self, name: str, to: str, info: dict) -> None:
@@ -594,19 +613,19 @@ class Server:
         entry = {"mode": "auto", "from": src_acct, "to": dst_acct, "replace": True, "max_bytes": self.cap}
         if row["type"] != "reg":
             entry["src"] = f"{src_acct}:outbox/to-{row['to']}/{row['rel']}"
-            return self.fail(name, row, row["type"], entry)
+            return self.fail(name, row, row["type"], entry, key, sig)
         try:
             _, info = relay(src_acct, f"to-{row['to']}/{row['rel']}", dst_acct, f"from-{name}/{row['rel']}", True,
                             self.cap, entry, self.accounts)
         except Refused as e:
             if str(e) in RETRY:
                 return log(dict(entry, result="retry", reason=str(e)))
-            return self.fail(name, row, str(e), entry)
+            return self.fail(name, row, str(e), entry, key, sig)
         except Exception as e:  # logged; after MAX_ERRORS the file is set aside with the reason
             n = self.errors[key] = self.errors.get(key, 0) + 1
             reason = f"{type(e).__name__}: {e}"[:300]
             if n >= MAX_ERRORS:
-                return self.fail(name, row, f"error x{n}: {reason}", entry)
+                return self.fail(name, row, f"error x{n}: {reason}", entry, key, sig)
             return log(dict(entry, result="error", reason=reason, attempt=n))
         entry.update(result="ok", replaced=info["replaced"])
         try:
@@ -637,7 +656,7 @@ class Server:
                     if self.delivered.get(key) == sig:
                         continue
                 self.deliver(name, row, key, sig)
-        for d in (self.prev, self.errors, self.delivered):
+        for d in (self.prev, self.errors, self.delivered, self.unmoved):
             for k in [k for k in d if k not in seen]:
                 del d[k]
 

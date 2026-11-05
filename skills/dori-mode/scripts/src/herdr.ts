@@ -10,7 +10,8 @@ import { AGENT, type Proc, procTable, topAgent } from "./session-id.ts";
 // one (w1:p2, measured on herdr 0.9.5), so each primitive there picks the backend from the pane it is given: a lane opened
 // under aoe keeps working after its Dori's config names herdr, and dori handover --lane can move it from one to the other.
 // herdr's own agent_status is not used for omo (herdr 0.9.5 has no omo rule and falls back to idle; upstream #62/#63): the
-// state comes from omo's screen, the same marks the aoe side reads.
+// state comes from omo's screen, the same marks the aoe side reads (https://github.com/sisyphuslabs/dori-superagent/pull/63,
+// https://github.com/sisyphuslabs/dori-superagent/issues/62).
 export const isHerdrPane = (pane: string): boolean => pane.includes(":");
 
 export type HerdrPane = { readonly pane_id: string; readonly tab_id?: string; readonly workspace_id?: string; readonly cwd?: string; readonly agent?: string };
@@ -40,6 +41,34 @@ type ProcessInfo = { readonly shell_pid?: number; readonly foreground_processes?
 const processInfo = async (run: Runner, pane: string): Promise<ProcessInfo | undefined> => (await herdrResult(run, ["pane", "process-info", "--pane", pane]))?.process_info as ProcessInfo | undefined;
 
 export const herdrShellPid = async (run: Runner, pane: string): Promise<number> => Number((await processInfo(run, pane))?.shell_pid ?? 0);
+
+// upstream dori-superagent #69 (https://github.com/sisyphuslabs/dori-superagent/pull/69, its src/herdr.ts and
+// skills/dori-mode/scripts/src/panes.ts): its shell list. Upstream lets a shell running a command (sh -c, pwsh -Command)
+// through as the agent's child; here every shell in the foreground holds the text, whatever its arguments, because no
+// reading of a command line proves the agent owns the input (reviews 1-3 of #347 and the dori challenge of its plan:
+// pwsh prefix-matches 39 switches, cmd /k cmd /c, zsh -oemacs -i, and bash -c 'while read -r l; do eval "$l"; done').
+const SHELLS: ReadonlySet<string> = new Set([
+  "sh", "ash", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh", "pwsh", "powershell", "busybox", "cmd",
+]);
+// herdr on Windows names a process by its path with \ and .exe (pwsh.exe, cmd.exe)
+const baseName = (value: unknown): string => String(value ?? "").replace(/^-/, "").split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, "");
+
+// The shell herdr pane process-info shows in the pane's foreground group (its name), "" for an empty group or an entry
+// with no readable name (doubt), else undefined. herdr still reports an agent suspended with Ctrl+Z as idle while its
+// shell is in front.
+export const interactiveShellInFront = (info: unknown): boolean => shellInFrontName(info) !== undefined;
+export const shellInFrontName = (info: unknown): string | undefined => {
+  const procs = (info as { foreground_processes?: unknown } | undefined)?.foreground_processes;
+  if (!Array.isArray(procs) || procs.length === 0) return "";
+  for (const proc of procs as { name?: unknown; argv?: unknown }[]) {
+    const name = baseName(proc?.name);
+    if (!name) return "";
+    const argv0 = Array.isArray(proc?.argv) ? baseName(proc.argv[0]) : "";
+    if (SHELLS.has(name)) return name;
+    if (SHELLS.has(argv0)) return argv0;
+  }
+  return undefined;
+};
 
 export class HerdrShellError extends Error {
   readonly code = "HERDR_SHELL_UNSUPPORTED";

@@ -8,7 +8,8 @@
 // the new session; the old one stays the lane. Detached jobs (outside the pane's process tree) are listed, never touched.
 // Work a monitor of the old session started (a LAUNCHES_WORK monitor: a chain it put in the background) runs under that
 // monitor, so the old session is frozen instead of closed, its monitors left running, and closes once that work ended.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
 import { pendingBackground, taskOpen, taskRecord, taskRecords } from "./background.ts";
@@ -19,6 +20,7 @@ import { freezePane, freezeSignal, writeFrozen } from "./frozen.ts";
 import { endOldMonitors } from "./handover-monitors.ts";
 import { ackFile, endStrayTasks, type HandoverDeps, liveMonitors, manifestPath, monitorLine, type MonitorSpec, missingMonitors, monitorWork, openGoal, openTodos, PROBE, readManifest, takeLock } from "./handover.ts";
 import { awaitPrompt } from "./launch.ts";
+import { resumeAgent, type StatOf } from "./job-control.ts";
 import { QuestionStore } from "./messenger/discord-cards.ts";
 import { herdrResult, isHerdrPane } from "./herdr.ts";
 import { omoSession, sendVerified } from "./panes.ts";
@@ -27,12 +29,14 @@ import { type Lane, statusOf } from "./registry.ts";
 import { iso, type Runner } from "./run.ts";
 import { AGENT, descendants, ended, type Proc, sessionDirFor } from "./session-id.ts";
 import { commandExecutable } from "./executable.ts";
-import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
+import { appendRollover, type OwnerMessage, ownerMessagesFor, approvalProblem, autoReason, type Blocked, clearQuiet, COMMITTED, contextK, decidedBy, heldTyped, inboxMessages, LEAD_PREFIX, lastProposal, leadLines, limitsFor, ownerRolloverText, readRollovers, reportToOwner, rolloverCause, type RolloverEntry, type RolloverRequest, type Said, sessionFixes, filledApproval, measuredSignal, type Signals, sessionSignals, setQuiet, type Sizes, sizePct, type Step, type Supplement, takeAutoGrant, userLines } from "./rollover.ts";
 import { stuckTop } from "./explore.ts";
 import { bulletsIn, covered, fillGaps, flat, type Missing, missingHeadings, quoted, quotesIn, section, seedRestatement, wholeBullet } from "./restatement.ts";
 import { watchLog } from "./watch-log.ts";
 
 export type LaneHandoverDeps = FlowDeps & {
+  // a process's /proc stat (job-control.ts readStat when not given)
+  readonly stat?: StatOf;
   readonly cardDir: string;
   readonly home: string;
   // the omo session id of the agent running in a pane ("" when it cannot be told)
@@ -71,6 +75,10 @@ export type LaneHandoverOptions = {
   // an automatic start (freshness passes --wait-idle): wait up to this many minutes for the lane's turn to end and move it
   // at that idle moment
   readonly waitIdleMin?: number;
+  // set by a run that waited for another run's lock: the lane's pane it found then (internal)
+  readonly boundPane?: string;
+  // the waiting request a resumed run was started for (freshness readyResume): its time and the pane it was asked in
+  readonly serves?: { readonly at: string; readonly pane: string };
   // set by that waiting loop: it holds the lock; final means the wait is over, so a lane still busy is refused
   readonly idle?: { readonly final: boolean; readonly since: number; readonly waitedMin: number };
 };
@@ -331,7 +339,13 @@ export const foreignPids = (table: readonly Proc[], tree: ReadonlySet<number>): 
 const carried = (dir: string, key: string, alive: (pid: number) => boolean, known: ReadonlySet<number>): Job[] => {
   let files: string[] = [];
   try {
-    files = readdirSync(dir).filter((n) => new RegExp(`^${escape(key)}-\\d{8}-\\d{6}\\.json$`).test(n)).sort();
+    // <key>-<stamp>.json, or <key>-<stamp>-<pid>.json for a run that wrote second in the same second (the newer one)
+    const name = new RegExp(`^${escape(key)}-(\\d{8}-\\d{6})(?:-(\\d+))?\\.json$`);
+    const order = (n: string): string => {
+      const m = name.exec(n);
+      return `${m?.[1] ?? ""}-${m?.[2] === undefined ? "0" : "1"}-${(m?.[2] ?? "").padStart(10, "0")}`;
+    };
+    files = readdirSync(dir).filter((n) => name.test(n)).sort((a, b) => order(a).localeCompare(order(b)));
   } catch {
     return [];
   }
@@ -347,17 +361,39 @@ const ancestors = (table: readonly Proc[], pid: number): Set<number> => {
   return out;
 };
 
+// what the lane is asked when a rollover finds it busy (an automatic one, or the lead's approved one): reach a safe point,
+// write the summary, mark ready, go idle
+// the causes quote command lines, and a backtick or $( is never typed into a pane (sendVerified refuses the whole text):
+// they are written as ' and $ ( so the ask still reaches the lane (review 320 round 9)
+const typeSafe = (text: string): string => text.replace(/`/g, "'").replace(/\$\(/g, "$ (");
+export const safePointText = (key: string, cause: string, by: "auto" | "lead"): string =>
+  safePointBody(key, typeSafe(cause), by);
+const safePointBody = (key: string, why: string, by: "auto" | "lead"): string =>
+  `[LEAD] ${by === "auto" ? `An automatic rollover of ${key} to a new session is due` : `The lead moves ${key} to a new session`}, but the lane is busy (${why}). At your next safe point: start no new work, write your conversation summary (dori handover ready --template prints its headings) to a file, run dori handover ready ${key} --note <file>, then end your turn.${/background task\(s\) still run/.test(why) ? " The ready mark does not cover your background tasks: the move waits until they end, so start no new ones and let these finish (or end them yourself if their work is no longer needed)." : ""} The local chains that command lists end with this session: if one must keep running (a training, eval or deploy run), let it finish or move it out of the session (setsid, systemd-run) first, and say so in your report. The move starts by itself once you are idle; nothing else to do.`;
+
 export const readyFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.ready.json`);
 export const pendingFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.pending.json`);
+// the waiting request whose safe-point ask freshness typed after the refusing run could not (request: that row's time)
+export const safePointFile = (stateDir: string, key: string): string => join(stateDir, "handover", "lanes", `${key}.safe-point.json`);
 
 // The handover a lead (or the owner) approved and that was refused because the lane was busy (a turn ran, or work would
 // die): the lane's last handover run, approved by anyone but the automation, refused with blocked work or busy, in the
 // lane's pane now. A ready mark the lane writes after it starts that same move again (freshness readyResume); an automatic
 // run comes back from freshness's rolloverDue instead, and a run that went ahead or failed later ends the request.
 export const waitingRequest = (entries: readonly RolloverEntry[], key: string, pane: string): Extract<RolloverEntry, { kind: "rollover" }> | undefined => {
-  const last = entries.findLast((e): e is Extract<RolloverEntry, { kind: "rollover" }> => e.kind === "rollover" && e.who === "lane" && e.key === key);
+  // an automatic run's refusal leaves a lead's waiting request waiting: a run started before it logs its refusal after it
+  // (review 320 round 13)
+  const last = entries.findLast((e): e is Extract<RolloverEntry, { kind: "rollover" }> => e.kind === "rollover" && e.who === "lane" && e.key === key && !(e.result === "refused" && !!e.approvedBy?.trim() && decidedBy(e.approvedBy.trim()) === "auto"));
   const by = last?.approvedBy?.trim() ?? "";
   return last && last.result === "refused" && (last.blocked === "work" || last.blocked === "busy") && last.from === pane && by && decidedBy(by) !== "auto" ? last : undefined;
+};
+
+// The safe-point ask of the lane's waiting request that has not reached the lane yet: neither the refusing run nor freshness
+// got it through. A later refusal of the same request (a resumed run, which asks nothing itself) carries it on, so freshness
+// goes on asking until the pane takes it (review 320 round 9).
+const untoldAsk = (stateDir: string, key: string, pane: string): { readonly why: string; readonly told: boolean } | undefined => {
+  const prev = waitingRequest(readRollovers(stateDir), key, pane);
+  return prev?.safePoint && !prev.safePoint.told && readJson<{ request?: string }>(safePointFile(stateDir, key))?.request !== prev.at ? prev.safePoint : undefined;
 };
 
 // The pids of the monitors omo runs for the session in a pane (they are re-armed, not lost).
@@ -411,7 +447,7 @@ export const renderLaneNote = (f: LaneFacts, at: string, stateDir: string): stri
   "",
   "## Do this first",
   "1. Arm every monitor under Monitors again as a persistent monitor, with the same command and filter; one marked LAUNCHES_WORK gets the watch-only monitor its line describes instead, never its own command (its work still runs under the old session or already ended). Take each command, filter and description from its line under Monitors, where they are JSON strings: put them into the tool call as they are (a JSON string is a valid JS string), not retyped and not from the conversation summary, where a copy can differ. Arm each one once, all in one call, and print only how many armed and the ones that failed: each monitor's full reply is context the new session carries to its end.",
-  `2. A [LEAD] line with ${PROBE} <id> is a check of this handover. Before you answer it, read this whole note and your brief, then write what you understood to the file the line names, under the headings ${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")} (under Goal and Owner's words, the owner's goal and words quoted exactly as the note gives them; under Questions, only what neither the note nor the old log answers after you searched it, or none). The handover already wrote into that file, word for word, the owner's goal and quotes, the summary's decisions and the tried fixes: keep those lines as they are (do not translate, shorten or merge them), add what you understood below them, and write ## ${LANE_OWN.join(" and ## ")} yourself. Then run the dori handover ack command it gives (with its --state) and nothing else for that line. A [LEAD] HANDOVER_SUPPLEMENT <id> line names a file with what your restatement left out and the old log lines behind it: add those items to the same file, keep the rest, and run the ack command it gives.`,
+  `2. A [LEAD] line with ${PROBE} <id> is a check of this handover: read this whole note and your brief first, then run the dori handover ack command it gives (with its --state) and nothing else for that line. A [LEAD] HANDOVER_SUPPLEMENT <id> line comes from the audit after the commit: it names a file with what you were missing and the old log lines behind it; write those items into the file it names (create it if it is not there) and run the ack command it gives.`,
   `3. Read your brief ${f.lane.brief} in full. It still holds: same Done, same footer, and reports still go to the lead.`,
   `4. Until a [LEAD] ${COMMITTED} line arrives, do nothing else: change no file, start no process besides the monitors of step 1, post nothing. Until then the handover can still roll back and close this session.`,
   `5. After ${COMMITTED}: ${f.goal ? "register the goal under Goal again with your goal tool, same objective, and rebuild the todo list from Todos." : "rebuild the todo list from Todos."} Then continue the work from where Last reports and the lane's notes leave it. A [LEAD] HANDOVER_SUPPLEMENT line that comes later is the audit after the handover: do what it says and go on. When you find later that the old session knew something this note did not carry and it cost you (you had to ask, redo or guess), run dori handover gap ${f.lane.key} --kind "<owner's words|decision|lead instruction|todo|goal|monitor|tried fix|other>" --text "<one line, no secret values>" and tell the lead.`,
@@ -485,6 +521,71 @@ const ackedBy = (stateDir: string, id: string): string | undefined => {
 
 const titleFor = (old: string, stamp: string): string => `${old.replace(/-\d{8}$/, "")}-${stamp.slice(4, 8)}${stamp.slice(9, 13)}`;
 
+// One handover per lane at a time, and no request lost to the lock: a run that finds the lane's lock held by a live run
+// writes its request here (approval, --force, options); the run waiting for the lane's idle moment takes it by rename at
+// its next look and goes on with it, so a lead's --force moves the lane at once instead of "another handover is running"
+// (ZzangDori herdr-switch, 2026-11-03 09:10:45Z). A holder that is moving the lane takes nothing: the request is withdrawn.
+// Each request is a file of its own (<key>.takeover-<pid>-<id>.json, published whole by rename), so two runs never write over
+// each other and each withdraws only its own.
+const takeoverDir = (stateDir: string): string => join(stateDir, "handover", "lanes");
+const takeoverPrefix = (key: string): string => `${key}.takeover-`;
+type Takeover = { readonly pid: number; readonly at: string; readonly approvedBy?: string; readonly force: boolean };
+const TAKE_POLL_MS = 1_000;
+const TAKE_TRIES = 15;
+
+const lockHolder = (file: string, alive: (pid: number) => boolean): { readonly pid: number; readonly at: string } | undefined => {
+  const held = readJson<{ pid?: number; at?: string }>(file);
+  return held?.pid && held.pid !== process.pid && alive(held.pid) ? { pid: held.pid, at: held.at ?? "?" } : undefined;
+};
+
+// The taking side. A run waiting for the lane's idle moment steps aside for it: it takes the request, logs nothing and ends,
+// and this run goes on with its own approval, --force and options, taking the lock itself, so it moves the lane (or is
+// refused) and reports that itself; a holder that ended without taking it (its wait was over) clears the way the same
+// way. A holder that takes nothing within 15 s is moving the lane: the request is withdrawn and this run is refused,
+// with no rollover row, so the lane's waiting request stays its last one. undefined: go on.
+const handOver = async (deps: LaneHandoverDeps, key: string, holder: { readonly pid: number; readonly at: string }, opts: LaneHandoverOptions, at: string, emit: (line: string) => void): Promise<LaneHandoverResult | undefined> => {
+  // its own id, not deps.nonce(): the probe ids of the move this run may make next come from that
+  const file = join(takeoverDir(deps.config.stateDir), `${takeoverPrefix(key)}${process.pid}-${randomUUID().slice(0, 8)}.json`);
+  const mine: Takeover = { pid: process.pid, at, ...(opts.approvedBy?.trim() ? { approvedBy: opts.approvedBy.trim() } : {}), force: Boolean(opts.force) };
+  writeFileSync(`${file}.part`, JSON.stringify(mine));
+  renameSync(`${file}.part`, file);
+  for (let i = 0; i < TAKE_TRIES && deps.alive(holder.pid); i++) await deps.clock.sleep(TAKE_POLL_MS);
+  const taken = !existsSync(file);
+  rmSync(file, { force: true });
+  if (deps.alive(holder.pid)) {
+    emit(`HANDOVER_REFUSED ${key}: another handover is running (pid ${holder.pid}, started ${holder.at}) and is moving the lane now: it took no new request`);
+    return { code: 2 };
+  }
+  emit(`HANDOVER_TAKEN_OVER ${key}: ${taken ? `the run of pid ${holder.pid} that waited for the lane's idle moment (since ${holder.at}) stepped aside` : `the run of pid ${holder.pid} ended`}; this run moves the lane${opts.force ? " with --force" : ""}`);
+  return undefined;
+};
+
+// the waiting side: a request another run left for this lane, taken by rename so only one run takes it; one whose writer
+// is gone is dropped and the next looked at; the others stay for their writers
+const claimTakeover = (deps: LaneHandoverDeps, key: string): Takeover | undefined => {
+  const dir = takeoverDir(deps.config.stateDir);
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir).filter((n) => n.startsWith(takeoverPrefix(key)) && n.endsWith(".json"));
+  } catch {
+    return undefined;
+  }
+  const queued = names.map((n) => ({ n, t: readJson<Takeover>(join(dir, n)) })).filter((x) => x.t).sort((x, y) => (x.t?.at ?? "").localeCompare(y.t?.at ?? "") || x.n.localeCompare(y.n));
+  for (const { n } of queued) {
+    const mine = join(dir, `${n}.claimed-${process.pid}`);
+    try {
+      renameSync(join(dir, n), mine);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw e;
+    }
+    const t = readJson<Takeover>(mine);
+    rmSync(mine, { force: true });
+    if (t && deps.alive(t.pid)) return t;
+  }
+  return undefined;
+};
+
 const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: LaneHandoverOptions, granted: boolean): Promise<LaneHandoverResult> => {
   const { config } = deps;
   const at = iso(deps.clock);
@@ -498,13 +599,53 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   // an auto: approval without the grant of a run freshness started is borrowed: refused first, and never logged, since a
   // row approved auto: is read by freshness as its own run's result (lastAuto) and ends a lead's waiting request
   const borrowed = decidedBy(opts.approvedBy?.trim() ?? "") === "auto" && !granted;
-  const refuse = (why: string, held?: { readonly blocked: Blocked; readonly pids?: readonly number[]; readonly tasks?: readonly string[] }): LaneHandoverResult => {
+  // I1 for the rollover log too: a refusal row (the lane's waiting request, read under the lock by a run started again for
+  // it) is written only by a run that holds the lane's lock. A run freshness started holds it for its whole wait; any other
+  // takes it for the write. One that finds it held by a live run writes nothing and goes the takeover way, so the holder
+  // steps aside for this request or is mid-move and keeps the lane (review 320 round 15)
+  let holding = Boolean(opts.idle);
+  const rowLock = join(dir, `${key}.lock`);
+  const forRow = async (): Promise<{ readonly release: () => void; readonly log: boolean } | { readonly via: LaneHandoverResult }> => {
+    if (holding || borrowed || opts.dryRun || !opts.approvedBy?.trim()) return { release: () => {}, log: true };
+    mkdirSync(dir, { recursive: true });
+    const locked = takeLock(rowLock, deps.alive, at);
+    if (!locked) {
+      holding = true;
+      return { release: () => { holding = false; rmSync(rowLock, { force: true }); }, log: true };
+    }
+    const holder = lockHolder(rowLock, deps.alive);
+    if (!holder) {
+      emit(`HANDOVER_NOT_LOGGED ${key}: ${locked}; the refusal below is not logged, so the lane's waiting request stays as it was`);
+      return { release: () => {}, log: false };
+    }
+    const stop = await handOver(deps, key, holder, opts, at, emit);
+    return { via: stop ?? (await attempt(deps, key, here, { ...opts, ...(opts.boundPane ?? fromPane ? { boundPane: opts.boundPane ?? fromPane } : {}) }, granted)) };
+  };
+  // a resumed run's request, read under the lane's lock: no longer the lane's waiting one in that pane, it moves nothing
+  const requestGone = (pane: string): LaneHandoverResult | undefined => {
+    if (!opts.serves) return undefined;
+    const waiting = waitingRequest(readRollovers(config.stateDir), key, pane);
+    if (pane === opts.serves.pane && waiting?.at === opts.serves.at) return undefined;
+    emit(`HANDOVER_REQUEST_GONE ${key}: the request of ${opts.serves.at} in ${opts.serves.pane} is no longer the lane's waiting one (the lane is in ${pane}${waiting ? `, waiting request ${waiting.at}` : ", no request waits"}); nothing is moved`);
+    return { code: pane !== opts.serves.pane ? 0 : 2, ...(pane !== opts.serves.pane ? { to: pane } : {}) };
+  };
+  const refuse = async (why: string, held?: { readonly blocked: Blocked; readonly pids?: readonly number[]; readonly tasks?: readonly string[]; readonly safePoint?: { readonly why: string; readonly told: boolean } }): Promise<LaneHandoverResult> => {
+    const gate = await forRow();
+    if ("via" in gate) return gate.via;
+    try {
+      return refused(why, held, gate.log);
+    } finally {
+      gate.release();
+    }
+  };
+  const refused = (why: string, held: { readonly blocked: Blocked; readonly pids?: readonly number[]; readonly tasks?: readonly string[]; readonly safePoint?: { readonly why: string; readonly told: boolean } } | undefined, log: boolean): LaneHandoverResult => {
     emit(`HANDOVER_REFUSED ${key}: ${why}`);
     if (borrowed) return { code: 2 };
     // a run refused while the lane was busy keeps the options it was given (the note as an absolute path): a ready mark
     // starts it again with them (freshness readyResume)
+    const safePoint = held?.safePoint ?? (held && fromPane && opts.approvedBy?.trim() && decidedBy(opts.approvedBy.trim()) !== "auto" ? untoldAsk(config.stateDir, key, fromPane) : undefined);
     const request: RolloverRequest = { ...(opts.note ? { note: resolve(opts.note) } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}), ...(opts.keepOld ? { keepOld: true } : {}), ...(opts.verifyMin ? { verifyMin: opts.verifyMin } : {}) };
-    if (!opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), request } : {}) });
+    if (log && !opts.dryRun && opts.approvedBy?.trim()) appendRollover(config.stateDir, { kind: "rollover", who: "lane", at, key, from: fromPane, approvedBy: opts.approvedBy.trim(), signals: {}, steps: [], result: "refused", reasons: [why], ...(held ? { blocked: held.blocked, ...(held.pids?.length ? { pids: held.pids } : {}), ...(held.tasks?.length ? { tasks: held.tasks } : {}), request, ...(safePoint ? { safePoint } : {}) } : {}), ...(opts.serves ? { resumes: opts.serves.at } : {}) });
     return { code: 2 };
   };
   if (borrowed) return refuse(`a lane moves to a new session only with an approval: ${approvalProblem(opts.approvedBy, () => undefined, { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, "", [])} (--dry-run needs none)`);
@@ -516,20 +657,111 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   if (statusOf(lane) === "closed") return refuse("the lane is closed");
   if (!lane.pane) return refuse("the lane has no pane");
   fromPane = lane.pane;
+  // a run freshness started again for a request the lead has since replaced (or a move finished) leaves here, before any
+  // refusal of its own: a row it logged would hide the newer waiting request (review 320 round 16). It holds the lane's
+  // lock; a move's journal names the pane the request was for, so a dead move is still repaired by this run
+  if (opts.idle && opts.serves) {
+    const gone = requestGone(readPending(config.stateDir, key)?.from ?? lane.pane);
+    if (gone) return gone;
+  }
   if (here === lane.pane) return refuse(`run it from the lead, not from the lane's own pane; the lane marks a safe point with dori handover ready ${key} and tells the lead`);
   if (opts.note && !existsSync(opts.note)) return refuse(`note file not found: ${opts.note}`);
   const pending = readPending(config.stateDir, key);
   if (pending) {
-    if (pending.pid !== process.pid && deps.alive(pending.pid)) return refuse(`another handover of ${key} is running (pid ${pending.pid}, started ${pending.at})`);
+    // a run waiting on a move in flight asks for the move's source, not the pane the lane points at now: a repair that rolls
+    // back puts the lane there again and this request runs; a move that finished leaves it elsewhere (review 320 round 13)
+    if (pending.pid !== process.pid && deps.alive(pending.pid)) {
+      if (opts.dryRun || opts.idle) return refuse(`another handover of ${key} is running (pid ${pending.pid}, started ${pending.at})`);
+      // a run mid-move: this one goes the takeover way, which logs no rollover row, so the lane's waiting request stays its
+      // last and outlives that run dying before it repointed (review 320 round 8)
+      const stop = await handOver(deps, key, { pid: pending.pid, at: pending.at }, opts, at, emit);
+      if (stop) return stop;
+      return attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? pending.from }, granted);
+    }
     if (opts.dryRun) return refuse(`an interrupted handover (${pending.from} -> ${pending.to}, ${pending.at}) left ${pendingFile(config.stateDir, key)}; run without --dry-run to repair it first`);
-    emit(`HANDOVER_INTERRUPTED ${key}: the run from ${pending.at} (pid ${pending.pid}) ended between opening ${pending.to} and finishing; repairing`);
-    await recover(deps, pending, emit);
+    // the repair writes the registry and removes the journal, so it holds the lane's lock like any writer (I1): a run that
+    // finds the lock held waits for its holder the takeover way, and the journal is read again under the lock, so a repair
+    // done meanwhile (or a newer move's journal) is never repaired or removed twice (review 320 round 12). A run freshness
+    // started (idle) already holds the lock.
+    const lockFile = join(dir, `${key}.lock`);
+    if (!opts.idle) {
+      mkdirSync(dir, { recursive: true });
+      const locked = takeLock(lockFile, deps.alive, at);
+      if (locked) {
+        const holder = lockHolder(lockFile, deps.alive);
+        if (!holder) return refuse(locked);
+        const stop = await handOver(deps, key, holder, opts, at, emit);
+        if (stop) return stop;
+        return attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? pending.from }, granted);
+      }
+    }
+    let repaired = false;
+    try {
+      const again = readPending(config.stateDir, key);
+      if (again && again.pid === pending.pid && again.at === pending.at) {
+        emit(`HANDOVER_INTERRUPTED ${key}: the run from ${pending.at} (pid ${pending.pid}) ended between opening ${pending.to} and finishing; repairing`);
+        await recover(deps, again, emit);
+        repaired = true;
+      }
+    } finally {
+      if (!opts.idle) rmSync(lockFile, { force: true });
+    }
+    if (!repaired) return attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? pending.from }, granted);
     return { code: 3 };
+  }
+  // a run that waited for a holder asked for the session it found then: once an interrupted move is repaired (above), a
+  // lane in another pane was moved by the holder or a run beside this one, and is not moved again
+  if (opts.boundPane && lane.pane !== opts.boundPane) {
+    // the move that won applied its own options: a request that asked to keep the old session (or to close it) and got the
+    // other is a conflict, not a success (plan challenge 14:48Z)
+    const won = readRollovers(config.stateDir).flatMap((r) => (r.kind === "rollover" && r.key === key && r.result.startsWith("done") ? [r] : [])).at(-1);
+    const keptOld = won?.result === "done-kept-old";
+    if (won && keptOld !== !!opts.keepOld) {
+      emit(`HANDOVER_CONFLICT ${key}: the lane moved from ${opts.boundPane} to ${lane.pane} while this run waited, by a run that ${keptOld ? "kept" : "closed"} the old session; this request asked to ${opts.keepOld ? "keep" : "close"} it and is not moved again`);
+      return { code: 2, to: lane.pane };
+    }
+    emit(`HANDOVER_ALREADY_MOVED ${key}: the lane moved from ${opts.boundPane} to ${lane.pane} while this run waited; it is not moved again`);
+    return { code: 0, to: lane.pane };
+  }
+  // a run freshness started holds the lane's lock here (I1), and only under it is the waiting request read for good: a resumed
+  // run moves only for the request it was started for, while the lane is still in that request's pane; it leaves no row, so
+  // the waiting request stays the last (review 320 round 14)
+  if (opts.idle) {
+    const gone = opts.serves ? requestGone(lane.pane) : undefined;
+    if (gone) return gone;
+    // an automatic run gives way to a lead's waiting request; every refusal row is written under this lock, so none is
+    // published beside it (review 320 rounds 14-16)
+    const waiting = waitingRequest(readRollovers(config.stateDir), key, lane.pane);
+    if (!opts.serves && waiting && decidedBy(opts.approvedBy?.trim() ?? "") === "auto") {
+      emit(`HANDOVER_YIELDED ${key}: the lead's request of ${waiting.at} waits for this lane; the automatic run leaves the move to it`);
+      return { code: 2 };
+    }
+  }
+  // the signal of a lead's approval is the one measured for this session, read from the records (owner Q475)
+  const filled = filledApproval(opts.approvedBy, measuredSignal({ pane: lane.pane, stuck: stuckTop(lane), due: lane.rolloverDue, proposal: lastProposal(readRollovers(config.stateDir), key) }));
+  if (filled) {
+    emit(`HANDOVER_APPROVAL_FILLED ${key}: ${JSON.stringify(filled)} (the signal read from the records)`);
+    opts = { ...opts, approvedBy: filled };
   }
   // a dry run needs no approval, but a given one is checked the same way, so it can be tried before the real run
   const unapproved = opts.dryRun && !opts.approvedBy?.trim() ? undefined : approvalProblem(opts.approvedBy, (id) => new QuestionStore(deps.cardDir).get(id), { on: config.handover.autoRolloverLanes, key: "handover.autoRolloverLanes", granted }, key, lane.pane ?? "", readRollovers(config.stateDir), Boolean(deps.reportOwner), inboxMessages(deps.inbox ?? "", deps.ownerIds ?? []));
-  if (unapproved) return refuse(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`);
+  // a refused approval is no request: it hands nothing to a run holding the lane's lock (that run would step aside for it),
+  // and its row would hide the lane's waiting request; only an automatic one leaves its row (freshness reads it as its run's
+  // result, and waitingRequest skips it) (review 333 round 5)
+  if (unapproved) return refused(`a lane moves to a new session only with an approval: ${unapproved} (--dry-run needs none)`, undefined, decidedBy(opts.approvedBy?.trim() ?? "") === "auto");
   if (opts.dryRun && opts.approvedBy?.trim()) emit(`HANDOVER_APPROVAL_OK ${JSON.stringify(opts.approvedBy.trim())}`);
+  const lockFile = join(dir, `${key}.lock`);
+  // a run that finds another holding the lane hands it this request instead of a second move or a refusal: a run waiting
+  // for the lane's idle moment takes it (and a --force with it) at its next look
+  const holder = opts.dryRun || opts.idle ? undefined : lockHolder(lockFile, deps.alive);
+  if (holder) {
+    const stop = await handOver(deps, key, holder, opts, at, emit);
+    if (stop) return stop;
+    // the holder is gone. The request is for the session this run found in the lane's pane: one that moved meanwhile (another
+    // run that waited beside this one moved it) is not moved again (plan challenge, review 320). Else start over, so an
+    // interrupted move the holder left (its pending journal) is repaired first and the registry is read again.
+    return attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? lane.pane }, granted);
+  }
   const old = sessionFor(await liveSessions(deps.run), lane.pane);
   if (!old) return refuse(`no live session for pane ${lane.pane}`);
   const real = deps.realpath(old.path);
@@ -612,7 +844,28 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
   if (blocked && !opts.dryRun && opts.idle && !opts.idle.final && !work.length) return { code: 2, retry: true };
   const blockedWhy = `${opts.idle && !work.length ? `the lane stayed busy for ${opts.idle.waitedMin} min: ` : ""}${blockers.join("; ")}. Ask the lane to reach a safe point and write its conversation summary and run dori handover ready ${key} --note FILE in its own pane, or pass --force${opts.approvedBy?.trim() && decidedBy(opts.approvedBy.trim()) !== "auto" ? ` (once it marks ready within ${config.handover.readyMin} min, freshness starts this handover again by itself with the same approval)` : ""}`;
   // a dry run still writes the note, so a rollover proposal can show it with what blocks the move
-  if (blocked && !opts.dryRun) return refuse(blockedWhy, { blocked: work.length ? "work" : "busy", pids: uncovered.flatMap((c) => c.pids ?? [c.pid]), tasks: tasks.map((t) => t.id) });
+  if (blocked && !opts.dryRun) {
+    // the lead's (or the owner's) request waits instead of ending here: the lane is asked for its safe point now, as the lead
+    // used to type by hand, and freshness starts the request again (freshness readyResume); a waiting run asks nothing again.
+    // Whether the pane took the ask is kept on the request: freshness asks again until it does (review 320 round 8)
+    const waits = !opts.idle && !!opts.approvedBy?.trim() && decidedBy(opts.approvedBy.trim()) !== "auto";
+    const asked = blockers.join("; ");
+    // the lock for the row is taken before the ask, so a run that goes the takeover way instead asks the lane nothing
+    const gate = await forRow();
+    if ("via" in gate) return gate.via;
+    let r: LaneHandoverResult;
+    let told = false;
+    try {
+      told = waits ? await tell(deps, lane.pane, safePointText(key, asked, "lead")) : false;
+      r = refused(blockedWhy, { blocked: work.length ? "work" : "busy", pids: uncovered.flatMap((c) => c.pids ?? [c.pid]), tasks: tasks.map((t) => t.id), ...(waits ? { safePoint: { why: asked, told } } : {}) }, gate.log);
+    } finally {
+      gate.release();
+    }
+    if (waits && gate.log) {
+      emit(`HANDOVER_PENDING ${key}: the move waits and ${work.length ? "starts by itself once the lane marks ready or the work it named ended" : "starts by itself the moment the lane is idle"} (freshness, same approval and options; a run of yours with --force takes it over and moves it now); ${told ? "the lane was asked for its safe point" : `the request for a safe point did not reach ${lane.pane}`}`);
+    }
+    return r;
+  }
   if (blocked) emit(`HANDOVER_REFUSED ${key}: ${blockedWhy}`);
   else if (blockers.length) emit(`HANDOVER_FORCED ${key}: ${blockers.join("; ")}`);
   if (real !== old.path) emit(`HANDOVER_CWD_SYMLINK ${key}: the lane runs from ${old.path}, a symlink to ${real}; the new session opens in ${real}`);
@@ -630,23 +883,34 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     ...(leadWords.length ? { leadWords } : {}),
     ...(tasks.length ? { tasks: taskRuns(logText, tasks, deps.home) } : {}),
   };
+  // the lock is taken before the first shared write (the note the new session reads): a run beside this one that locked
+  // first after the same checks leaves this one nothing to write, and it goes the takeover way instead; once locked, a lane
+  // moved meanwhile or a move left half done is looked at again from the start (review 320 round 8)
   mkdirSync(dir, { recursive: true });
-  const note = join(dir, `${key}-${stamp}.md`);
-  writeFileSync(note, renderLaneNote(facts, at, config.stateDir));
-  writeFileSync(join(dir, `${key}-${stamp}.json`), JSON.stringify(facts, null, 1));
-  emit(`HANDOVER_NOTE ${note}: ${monitors.length} monitors, ${facts.todos.length} todos, goal ${facts.goal ? "yes" : "no"}, ${chains.length} local chains, ${detached.length} detached jobs, ${tasks.length} background tasks, ${leadWords.length} lead instructions, context ${shown.contextPct ?? "?"}%, compactions ${signals.compactions ?? "?"}, age ${signals.ageH ?? "?"} h, ready ${ready ? ready.at : "no"}`);
-  if (jobs.length) emit(`HANDOVER_MONITOR_WORK ${key} ${jobs.length}: ${jobs.map((j) => `monitor ${j.pid} "${j.cmd.slice(0, 60)}" runs ${(j.pids ?? []).join(",")}`).join("; ")}; the old session is frozen, not closed, until it ends`);
-  const title = titleFor(old.title, stamp);
-  if (opts.dryRun) {
-    if (blocked) return { code: 2, note };
-    deps.print(`HANDOVER_DRY_RUN ${key} would open ${config.backend} session "${title}" in ${real} (--model ${facts.model}${thinking ? ` --thinking ${thinking}` : ""}), point the lane at it, check the status line, ${monitors.length} monitors (${monitors.map((m) => m.description || m.command || m.path).join(", ") || "none"}) and a probe within ${opts.verifyMin ?? config.handover.verifyMin} min, then ${opts.keepOld ? "keep" : "close"} ${lane.pane}; detached jobs left alone: ${detached.map((d) => d.pid).join(",") || "none"}`);
-    return { code: 0, note };
+  const lockedHere = !opts.dryRun && !opts.idle;
+  if (lockedHere) {
+    const locked = takeLock(lockFile, deps.alive, at);
+    if (locked) return lockHolder(lockFile, deps.alive) ? attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? lane.pane }, granted) : refuse(locked);
+    const after = await deps.registry.read(key);
+    if (after?.pane !== lane.pane || readPending(config.stateDir, key)) {
+      rmSync(lockFile, { force: true });
+      return attempt(deps, key, here, { ...opts, boundPane: opts.boundPane ?? lane.pane }, granted);
+    }
   }
-  const lockFile = join(dir, `${key}.lock`);
-  // the waiting loop of an automatic start already holds the lock
-  const locked = opts.idle ? undefined : takeLock(lockFile, deps.alive, at);
-  if (locked) return refuse(locked);
   try {
+    // one note per run, even for two runs started in the same second
+    const id = existsSync(join(dir, `${key}-${stamp}.md`)) ? `${stamp}-${process.pid}` : stamp;
+    const note = join(dir, `${key}-${id}.md`);
+    writeFileSync(note, renderLaneNote(facts, at, config.stateDir));
+    writeFileSync(join(dir, `${key}-${id}.json`), JSON.stringify(facts, null, 1));
+    emit(`HANDOVER_NOTE ${note}: ${monitors.length} monitors, ${facts.todos.length} todos, goal ${facts.goal ? "yes" : "no"}, ${chains.length} local chains, ${detached.length} detached jobs, ${tasks.length} background tasks, ${leadWords.length} lead instructions, context ${shown.contextPct ?? "?"}%, compactions ${signals.compactions ?? "?"}, age ${signals.ageH ?? "?"} h, ready ${ready ? ready.at : "no"}`);
+    if (jobs.length) emit(`HANDOVER_MONITOR_WORK ${key} ${jobs.length}: ${jobs.map((j) => `monitor ${j.pid} "${j.cmd.slice(0, 60)}" runs ${(j.pids ?? []).join(",")}`).join("; ")}; the old session is frozen, not closed, until it ends`);
+    const title = titleFor(old.title, stamp);
+    if (opts.dryRun) {
+      if (blocked) return { code: 2, note };
+      deps.print(`HANDOVER_DRY_RUN ${key} would open ${config.backend} session "${title}" in ${real} (--model ${facts.model}${thinking ? ` --thinking ${thinking}` : ""}), point the lane at it, check the status line, ${monitors.length} monitors (${monitors.map((m) => m.description || m.command || m.path).join(", ") || "none"}) and a probe within ${opts.verifyMin ?? config.handover.verifyMin} min, then ${opts.keepOld ? "keep" : "close"} ${lane.pane}; detached jobs left alone: ${detached.map((d) => d.pid).join(",") || "none"}`);
+      return { code: 0, note };
+    }
     // an automatic start moves the lane at its idle moment: the old agent is frozen now, before the new session opens, so
     // no goal continuation, nudge or message starts a turn whose work the note would not carry; a turn that slipped in
     // between the check and the freeze thaws it again and the waiting loop goes on
@@ -656,7 +920,7 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
       emit(frozen ? `HANDOVER_FROZEN ${key} agent ${agent.pid} in ${lane.pane} at its idle moment (${Math.round((deps.clock.now() - opts.idle.since) / 1000)} s after the automatic start)` : `HANDOVER_FREEZE_FAIL ${key} agent ${agent.pid}: it stays told and quiet only`);
       const after = await captureTmux(deps.run, lane.pane);
       if (turnRunning(after) || QUESTION_MARK.test(after)) {
-        if (frozen) emit(deps.signal(agent.pid, "SIGCONT") ? `HANDOVER_THAWED ${key} agent ${agent.pid}: a turn started as it was frozen` : `HANDOVER_THAW_FAIL ${key} agent ${agent.pid}`);
+        if (frozen) for (const line of await thawAgent(deps, key, lane.pane, agent.pid, ": a turn started as it was frozen")) emit(line);
         if (!opts.idle.final) return { code: 2, retry: true };
         return refuse(`the lane stayed busy for ${opts.idle.waitedMin} min: a turn started as it was frozen`, { blocked: "busy" });
       }
@@ -688,7 +952,8 @@ const attempt = async (deps: LaneHandoverDeps, key: string, here: string, opts: 
     });
     return r;
   } finally {
-    if (!opts.idle) rmSync(lockFile, { force: true });
+    // the waiting loop of an automatic start holds the lock itself
+    if (lockedHere) rmSync(lockFile, { force: true });
   }
 };
 
@@ -727,6 +992,13 @@ export const laneHandover = async (input: LaneHandoverDeps, key: string, here: s
       if (!waiting) emit(`HANDOVER_WAIT_IDLE ${key}: a turn is running or a question is open; the move starts the moment the lane is idle (up to ${opts.waitIdleMin} min)`);
       for (;;) {
         await deps.clock.sleep(IDLE_POLL_MS);
+        // another run asks for the lane (the lead's --force, a new approval): this run steps aside, logs no rollover row and
+        // ends (the lock goes with it), and that run moves the lane itself
+        const taken = claimTakeover(deps, key);
+        if (taken) {
+          emit(`HANDOVER_STEPPED_ASIDE ${key}: the run of pid ${taken.pid} (${taken.approvedBy ?? "no approval"}${taken.force ? ", --force" : ""}) takes the lane over from this run, waiting since ${new Date(since).toISOString()}`);
+          return { code: 2 };
+        }
         if (deps.clock.now() >= until) break;
         const pane = (await deps.registry.read(key))?.pane;
         const screen = pane ? await captureTmux(deps.run, pane) : "";
@@ -776,15 +1048,15 @@ const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string
   if (reasons.length) return { reasons, session, ...(shown.account ? { account: shown.account } : {}) };
   emit(`HANDOVER_STATUS_OK ${pane} ${shown.model}${shown.thinking ? ` thinking ${shown.thinking}` : ""}`);
   if (facts.monitors.length) emit(`HANDOVER_MONITORS_OK ${facts.monitors.length} in ${pane} (session ${session})`);
-  // what the handover holds goes into the restatement before the new session writes, word for word, so it starts there
-  // instead of coming back in supplement rounds
-  if (!existsSync(understood)) writeFileSync(understood, seedRestatement(`${facts.lane.key}: what the new session understood`, UNDERSTOOD_HEADINGS, LANE_OWN, (t) => missingFrom(t, facts)));
+  // No restatement before the commit (owner Q476, 2026-11-03: since the note carries the owner's words word for word, 19
+  // handovers needed no supplement round, while the rewrite held the lane up to two minutes): the probe asks only for the
+  // ack, which shows the new session reads its pane and runs dori; the audit after the commit still checks what it holds.
   // the probe goes in once the new session's first turn (reading the note) has ended: typed into a running turn it is a
   // steering line among tool results, which a session read as the last line of the note and held (herdr QA 2026-11-03)
   for (; i < tries && turnRunning(await captureTmux(deps.run, pane)); i++) await deps.clock.sleep(POLL_MS);
   if (i >= tries) return { reasons: [`the first turn of ${pane} was still running after the verify time; the probe was not sent`], session };
   const id = deps.nonce();
-  if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: write what you understood to ${understood} (${UNDERSTOOD_HEADINGS.map((h) => `## ${h}`).join(", ")}; it already holds the note's quotes, decisions and tried fixes word for word: keep them, add yours), then run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
+  if (!(await sendVerified(deps.run, deps.clock, deps.config, pane, `[LEAD] ${PROBE} ${id}: once you have read the whole handover note, run dori handover ack ${id} --state ${deps.config.stateDir} and nothing else for this line.`))) return { reasons: [`the probe did not reach ${pane}`], session };
   emit(`HANDOVER_PROBE_SENT ${id} -> ${pane}`);
   let by: string | undefined;
   for (; i < tries; i++) {
@@ -794,21 +1066,12 @@ const verifyLane = async (deps: LaneHandoverDeps, facts: LaneFacts, pane: string
   }
   if (by === undefined) return { reasons: [`no ack for the probe ${id}`], session };
   if (by !== pane) return { reasons: [`the probe was acked from ${by || "an unknown pane"}, not ${pane}`], session };
-  // the new session says what it understood: a gap shows before the old session is gone. A gap is filled in, not rolled
-  // back: the left-out items go to it with the old log lines behind them and it restates; only a gap that outlasts the
-  // supplement rounds rolls back (it no longer takes in what it is given)
-  const gaps = await fillGaps({ clock: deps.clock, stateDir: deps.config.stateDir, nonce: deps.nonce, tell: (to, line) => tell(deps, to, line), ackedBy: (id) => ackedBy(deps.config.stateDir, id) },
-    { who: facts.lane.key, pane, understood, headings: UNDERSTOOD_HEADINGS, rounds: deps.config.handover.supplementRounds, oldLog: facts.oldLog, check: (t) => missingFrom(t, facts), emit });
-  const { supplements, text } = gaps;
-  if (gaps.reasons.length) return { reasons: gaps.reasons, session, supplements };
   // checked again before the old session goes: a monitor that ran at the first check can end before the move commits (a
   // remote tail whose ssh dropped with code 255 after its first lines, live 2026-10-20 23:51Z), and a new session is not
   // told when a monitor ends
   const stopped = facts.monitors.length ? missingMonitors(facts.monitors, readManifest(manifestPath(deps.config.sessionsDir, facts.cwd, session)), deps.alive, deps.home, deps.clock.now()) : [];
-  if (stopped.length) return { reasons: [`monitors stopped in ${pane} after the first check: ${stopped.join(", ")}`], session, supplements };
-  const asks = section(text, "Questions");
-  if (asks && !/^none\.?$/i.test(asks)) emit(`HANDOVER_QUESTIONS ${facts.lane.key}: ${asks.replace(/\s+/g, " ").slice(0, 400)} (the lead answers them in the new pane; the old log is ${facts.oldLog ?? "not found"})`);
-  return { reasons: [], session, supplements, ...(shown.account ? { account: shown.account } : {}) };
+  if (stopped.length) return { reasons: [`monitors stopped in ${pane} after the first check: ${stopped.join(", ")}`], session };
+  return { reasons: [], session, ...(shown.account ? { account: shown.account } : {}) };
 };
 
 // Only once the old session's local chains are gone may the new session restart them: two copies of one chain would run
@@ -837,6 +1100,14 @@ type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 type MoveContext = { readonly note: string; readonly at: string; readonly title: string; readonly emit: (line: string) => void; readonly steps: Step[]; readonly mark: (step: string, ok: boolean) => void; readonly accounts: { to?: string }; readonly supplements: Supplement[]; readonly frozen: boolean; readonly sizes: Mutable<Sizes> };
 
 const tell = (deps: LaneHandoverDeps, pane: string, text: string) => sendVerified(deps.run, deps.clock, deps.config, pane, text).catch(() => false);
+
+// A thawed agent goes on where it was: resumed, then checked to be its tty's running foreground job again, and brought back
+// to it when not (job-control.ts resumeAgent); the repair or its failure is a line of its own.
+const thawAgent = async (deps: LaneHandoverDeps, key: string, pane: string, pid: number, why = ""): Promise<string[]> => {
+  if (!deps.signal(pid, "SIGCONT")) return [`HANDOVER_THAW_FAIL ${key} agent ${pid}`];
+  const fg = await resumeAgent(deps, pane, pid);
+  return [`HANDOVER_THAWED ${key} agent ${pid}${why}`, ...(fg.startsWith("AGENT_RESUME") ? [fg] : [])];
+};
 
 export const LATE_LEAD_HEADING = "The lead's instructions that reached the old session after this note was written";
 
@@ -882,7 +1153,7 @@ export const recover = async (deps: LaneHandoverDeps, p: Pending, emit: (line: s
   const oldAlive = await agentAlive(deps.run, sessions, p.from);
   const newAlive = await agentAlive(deps.run, sessions, p.to);
   if (oldAlive) {
-    if (p.agentPid) deps.signal(p.agentPid, "SIGCONT");
+    if (p.agentPid) for (const line of await thawAgent(deps, p.key, p.from, p.agentPid)) emit(line);
     await pointLane(deps, p.key, p.to, p.from, `pane back to ${p.from}: interrupted handover repaired`, emit);
     const closed = newAlive ? await closeAoeSession(deps.run, p.to) : `${p.to} already gone`;
     await tell(deps, p.from, `[LEAD] The handover of ${p.key} was stopped before it finished. You stay the ${p.key} lane: carry on where you were.`);
@@ -912,7 +1183,7 @@ const moveLane = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, facts
     ctx.mark("open", true);
   } catch (e) {
     ctx.mark("open", false);
-    if (ctx.frozen && facts.agentPid) emit(deps.signal(facts.agentPid, "SIGCONT") ? `HANDOVER_THAWED ${lane.key} agent ${facts.agentPid}` : `HANDOVER_THAW_FAIL ${lane.key} agent ${facts.agentPid}`);
+    if (ctx.frozen && facts.agentPid) for (const line of await thawAgent(deps, lane.key, from.pane, facts.agentPid)) emit(line);
     emit(`HANDOVER_FAIL ${lane.key}: could not open the new session: ${e instanceof Error ? e.message : String(e)}; nothing moved, ${from.pane} stays the lane`);
     return { code: 3, note };
   }
@@ -942,12 +1213,12 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   const record = (result: string, reasons: readonly string[]) =>
     writeFileSync(note.replace(/\.md$/, ".result.json"), JSON.stringify({ at: iso(deps.clock), key: lane.key, from, to: pane, note, approvedBy: facts.approvedBy, signals: facts.signals, result, reasons, ...(Object.keys(ctx.sizes).length ? { sizes: ctx.sizes } : {}) }, null, 1));
   let frozen = ctx.frozen;
-  const thaw = (): void => {
-    if (frozen && facts.agentPid) emit(deps.signal(facts.agentPid, "SIGCONT") ? `HANDOVER_THAWED ${lane.key} agent ${facts.agentPid}` : `HANDOVER_THAW_FAIL ${lane.key} agent ${facts.agentPid}`);
+  const thaw = async (): Promise<void> => {
+    if (frozen && facts.agentPid) for (const line of await thawAgent(deps, lane.key, from.pane, facts.agentPid)) emit(line);
     frozen = false;
   };
   const discard = async (why: string): Promise<LaneHandoverResult> => {
-    thaw();
+    await thaw();
     const closed = await closeAoeSession(deps.run, pane);
     await tell(deps, from.pane, `[LEAD] Handover of ${lane.key} failed (${why}). You stay the ${lane.key} lane: carry on where you were.`);
     emit(`HANDOVER_ROLLED_BACK ${lane.key}: ${from.pane} stays the lane; new session ${pane}: ${closed}`);
@@ -1012,7 +1283,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   await keepSessions(deps, lane.key, facts.from.session, checked.session);
   rmSync(readyFile(config.stateDir, lane.key), { force: true });
   if (opts.keepOld) {
-    thaw();
+    await thaw();
     await tell(deps, from.pane, `[LEAD] Handover of ${lane.key} to ${pane} is done and checked. You are no longer the lane; stay idle until the lead closes you.`);
     await tell(deps, pane, `[LEAD] ${COMMITTED}: the handover is checked and the old session ${from.pane} stays open but idle; you are the ${lane.key} lane now. ${config.launchKeywords}: go on with step 5 of the note.`);
     if (facts.chains.length) await tell(deps, pane, `[LEAD] HANDOVER_CHAINS_KEPT: the old session ${from.pane} stays open, so its local chains (${facts.chains.map((c) => c.pid).join(", ")}) still run. Do not start them again.`);
@@ -1030,7 +1301,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
     for (const line of await endOldMonitors(deps, facts, [...kept, ...facts.chains].map((c) => c.pid))) emit(line);
     const ice = await freezePane(deps, from.pane, process.pid, [...kept, ...facts.chains].map((c) => c.pid)).catch((e: unknown) => ({ pids: [] as number[], agentPid: undefined, why: e instanceof Error ? e.message : String(e) }));
     mark("freeze", !!ice.agentPid);
-    if (!ice.agentPid) thaw();
+    if (!ice.agentPid) await thaw();
     const pids = kept.flatMap((c) => c.pids ?? [c.pid]);
     writeFrozen(config.stateDir, { pane: from.pane, aoeId: from.aoeId, at: iso(deps.clock), agentPid: ice.agentPid ?? 0, pids: ice.pids, keepFor: pids, to: pane, ...(from.session ? { session: from.session } : {}), ...(facts.oldLog ? { oldLog: facts.oldLog } : {}) });
     const list = kept.map((c) => `${c.cmd.slice(0, 60)}: ${(c.pids ?? [c.pid]).join(",")}`).join("; ");
@@ -1050,7 +1321,7 @@ const finishMove = async (deps: LaneHandoverDeps, opts: LaneHandoverOptions, fac
   emit(`HANDOVER_DONE ${lane.key} ${from.pane} -> ${pane}; closing ${from.pane}`);
   record("done", []);
   // resumed only to be closed: a stopped process does not act on the hangup
-  thaw();
+  await thaw();
   const closed = await closeAoeSession(deps.run, from.pane);
   const ok = isClosedLine(closed);
   mark("close", ok);

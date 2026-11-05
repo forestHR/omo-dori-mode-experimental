@@ -163,7 +163,7 @@ test("dori thread reply and dori send record a post in the lane's own thread, an
   const reply = await cli(["thread", "reply", `discord:${THREAD_ID}`, "결과 한 줄이야."]);
   expect(reply.out).toContain("POSTED 900");
   const sent = await cli(["send", "discord", "--to", THREAD_ID, "--text", "결과 두 줄째야.", "--no-typing"]);
-  expect(sent.out).toBe("SENT 900");
+  expect(sent.out.split(" ").slice(0, 2).join(" ")).toBe("SENT 900");
   await cli(["send", "discord", "--to", "1555211347338199112", "--text", "다른 데 올린 글.", "--no-typing"]);
   await cli(["send", "discord", "--to", THREAD_ID, "--text", "리드가 올린 글.", "--no-typing"], "lead-pane");
   expect(((await reg.read(lane.key))?.threadPosts ?? []).map((p) => p.text)).toEqual(["결과 한 줄이야.", "결과 두 줄째야."]);

@@ -48,6 +48,11 @@ export class Discord {
   // reply: the id of a message in the same channel this one answers (shown as a Discord reply; no ping to its author)
   // files: attachments of this one message (payload_json + files[n]); with files the text may be empty
   async send(channelId: string, content: string, typing = false, ping?: string, reply?: string, files: readonly DiscordFile[] = []): Promise<string> {
+    return (await this.post(channelId, content, typing, ping, reply, files)).id;
+  }
+
+  // send, with the content Discord answered the new message holds (dori send prints it: send-dedupe.ts sentLine)
+  async post(channelId: string, content: string, typing = false, ping?: string, reply?: string, files: readonly DiscordFile[] = []): Promise<{ id: string; content?: string }> {
     guardText(content);
     if (ping !== undefined && (ping.length === 0 || /[^0-9]/.test(ping))) throw new MessengerError("--ping takes a digits-only user id", 400);
     if (ping !== undefined && !content.includes(`<@${ping}>`)) content = `<@${ping}> ${content}`;
@@ -58,11 +63,12 @@ export class Discord {
       });
     }
     const payload = { ...(content || !files.length ? { content: guardText(content) } : {}), allowed_mentions: { parse: [], ...(ping !== undefined ? { users: [ping] } : {}) }, ...(reply !== undefined ? { message_reference: { message_id: reply, fail_if_not_exists: false } } : {}) };
-    if (!files.length) return (await this.call<{ id: string }>("POST", `/channels/${channelId}/messages`, payload)).id;
+    const posted = (m: { id: string; content?: unknown }) => ({ id: m.id, ...(typeof m.content === "string" ? { content: m.content } : {}) });
+    if (!files.length) return posted(await this.call<{ id: string; content?: unknown }>("POST", `/channels/${channelId}/messages`, payload));
     const form = new FormData();
     form.append("payload_json", JSON.stringify({ ...payload, attachments: files.map((f, id) => ({ id, filename: f.filename })) }));
     for (const [i, f] of files.entries()) form.append(`files[${i}]`, new Blob([f.bytes], { type: f.type }), f.filename);
-    return (await this.call<{ id: string }>("POST", `/channels/${channelId}/messages`, form)).id;
+    return posted(await this.call<{ id: string; content?: unknown }>("POST", `/channels/${channelId}/messages`, form));
   }
 
   async edit(channelId: string, messageId: string, content: string): Promise<void> {

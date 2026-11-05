@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -163,4 +163,76 @@ test("by hand, one file still goes outbox to inbox and an existing dest still ne
   expect((await run(["--replace", "mo", "deck.pdf", "yo", "axmvp/"])).code).toBe(0);
   expect(await run(["mo", "../yo/inbox/axmvp/deck.pdf", "za"])).toMatchObject({ code: 3, out: "RELAY_REFUSED path-escape\n" });
   expect(relayLog().map((r) => r.result)).toEqual(["ok", "refused", "ok", "refused"]);
+});
+
+test("a 3D package 12 folders deep is delivered; the 13th folder is set aside with the limit in its .why", async () => {
+  await serve(1);
+  const to = home("mo", "outbox", "to-yoodori");
+  const urdf = ["excavator-video", "01_3d_assets", "hr35_e7_model", "third_party", "hr35_description", "meshes", "collision"];
+  put(join(to, ...urdf, "boom.stl"), "boom");
+  const twelve = ["d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12"];
+  put(join(to, ...twelve, "deep.txt"), "deep");
+  put(join(to, ...twelve, "d13", "too.txt"), "too");
+  expect((await serve(2)).code).toBe(0);
+  expect(readFileSync(home("yo", "inbox", "from-moodori", ...urdf, "boom.stl"), "utf8")).toBe("boom");
+  expect(readFileSync(home("yo", "inbox", "from-moodori", ...twelve, "deep.txt"), "utf8")).toBe("deep");
+  expect(existsSync(home("yo", "inbox", "from-moodori", ...twelve, "d13"))).toBe(false);
+  const why = JSON.parse(readFileSync(join(to, ".failed", ...twelve, "d13.why"), "utf8"));
+  expect(why).toMatchObject({ reason: "path-too-deep", max_depth: 12, path: [...twelve, "d13"].join("/") });
+  expect(readFileSync(join(to, ".failed", ...twelve, "d13", "too.txt"), "utf8")).toBe("too");
+  expect(relayLog().filter((r) => r.result === "failed")).toHaveLength(1);
+});
+
+test("DORI_FILE_RELAY_MAX_DEPTH sets the limit", async () => {
+  await serve(1);
+  const to = home("mo", "outbox", "to-yoodori");
+  put(join(to, "a", "b", "ok.txt"), "ok");
+  put(join(to, "a", "b", "c", "no.txt"), "no");
+  expect((await serve(2, { DORI_FILE_RELAY_MAX_DEPTH: "2" })).code).toBe(0);
+  expect(readFileSync(home("yo", "inbox", "from-moodori", "a", "b", "ok.txt"), "utf8")).toBe("ok");
+  expect(JSON.parse(readFileSync(join(to, ".failed", "a", "b", "c.why"), "utf8"))).toMatchObject({ reason: "path-too-deep", max_depth: 2 });
+});
+
+test("a refusal that cannot be set aside is logged once, not on every scan, and set aside once it can be", async () => {
+  await serve(1);
+  const to = home("mo", "outbox", "to-yoodori");
+  writeFileSync(join(to, ".failed"), "in the way", { mode: 0o600 });
+  symlinkSync("/etc/passwd", join(to, "link"));
+  expect((await serve(3)).code).toBe(0);
+  const rows = relayLog().filter((r) => r.src === "mo:outbox/to-yoodori/link");
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ result: "failed", reason: "symlink" });
+  expect(rows[0].failed_move).toBeTruthy();
+  rmSync(join(to, ".failed"));
+  await serve(1);
+  expect(JSON.parse(readFileSync(join(to, ".failed", "link.why"), "utf8")).reason).toBe("symlink");
+});
+
+test("a file that keeps failing to deliver, with .failed in the way, is logged as failed once and set aside once it can be", async () => {
+  await serve(1);
+  const to = home("mo", "outbox", "to-yoodori");
+  writeFileSync(join(to, ".failed"), "in the way", { mode: 0o600 });
+  put(join(to, "locked.pdf"), "locked");
+  chmodSync(join(to, "locked.pdf"), 0o000); // the reader cannot open it: an error, not a refusal
+  expect((await serve(7)).code).toBe(0);
+  const rows = relayLog().filter((r) => r.src === "mo:outbox/to-yoodori/locked.pdf");
+  expect(rows.map((r) => r.result)).toEqual(["error", "error", "failed"]);
+  expect(rows[2].failed_move).toBeTruthy();
+  rmSync(join(to, ".failed"));
+  await serve(4);
+  expect(JSON.parse(readFileSync(join(to, ".failed", "locked.pdf.why"), "utf8")).reason).toStartWith("error x3");
+});
+
+test("a refusal whose .failed move error names a fresh destination each scan is still logged once", async () => {
+  await serve(1);
+  const to = home("mo", "outbox", "to-yoodori");
+  mkdirSync(join(to, ".failed"), { mode: 0o700 });
+  writeFileSync(join(to, ".failed", "link"), "earlier", { mode: 0o600 });
+  chmodSync(join(to, ".failed"), 0o500); // the move picks link-<time>-<random> and is denied
+  symlinkSync("/etc/passwd", join(to, "link"));
+  expect((await serve(3)).code).toBe(0);
+  expect(relayLog().filter((r) => r.src === "mo:outbox/to-yoodori/link")).toHaveLength(1);
+  chmodSync(join(to, ".failed"), 0o700);
+  await serve(1);
+  expect(readdirSync(join(to, ".failed")).filter((n) => n.startsWith("link-") && n.endsWith(".why"))).toHaveLength(1);
 });

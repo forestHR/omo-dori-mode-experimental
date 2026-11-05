@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { run } from "../src/run.ts";
 import { withState } from "./fakes.ts";
 import { DISCORD_FORM_SLACK, DISCORD_MESSAGE_MAX, type DiscordFile, discordMessageProblem } from "../src/messenger/upload-files.ts";
@@ -59,8 +60,8 @@ test("Discord CLI enables typing by default, skips it on request, and leaves edi
         "bun", "--preload", join(import.meta.dir, "fixtures/discord-send-preload.ts"), join(import.meta.dir, "../src/cli.ts"), "send", "discord", "--to", "channel", "--thread", "thread", "--text", "hello", ...extra]));
     }
     expect(results.map((r) => ({ code: r.code, out: r.out }))).toEqual([
-      { code: 0, out: "REQUEST typing\nREQUEST messages\nSENT fake-message" },
-      { code: 0, out: "REQUEST messages\nSENT fake-message" },
+      { code: 0, out: `REQUEST typing\nREQUEST messages\n${receipt("SENT", "fake-message", "hello")}` },
+      { code: 0, out: `REQUEST messages\n${receipt("SENT", "fake-message", "hello")}` },
       { code: 0, out: "REQUEST fake-message" },
     ]);
   } finally {
@@ -80,7 +81,7 @@ for (const [text, ping, content] of [
       const result = await run(["env", `DORI_CONFIG=${join(state.dir, "missing.json")}`, `DORI_STATE_DIR=${state.dir}`, `DORI_ENV_FILE=${join(state.dir, "missing.env")}`, "DORI_DISCORD_TOKEN=fake", `DORI_TEST_HTTP=${file}`,
         "bun", "--preload", join(import.meta.dir, "discord-cli-fake.ts"), join(import.meta.dir, "../src/cli.ts"), "send", "discord", "--to", "channel", "--thread", "thread", "--text", text, "--no-typing", ...(ping === undefined ? [] : ["--ping", ping])]);
       expect({ code: result.code, out: result.out, calls: JSON.parse(readFileSync(file, "utf8")).calls }).toEqual({
-        code: 0, out: "SENT 900", calls: [{ method: "POST", path: "/channels/thread/messages", body: { content, allowed_mentions: { parse: [], ...(ping === undefined ? {} : { users: [ping] }) } } }],
+        code: 0, out: receipt("SENT", "900", content), calls: [{ method: "POST", path: "/channels/thread/messages", body: { content, allowed_mentions: { parse: [], ...(ping === undefined ? {} : { users: [ping] }) } } }],
       });
     } finally {
       state.done();
@@ -98,7 +99,8 @@ test("Discord CLI sends to DORI_DISCORD_API when it is set (a Dori behind an egr
     const file = join(state.dir, "http.json");
     const direct = await run([...base, `DORI_STATE_DIR=${join(state.dir, "direct")}`, `DORI_TEST_HTTP=${file}`, "bun", "--preload", join(import.meta.dir, "discord-cli-fake.ts"), join(import.meta.dir, "../src/cli.ts"), "send", "discord", "--to", "channel", "--text", "hello", "--no-typing"]);
     expect({ gated: gated.out, seen, direct: direct.out, calls: JSON.parse(readFileSync(file, "utf8")).calls.map((c: { path: string }) => c.path) }).toEqual({
-      gated: "SENT 901", seen: ["POST /api/v10/channels/channel/messages Bot fake"], direct: "SENT 900", calls: ["/channels/channel/messages"],
+      // this fake answers no content: the line says so instead of guessing
+      gated: "SENT 901 content=not-returned", seen: ["POST /api/v10/channels/channel/messages Bot fake"], direct: receipt("SENT", "900", "hello"), calls: ["/channels/channel/messages"],
     });
   } finally {
     server.stop(true);
@@ -164,7 +166,7 @@ test("send --text-file posts the file's text with its real line breaks, like --t
     const file = join(state.dir, "post.txt");
     await Bun.write(file, "E7 끝났어\n남은 건 없어\n");
     const sent = await sendCli(state.dir, ["send", "discord", "--to", "channel", "--no-typing", "--text-file", file]);
-    expect({ code: sent.code, out: sent.out, posted: sent.posted }).toEqual({ code: 0, out: "SENT 900", posted: ["E7 끝났어\n남은 건 없어"] });
+    expect({ code: sent.code, out: sent.out, posted: sent.posted }).toEqual({ code: 0, out: receipt("SENT", "900", "E7 끝났어\n남은 건 없어"), posted: ["E7 끝났어\n남은 건 없어"] });
     const both = await sendCli(state.dir, ["send", "discord", "--to", "channel", "--no-typing", "--text-file", file, "--text", "x"]);
     expect(both.code).toBe(1);
   } finally {
@@ -182,7 +184,8 @@ const discordServer = (status = 200) => {
     posts.push({ path, body: await req.json() as Record<string, unknown> });
     // a slow Discord keeps two senders started together inside one another's send
     await Bun.sleep(300);
-    return status === 200 ? Response.json({ id: String(posts.length) }) : new Response("{}", { status });
+    // as Discord does: the created message comes back with the content it holds
+    return status === 200 ? Response.json({ id: String(posts.length), content: posts.at(-1)?.body.content }) : new Response("{}", { status });
   } });
   return { posts, server, stop: () => server.stop(true) };
 };
@@ -191,13 +194,19 @@ const sendTo = (dir: string, port: number | undefined, args: readonly string[]) 
     `DORI_DISCORD_API=http://127.0.0.1:${port}/api/v10`, "bun", join(import.meta.dir, "../src/cli.ts"), "send", "discord", "--no-typing", ...args]);
 const SAME = ["--to", "1561963113488842792", "--reply", "1561976021270396959", "--text", "시험 레인 열게"];
 
-test("the same send twice posts once; the second prints the first message's id and exits 0", async () => {
+// the receipt a post prints: the content the API answered, not the text the caller meant
+const receipt = (verb: string, id: string, content: string) =>
+  `${verb} ${id} len=${[...content].length} sha=${createHash("sha256").update(content).digest("hex").slice(0, 8)} first=${JSON.stringify([...content].slice(0, 40).join(""))}`;
+const word2 = (out: string) => out.split(" ").slice(0, 2).join(" ");
+const PLACE = "discord:1561963113488842792";
+
+test("the same send twice posts once; the second names the place and the first message's id and exits 3", async () => {
   const state = withState();
   const d = discordServer();
   try {
     const first = await sendTo(state.dir, d.server.port, SAME);
     const second = await sendTo(state.dir, d.server.port, SAME);
-    expect({ first: first.out, code: second.code, second: second.out.split(":")[0], posts: d.posts.length }).toEqual({ first: "SENT 1", code: 0, second: "SEND_DUPLICATE 1", posts: 1 });
+    expect({ first: first.out, code: second.code, second: second.out.split(": ")[0], posts: d.posts.length }).toEqual({ first: receipt("SENT", "1", "시험 레인 열게"), code: 3, second: `SEND_DUPLICATE ${PLACE} 1`, posts: 1 });
   } finally {
     d.stop();
     state.done();
@@ -209,7 +218,7 @@ test("two identical sends started together post once and both name that one mess
   const d = discordServer();
   try {
     const both = await Promise.all([sendTo(state.dir, d.server.port, SAME), sendTo(state.dir, d.server.port, SAME)]);
-    expect({ codes: both.map((r) => r.code), outs: both.map((r) => r.out.split(":")[0]).sort(), posts: d.posts.length }).toEqual({ codes: [0, 0], outs: ["SEND_DUPLICATE 1", "SENT 1"], posts: 1 });
+    expect({ codes: both.map((r) => r.code).sort(), outs: both.map((r) => word2(r.out.split(": ")[0] ?? "")).sort(), posts: d.posts.length }).toEqual({ codes: [0, 3], outs: ["SEND_DUPLICATE discord:1561963113488842792", "SENT 1"], posts: 1 });
   } finally {
     d.stop();
     state.done();
@@ -221,10 +230,144 @@ test("another text, place or reply target, and --again, each post", async () => 
   const d = discordServer();
   try {
     const outs = [];
-    for (const args of [SAME, [...SAME.slice(0, 5), "다른 글"], ["--to", "1561963113488842790", ...SAME.slice(2)], [...SAME.slice(0, 2), "--reply", "1561976021270396950", ...SAME.slice(4)], [...SAME, "--again"]]) outs.push((await sendTo(state.dir, d.server.port, args)).out);
+    for (const args of [SAME, [...SAME.slice(0, 5), "다른 글"], ["--to", "1561963113488842790", ...SAME.slice(2)], [...SAME.slice(0, 2), "--reply", "1561976021270396950", ...SAME.slice(4)], [...SAME, "--again"]]) outs.push(word2((await sendTo(state.dir, d.server.port, args)).out));
     expect({ outs, posts: d.posts.length }).toEqual({ outs: ["SENT 1", "SENT 2", "SENT 3", "SENT 4", "SENT 5"], posts: 5 });
   } finally {
     d.stop();
+    state.done();
+  }
+});
+
+// https://github.com/sisyphuslabs/dori-superagent/issues/88: a call refused by a hook left the earlier text in a kernel
+// variable, a later call sent that variable 7 and 15 minutes after the first post, and the new id was taken as proof the
+// new text went out. The repeat window was 10 minutes, so both re-posts went through.
+const ageMarks = (dir: string, minutes: number) => {
+  for (const name of readdirSync(join(dir, "sent")).filter((n) => n.endsWith(".json"))) {
+    const path = join(dir, "sent", name);
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), at: Date.now() - minutes * 60_000 }));
+  }
+};
+
+test("the text of the place's last post is a repeat at any age (SEND_DUPLICATE, exit 3); --again posts it", async () => {
+  const state = withState();
+  const d = discordServer();
+  try {
+    await sendTo(state.dir, d.server.port, SAME);
+    ageMarks(state.dir, 7 * 24 * 60);
+    const later = await sendTo(state.dir, d.server.port, SAME);
+    const again = await sendTo(state.dir, d.server.port, [...SAME, "--again"]);
+    expect({ code: later.code, out: later.out.split(": ")[0], again: [again.code, word2(again.out)], posts: d.posts.length }).toEqual({ code: 3, out: `SEND_DUPLICATE ${PLACE} 1`, again: [0, "SENT 2"], posts: 2 });
+  } finally {
+    d.stop();
+    state.done();
+  }
+});
+
+// review 8 of #338: "hello" with --ping and "<@ID> hello" with the same --ping go out as one message, so the second is
+// the repeat
+test("the same outgoing message from equivalent inputs (a --ping already in the text) is the repeat", async () => {
+  const state = withState();
+  const d = discordServer();
+  const to = ["--to", "1561963113488842792", "--ping", "1561000000000000001"];
+  try {
+    await sendTo(state.dir, d.server.port, [...to, "--text", "hello"]);
+    ageMarks(state.dir, 11);
+    const same = await sendTo(state.dir, d.server.port, [...to, "--text", "<@1561000000000000001> hello"]);
+    expect({ code: same.code, out: same.out.split(": ")[0], posts: d.posts.length }).toEqual({ code: 3, out: `SEND_DUPLICATE ${PLACE} 1`, posts: 1 });
+  } finally {
+    d.stop();
+    state.done();
+  }
+});
+
+// review 10 of #338: thread reply posts its text without emoji, so its repeat check keys that text: "Finished 🎉" in a
+// thread and then "Finished" to the same thread is one message, within the 10 minutes and after them
+test("a thread reply with emoji and the same text without them, sent to that thread, is the repeat at any age", async () => {
+  const state = withState();
+  try {
+    const ref = "discord:300000000000000003";
+    const reply = await sendCli(state.dir, ["thread", "reply", ref, "Finished \u{1F389}"]);
+    const soon = await sendCli(state.dir, ["send", "discord", "--to", "300000000000000003", "--no-typing", "--text", "Finished"]);
+    ageMarks(state.dir, 11);
+    const later = await sendCli(state.dir, ["thread", "reply", ref, "Finished"]);
+    expect({ codes: [reply.code, soon.code, later.code], soon: soon.out.split(": ")[0], later: later.out.split(": ")[0], posted: later.posted }).toEqual({
+      codes: [0, 3, 3], soon: "SEND_DUPLICATE discord:300000000000000003 900", later: "SEND_DUPLICATE discord:300000000000000003 900", posted: ["Finished"],
+    });
+  } finally {
+    state.done();
+  }
+});
+
+// review 10 of #338: thread reply sets the thread's status after its post; a status step held past the claim's minute
+// must not let the same reply post again, so the post is recorded before the status step starts
+test("a thread reply whose status step is held still counts as posted: the same reply meanwhile is the repeat", async () => {
+  const state = withState();
+  const posts: string[] = [];
+  let inStatus: () => void = () => {};
+  const statusHeld = new Promise<void>((r) => (inStatus = r));
+  let release: () => void = () => {};
+  const released = new Promise<void>((r) => (release = r));
+  let heldOne = false;
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
+    const path = new URL(req.url).pathname;
+    if (req.method === "POST" && path.endsWith("/messages")) {
+      const body = (await req.json()) as { content: string };
+      posts.push(body.content);
+      return Response.json({ id: String(posts.length), content: body.content });
+    }
+    // the first command's status step reads the thread first: that one read is held until the test lets it go, and the
+    // test goes on only once the first command is inside it (its post answered, its status step started)
+    if (req.method === "GET" && posts.length && !heldOne) {
+      heldOne = true;
+      inStatus();
+      await released;
+    }
+    return Response.json({});
+  } });
+  const reply = () => run(["env", `DORI_CONFIG=${join(state.dir, "missing.json")}`, `DORI_STATE_DIR=${state.dir}`, `DORI_ENV_FILE=${join(state.dir, "missing.env")}`, "DORI_DISCORD_TOKEN=fake",
+    `DORI_DISCORD_API=http://127.0.0.1:${server.port}/api/v10`, "bun", join(import.meta.dir, "../src/cli.ts"), "thread", "reply", "discord:300000000000000004", "same words"]);
+  try {
+    const first = reply();
+    await statusHeld;
+    // the first command is past its post and inside its status step; its claim is now older than the takeover minute
+    ageMarks(state.dir, 2);
+    const second = await reply();
+    release();
+    await first;
+    expect({ code: second.code, out: second.out.split(": ")[0], posts }).toEqual({ code: 3, out: "SEND_DUPLICATE discord:300000000000000004 1", posts: ["same words"] });
+  } finally {
+    release();
+    server.stop(true);
+    state.done();
+  }
+});
+
+test("an older text after the 10 minutes is no repeat once another post came after it; within them it still is", async () => {
+  const state = withState();
+  const d = discordServer();
+  const other = [...SAME.slice(0, 5), "다른 글"];
+  try {
+    const outs = [];
+    for (const args of [SAME, other]) outs.push(word2((await sendTo(state.dir, d.server.port, args)).out));
+    const soon = await sendTo(state.dir, d.server.port, SAME);
+    ageMarks(state.dir, 11);
+    outs.push(word2((await sendTo(state.dir, d.server.port, SAME)).out));
+    expect({ outs, soon: [soon.code, soon.out.split(": ")[0]], posts: d.posts.length }).toEqual({ outs: ["SENT 1", "SENT 2", "SENT 3"], soon: [3, `SEND_DUPLICATE ${PLACE} 1`], posts: 3 });
+  } finally {
+    d.stop();
+    state.done();
+  }
+});
+
+test("SENT prints the length, sha and start of the content the API answered, not of the text asked for", async () => {
+  const state = withState();
+  const long = `${"가".repeat(45)} "q"\nline`;
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ id: "1566900000000000007", content: long }) });
+  try {
+    const r = await sendTo(state.dir, server.port, ["--to", "1", "--text", "what the caller meant"]);
+    expect({ code: r.code, out: r.out }).toEqual({ code: 0, out: `SENT 1566900000000000007 len=54 sha=${createHash("sha256").update(long).digest("hex").slice(0, 8)} first="${"가".repeat(40)}"` });
+  } finally {
+    server.stop(true);
     state.done();
   }
 });
@@ -251,7 +394,7 @@ test("a send that failed leaves no mark, so sending it again goes out", async ()
   try {
     const failed = await sendTo(state.dir, down.server.port, SAME);
     const retry = await sendTo(state.dir, up.server.port, SAME);
-    expect({ failed: failed.code, retry: retry.out, posts: up.posts.length }).toEqual({ failed: 1, retry: "SENT 1", posts: 1 });
+    expect({ failed: failed.code, retry: retry.out, posts: up.posts.length }).toEqual({ failed: 1, retry: receipt("SENT", "1", "시험 레인 열게"), posts: 1 });
   } finally {
     down.stop();
     up.stop();
@@ -281,8 +424,10 @@ test("thread reply twice posts once, a done with the same words is not posted ag
     const again = await sendCli(state.dir, ["thread", "reply", ref, "끝났어"]);
     const done = await sendCli(state.dir, ["thread", "done", ref, "끝났어"]);
     const send = await sendCli(state.dir, ["send", "discord", "--to", "300000000000000003", "--no-typing", "--text", "끝났어"]);
-    expect({ outs: [reply.out, again.out.split(":")[0], done.out.split(":")[0], done.out.endsWith(" THREAD_DONE"), send.out.split(":")[0]], posted: send.posted }).toEqual({
-      outs: ["POSTED 900", "SEND_DUPLICATE 900", "SEND_DUPLICATE 900", true, "SEND_DUPLICATE 900"], posted: ["끝났어"],
+    expect({ outs: [reply.out, again.out.split(": ")[0], done.out.split(": ")[0], done.out.endsWith(" THREAD_DONE"), send.out.split(": ")[0]], codes: [reply.code, again.code, done.code, send.code], posted: send.posted }).toEqual({
+      outs: [receipt("POSTED", "900", "끝났어"), "SEND_DUPLICATE discord:300000000000000003 900", "SEND_DUPLICATE discord:300000000000000003 900", true, "SEND_DUPLICATE discord:300000000000000003 900"],
+      // a done with the words of the last reply still closes the thread, so it exits 0; reply and send post nothing and say so
+      codes: [0, 3, 0, 3], posted: ["끝났어"],
     });
   } finally {
     state.done();
@@ -334,7 +479,8 @@ for (const [name, args, parent, out] of [
   test(`${name} is sent`, async () => {
     const state = withState();
     try {
-      expect(await speechCli(state.dir, args, parent)).toMatchObject({ code: 0, out, refused: false, posted: [args.at(-1)] });
+      const r = await speechCli(state.dir, args, parent);
+      expect({ ...r, out: word2(r.out) }).toMatchObject({ code: 0, out, refused: false, posted: [args.at(-1)] });
     } finally {
       state.done();
     }
@@ -365,7 +511,7 @@ const fakeSlack = (complete = 200, during: { upload?: () => void } = {}) => {
       if (path === "/api/files.getUploadURLExternal") return Response.json({ ok: true, upload_url: `http://127.0.0.1:${port}/up/${++slots}`, file_id: `F${slots}` });
       if (path === "/api/files.completeUploadExternal") during.upload?.();
       if (path === "/api/files.completeUploadExternal") return complete === 200 ? Response.json({ ok: true, files: body.files }) : new Response("unavailable", { status: complete });
-      if (path === "/api/chat.postMessage") return Response.json({ ok: true, channel: body.channel, ts: "1700000100.000100" });
+      if (path === "/api/chat.postMessage") return Response.json({ ok: true, channel: body.channel, ts: "1700000100.000100", message: { text: body.text } });
       if (path === "/api/reactions.remove") return Response.json({ ok: true });
       return Response.json({ ok: false, error: "unknown_method" });
     },
@@ -376,6 +522,24 @@ const fakeSlack = (complete = 200, during: { upload?: () => void } = {}) => {
 const slackCli = (dir: string, port: number | undefined, args: readonly string[]) =>
   run(["env", `DORI_CONFIG=${join(dir, "missing.json")}`, `DORI_STATE_DIR=${dir}`, `DORI_ENV_FILE=${join(dir, "missing.env")}`, "DORI_SLACK_TOKEN=xoxb-fake", "DORI_DISCORD_TOKEN=fake", `DORI_SLACK_API=http://127.0.0.1:${port}/api`,
     "bun", join(import.meta.dir, "../src/cli.ts"), "send", ...args]);
+
+test("slack: SENT prints the text Slack answered; the channel's last text again is a repeat at any age, another thread is another place", async () => {
+  const state = withState();
+  const { calls, server } = fakeSlack();
+  try {
+    const post = ["slack", "--to", "C1", "--text", "배포 끝났어"];
+    const first = await slackCli(state.dir, server.port, post);
+    ageMarks(state.dir, 60);
+    const later = await slackCli(state.dir, server.port, post);
+    const thread = await slackCli(state.dir, server.port, [...post, "--thread", "1700000000.000001"]);
+    expect({ outs: [first.out, later.out.split(": ")[0], word2(thread.out)], codes: [first.code, later.code, thread.code], posts: calls.filter((c) => c.path === "/api/chat.postMessage").length }).toEqual({
+      outs: [receipt("SENT", "1700000100.000100", "배포 끝났어"), "SEND_DUPLICATE slack:C1 1700000100.000100", "SENT 1700000100.000100"], codes: [0, 3, 0], posts: 2,
+    });
+  } finally {
+    server.stop(true);
+    state.done();
+  }
+});
 
 test("send slack --file uploads every file to its own URL, then shares them as one message with the text in the thread", async () => {
   const during: { upload?: () => void } = {};
@@ -403,7 +567,7 @@ test("send slack --file uploads every file to its own URL, then shares them as o
     const bare = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--file", join(state.dir, "demo.mp4")]);
     const text = await slackCli(state.dir, server.port, ["slack", "--to", "C1", "--thread", "1700000000.000001", "--text", "자료 올렸어"]);
     expect({ bare: bare.out, share: calls[8]?.body, text: text.out, after: calls.slice(9) }).toEqual({
-      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: "SENT 1700000100.000100", after: [
+      bare: "SENT F3", share: { files: [{ id: "F3", title: "demo.mp4" }], channel_id: "C1" }, text: receipt("SENT", "1700000100.000100", "자료 올렸어"), after: [
         { path: "/api/chat.postMessage", body: { channel: "C1", text: "자료 올렸어", thread_ts: "1700000000.000001" } },
       ],
     });
@@ -489,7 +653,7 @@ test("send discord --file posts the text and every file as one multipart message
     const r = await fileCli(state.dir, ["send", "discord", "--to", "channel", "--thread", "thread", "--no-typing", "--text", "도면이야", "--reply", "1561976021270396959", "--file", png, "--file", pdf]);
     const bare = await fileCli(state.dir, ["send", "discord", "--to", "channel", "--no-typing", "--file", png]);
     expect({ code: r.code, out: r.out, bare: bare.out, posts: r.posts.concat(bare.posts.slice(1)) }).toEqual({
-      code: 0, out: "SENT 900", bare: "SENT 900", posts: [
+      code: 0, out: receipt("SENT", "900", "도면이야"), bare: receipt("SENT", "900", ""), posts: [
         {
           method: "POST", path: "/channels/thread/messages",
           body: { content: "도면이야", allowed_mentions: { parse: [] }, message_reference: { message_id: "1561976021270396959", fail_if_not_exists: false }, attachments: [{ id: 0, filename: "drawing.png" }, { id: 1, filename: "plan.pdf" }] },
@@ -512,7 +676,7 @@ test("thread reply --file posts the files in the thread with the text, or alone"
     const bare = await fileCli(state.dir, ["thread", "reply", "discord:300000000000000003", "--file", png]);
     const shape = (p: { path: string; body: Record<string, unknown>; files?: unknown[] } | undefined) => ({ path: p?.path, content: p?.body.content, attachments: p?.body.attachments, files: p?.files?.length });
     expect({ outs: [r.code, r.out, bare.code, bare.out], posts: bare.posts.map(shape) }).toEqual({
-      outs: [0, "POSTED 900", 0, "POSTED 900"], posts: [
+      outs: [0, receipt("POSTED", "900", "그림 올렸어"), 0, receipt("POSTED", "900", "")], posts: [
         { path: "/channels/300000000000000003/messages", content: "그림 올렸어", attachments: [{ id: 0, filename: "drawing.png" }], files: 1 },
         { path: "/channels/300000000000000003/messages", content: undefined, attachments: [{ id: 0, filename: "drawing.png" }], files: 1 },
       ],
@@ -528,13 +692,13 @@ test("the same text and files again is a repeat (SEND_DUPLICATE); other bytes un
     const png = join(state.dir, "drawing.png");
     writeFileSync(png, "png bytes");
     const args = ["send", "discord", "--to", "channel", "--no-typing", "--text", "도면이야", "--file", png];
-    const outs = [(await fileCli(state.dir, args)).out, (await fileCli(state.dir, args)).out.split(":")[0]];
+    const outs = [(await fileCli(state.dir, args)).out, (await fileCli(state.dir, args)).out.split(": ")[0]];
     outs.push((await fileCli(state.dir, ["thread", "reply", "discord:300000000000000003", "도면이야", "--file", png])).out);
-    outs.push((await fileCli(state.dir, ["thread", "reply", "discord:300000000000000003", "도면이야", "--file", png])).out.split(":")[0]);
+    outs.push((await fileCli(state.dir, ["thread", "reply", "discord:300000000000000003", "도면이야", "--file", png])).out.split(": ")[0]);
     writeFileSync(png, "new png bytes");
     outs.push((await fileCli(state.dir, args)).out);
     const last = await fileCli(state.dir, args.slice(0, -2));
-    expect({ outs: [...outs, last.out], posts: last.posts.length }).toEqual({ outs: ["SENT 900", "SEND_DUPLICATE 900", "POSTED 900", "SEND_DUPLICATE 900", "SENT 900", "SENT 900"], posts: 4 });
+    expect({ outs: [...outs, last.out], posts: last.posts.length }).toEqual({ outs: [receipt("SENT", "900", "도면이야"), "SEND_DUPLICATE discord:channel 900", receipt("POSTED", "900", "도면이야"), "SEND_DUPLICATE discord:300000000000000003 900", receipt("SENT", "900", "도면이야"), receipt("SENT", "900", "도면이야")], posts: 4 });
   } finally {
     state.done();
   }

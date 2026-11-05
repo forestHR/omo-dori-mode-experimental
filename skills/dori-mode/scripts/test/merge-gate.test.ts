@@ -349,13 +349,13 @@ test("a nonzero exit with empty stderr names its exit code, never its unmasked s
 });
 
 
-// dori review's commit checks (dori-superagent #44 https://github.com/sisyphuslabs/dori-superagent/pull/44 and #57
-// https://github.com/sisyphuslabs/dori-superagent/issues/57) run before the tests: a refusal runs no test and no reviewer
+// dori review's commit checks (dori-superagent #44 https://github.com/sisyphuslabs/dori-superagent/pull/44) run before
+// the tests: a refusal runs no test and no reviewer
 test("a source fix with no test is refused before the tests, and takes back an earlier pass at that head", async () => {
   const w = world();
   const d = deps(w);
   await reviewPr(d, PR, { dir: DIR });
-  w.commits = [{ sha: A, subject: "Fix: count" }];
+  w.commits = [{ sha: A, subject: "fix: count" }];
   const before = w.calls.length;
   await expect(reviewPr(d, PR, { dir: DIR })).rejects.toThrow(/^REVIEW_CHECKS_FAILED acme\/app#7 head=aaaaaaaaaaaa: fix commit aaaaaaaaaaaa changes source and no commit of the PR adds or changes a test/);
   expect(w.calls.slice(before).some((c) => c[0] === "bun" || c[0] === "fake-reviewer")).toBe(false);

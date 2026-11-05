@@ -7,6 +7,7 @@ import { type DoriConfig, defaultConfig } from "../src/config.ts";
 import type { FlowDeps } from "../src/done-flow.ts";
 import { Registry } from "../src/registry.ts";
 import type { Clock, Ran, Runner } from "../src/run.ts";
+import { duplicateLine, SEND_DUPLICATE_EXIT } from "../src/send-dedupe.ts";
 
 // A launch adds nvm's node and the agent's pi to the PATH aoe add runs with when the caller's PATH lacks them (a systemd
 // unit's bare PATH, as dori watch runs a lane's Done command). A test that checks what aoe add got sets PATH to what the
@@ -53,10 +54,14 @@ export type World = {
   // ps -A -o pid=,ppid=,command= ("pid ppid command" lines; asked with stat= the fake adds state S, as the host prints it)
   // and ps -o lstart= (the agent's start) as the host would print them
   ps: string;
+  // cat /proc/<pid>/cmdline: the arguments a pid runs with, NUL-separated (null: unreadable); default its ps command's words
+  cmdlines?: Record<number, readonly string[] | null>;
   agentStart: string;
   // herdr panes the fake server does not have (pane get fails), and those where no agent runs any more (a bare shell)
   herdrGone?: string[];
   herdrDead?: string[];
+  // what herdr pane process-info names in front of a pane (null: the lookup fails); default the agent, or -bash once dead
+  herdrFront?: Record<string, readonly { name?: string; argv?: string[] }[] | null>;
   // herdr pane run starts the agent (it leaves herdrDead and draws its own screen) unless herdrNoStart
   herdrNoStart?: boolean;
 };
@@ -100,7 +105,9 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
     if (w.herdrGone?.includes(pane)) return { code: 1, out: JSON.stringify({ error: { code: "pane_not_found", message: `pane ${pane} not found` } }), err: "" };
     // herdr names the agent it detects in a pane and leaves the field out over a bare shell
     if (a2 === "get") return ok(JSON.stringify({ result: { pane: { pane_id: pane, tab_id: `${pane.split(":")[0]}:t-${pane.split(":")[1] ?? ""}`, ...(w.herdrDead?.includes(pane) ? {} : { agent: "claude", agent_status: "idle" }) } } }));
-    const fg = w.herdrDead?.includes(pane) ? [{ pid: 4000, cmdline: "-bash" }] : [{ pid: 4001, cmdline: "omo --model m" }];
+    const front = w.herdrFront?.[pane];
+    if (front === null) return { code: 1, out: "", err: "herdr down" };
+    const fg = front ?? (w.herdrDead?.includes(pane) ? [{ pid: 4000, name: "bash", argv: ["-bash"], cmdline: "-bash" }] : [{ pid: 4001, name: "omo", argv: ["omo", "--model", "m"], cmdline: "omo --model m" }]);
     return ok(JSON.stringify({ result: { process_info: { pane_id: pane, shell_pid: 4000, foreground_processes: fg } } }));
   }
   if (cmd === "herdr" && a1 === "tab" && a2 === "get") return ok(JSON.stringify({ result: { tab: { tab_id: argv[3], pane_count: 1 } } }));
@@ -141,6 +148,8 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
   if (cmd === "gh" && a1 === "pr") return ok(JSON.stringify({ state: w.prState, headRefOid: "f".repeat(40), mergedAt: w.prState === "MERGED" ? "2026-01-01T11:00:00Z" : null, mergeCommit: w.prState === "MERGED" ? { oid: "abc1234567890" } : null }));
   if (cmd === "gh" && a1 === "issue") return ok(JSON.stringify({ state: w.issueState }));
   if (cmd === "notify") return ok();
+  // a thread hook (dori thread reply) whose text is already the thread's last post: nothing posted, exit 3
+  if (cmd === "repeat-hook") return { code: SEND_DUPLICATE_EXIT, out: duplicateLine(argv[1] ?? "", { id: "900", ageMs: 60_000, last: true }), err: "" };
   if (cmd === "pwsh" && argv.includes("$PSVersionTable.PSVersion.ToString()")) return ok("7.4.0");
   if (cmd === "powershell" && argv.includes("-Command")) return ok(JSON.stringify([
     { ProcessId: 4000, ParentProcessId: 1, CommandLine: "pwsh.exe", ExecutablePath: "pwsh" },
@@ -148,8 +157,15 @@ export const fakeRunner = (w: World): Runner => async (argv, opts) => {
     const row = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
     return row && Number(row[1]) !== 4000 ? [{ ProcessId: Number(row[1]), ParentProcessId: Number(row[2]), CommandLine: row[3] ?? "" }] : [];
   })]));
-  if (cmd === "ps" && a1 === "-A") return ok(argv.some((a) => a.includes("stat=")) ? w.ps.replace(/^(\s*\d+\s+\d+)\s+/gm, "$1 S ") : w.ps);
+  if (cmd === "ps" && a1 === "-A") return ok(argv.some((a) => a.includes("stat=")) ? w.ps.replace(/^(\s*\d+\s+\d+)\s+/gm, "$1 S+ ") : w.ps);
   if (cmd === "ps" && argv.includes("lstart=")) return ok(w.agentStart);
+  const proc = cmd === "cat" ? /^\/proc\/(\d+)\/cmdline$/.exec(a1 ?? "") : null;
+  if (proc) {
+    const pid = Number(proc[1]);
+    const row = w.ps.split("\n").map((l) => /^\s*(\d+)\s+\d+\s+(.*)$/.exec(l)).find((r) => Number(r?.[1]) === pid);
+    const args = w.cmdlines && pid in w.cmdlines ? w.cmdlines[pid] : row ? (row[2] ?? "").split(/\s+/) : null;
+    return args ? ok(`${args.join("\0")}\0`) : { code: 1, out: "", err: `cat: /proc/${pid}/cmdline: No such file or directory` };
+  }
   return { code: 1, out: "", err: `unexpected ${argv.join(" ")}` };
 };
 

@@ -117,16 +117,20 @@ export const firstCommitted = async (run: Runner, file: string): Promise<Map<str
 
 // When each directive entered the ledger: for a fork entry its first commit into either ledger file (the earlier of the
 // two; a Dori reads the fork ledger only as committed), never before the start of its date (a bare YYYY-MM-DD is read as
-// the start of that day in KST, the earliest reading). A local entry has its date only: the local ledger is read live and
-// committed later, often in batches (2026-10-24 436e08d committed what was added 10-21..24). The earliest evidence wins,
-// so an entry is never later than the ledger shows it.
+// the start of that day in KST, the earliest reading). A local entry is read live and committed later, often in batches
+// (2026-10-24 436e08d committed what was added 10-21..24), so its commits say nothing; it cannot enter before the owner
+// said it, so the earliest message its source links (the last id of a discord.com/channels/<guild>/<channel>/<message>
+// link, from its snowflake) counts when it is later than the start of its date. No link: the date only. The earliest
+// evidence wins, so an entry is never later than the ledger shows it.
 export const enteredAt = async (deps: Pick<FlowDeps, "run" | "config">, ledger: Ledger): Promise<Map<string, number>> => {
   const seen = await Promise.all([deps.config.directives.common, deps.config.directives.local].map((f) => firstCommitted(deps.run, f)));
   const out = new Map<string, number>();
   for (const e of ledger.entries) {
     const day = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(e.date) ? `${e.date}T00:00:00+09:00` : e.date);
     const commits = e.layer === "common" ? seen.flatMap((m) => (m.has(e.id) ? [m.get(e.id) as number] : [])) : [];
-    const at = commits.length ? Math.max(day, Math.min(...commits)) : day;
+    const said = e.layer === "common" ? [] : [...e.source.matchAll(/discord(?:app)?\.com\/channels\/[^/\s]+\/\d+\/(\d{15,})/g)].map((m) => snowflakeMs(m[1] ?? "")).filter((t) => !Number.isNaN(t));
+    const evidence = commits.length ? commits : said;
+    const at = evidence.length ? Math.max(day, Math.min(...evidence)) : day;
     if (!Number.isNaN(at)) out.set(e.id, at);
   }
   return out;

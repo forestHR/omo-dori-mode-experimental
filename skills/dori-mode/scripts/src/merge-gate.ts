@@ -85,30 +85,28 @@ const why = (r: Ran): string => (r.err || r.out).trim().split("\n").slice(-3).jo
 
 // The commit checks dori review runs before the tests: dori-superagent PR #44 (dori verify-pr,
 // https://github.com/sisyphuslabs/dori-superagent/pull/44) checked commit identities and fix-without-test as a command of
-// its own; here they are part of dori review, so a lane learns no new command. Its issue #57
-// (https://github.com/sisyphuslabs/dori-superagent/issues/57) items 1-3 are in: fix commits match without case, a test
-// changed by no line (a pure rename) does not count, and a file under test/ or tests/ is a test only when named as one, so
-// code there counts as source (item 3, the narrower rule). Item 4 (a footer listing identities) has no counterpart here.
+// its own; here they are part of dori review, so a lane learns no new command. The rules are the ones upstream main has
+// (skills/dori-mode/scripts/src/verify-pr.ts): fix commits match case-sensitively, a renamed test counts as a changed test,
+// and code under test/ or tests/ is a test. The follow-ups of its open issue #57 are not taken in.
 // The commit list comes from GitHub (the PR's own commits), each commit's names, emails and files from git in the checkout.
 export type Identity = { readonly name: string; readonly email: string };
-export type PrFile = { readonly path: string; readonly oldPath?: string; readonly lines: number };
+export type PrFile = { readonly path: string; readonly oldPath?: string };
 export type PrCommit = { readonly sha: string; readonly subject: string; readonly author: Identity; readonly committer: Identity; readonly parents: number; readonly files: readonly PrFile[] };
 
-const CODE = String.raw`\.(?:[cm]?[jt]sx?|py|go|rs|rb|sh|java|kt|swift)$`;
-// fixture, helper, fake and mock directories never hold counted tests (from #44)
+// isTest of upstream verify-pr.ts (#44): fixture, helper, fake and mock directories never hold counted tests; a file with
+// one of those names counts only when it is named as a test (helpers.test.ts), not when it merely sits in a test directory
 export const isTestPath = (path: string): boolean =>
   !/(?:^|\/)(?:fixtures?|__fixtures__|__snapshots__|helpers?|fakes?|mocks?)\//i.test(path)
-  && (new RegExp(String.raw`(?:^|/)[^/]+\.(?:test|spec)${CODE}`, "i").test(path)
-    || /(?:^|\/)(?:test_[^/]+\.py|[^/]+_test\.(?:go|py|rb)|[^/]+_spec\.rb|[^/]+\.bats)$/i.test(path)
-    || /(?:^|\/)[^/]+Tests?\.(?:java|kt|swift)$/.test(path)
-    || new RegExp(String.raw`(?:^|/)__tests__/.+${CODE}`, "i").test(path)
-    || /(?:^|\/)tests\/[^/]+\.rs$/.test(path));
+  && (/(?:^|\/)[^/]+\.(?:test|spec)\.(?:[cm]?[jt]sx?|py|go|rs|rb|sh|java|kt|swift)$/i.test(path)
+  || /(?:^|\/)(?:test_[^/]+\.py|[^/]+_test\.(?:go|py))$/i.test(path)
+  || (/(?:^|\/)(?:tests?|__tests__)\//i.test(path) && /\.(?:[cm]?[jt]sx?|py|go|rs|rb|sh|java|kt|swift)$/i.test(path)
+    && !/(?:^|\/)(?:(?:setup|conftest|test-utils)[./]|(?:fixtures?|helpers?|fakes?|mocks?)\.[^/]*$)/i.test(path)));
 
 export const isSourcePath = (path: string): boolean =>
   !isTestPath(path) && !/(?:^|\/)(?:docs?|fixtures?|__fixtures__|__snapshots__)\//i.test(path)
   && /\.(?:[cm]?[jt]sx?|css|scss|sass|less|html|vue|svelte|py|go|rs|rb|sh|sql|c|cpp|h|java|kt|swift)$/i.test(path);
 
-const FIX = /^fix(?:\([^)]*\))?!?:/i;
+const FIX = /^fix(?:\([^)]+\))?!?:/;
 const NOREPLY = "noreply@github.com";
 // a mail address is personal: refusals and logs show only its first letters
 export const maskEmail = (email: string): string => email.replace(/^(.{0,2})[^@]*@(.{0,2}).*$/, "$1***@$2***");
@@ -147,7 +145,7 @@ export const checkCommits = (repo: string, commits: readonly PrCommit[], o: { re
   const finalPath = (i: number, path: string): string => own.slice(i + 1).reduce((p, c) => c.files.find((f) => f.oldPath === p)?.path ?? p, path);
   const counted = (i: number, f: PrFile): string | undefined => {
     const at = finalPath(i, f.path);
-    return isTestPath(f.path) && f.lines > 0 && isTestPath(at) && o.atHead.has(at) ? at : undefined;
+    return isTestPath(f.path) && isTestPath(at) && o.atHead.has(at) ? at : undefined;
   };
   const testsOf = (c: PrCommit): string[] => c.files.flatMap((f) => counted(own.indexOf(c), f) ?? []);
   const tests = [...new Set(own.flatMap(testsOf))];
@@ -159,7 +157,7 @@ export const checkCommits = (repo: string, commits: readonly PrCommit[], o: { re
       fixTest = "waived";
       waiver = o.noTest;
       lines.push(`FIXTEST_WAIVED fix commit ${shas} has no test; --no-test: ${o.noTest} (kept in the tests receipt)`);
-    } else problems.push(`fix commit ${shas} changes source and no commit of the PR adds or changes a test (a test file renamed with no changed line, or deleted at the head, does not count); add a test, or pass --no-test "<reason>" when the fix cannot have one`);
+    } else problems.push(`fix commit ${shas} changes source and no commit of the PR adds or changes a test (a test deleted at the head does not count); add a test, or pass --no-test "<reason>" when the fix cannot have one`);
   } else if (fixes.length) {
     fixTest = "tested";
     for (const c of fixes) if (!testsOf(c).length) lines.push(`FIXTEST_NOTE fix commit ${short(c.sha)} has no test of its own; another commit of the PR changes ${tests.join(", ")}`);
@@ -174,10 +172,9 @@ const parseNumstat = (out: string): PrFile[] => {
   for (let i = 0; i < parts.length; i++) {
     const m = /^\s*(-|\d+)\t(-|\d+)\t(.*)$/s.exec(parts[i] ?? "");
     if (!m) continue;
-    const lines = m[1] === "-" ? 1 : Number(m[1]) + Number(m[2]);
-    if (m[3]) files.push({ path: m[3], lines });
+    if (m[3]) files.push({ path: m[3] });
     else {
-      files.push({ path: parts[i + 2] ?? "", oldPath: parts[i + 1] ?? "", lines });
+      files.push({ path: parts[i + 2] ?? "", oldPath: parts[i + 1] ?? "" });
       i += 2;
     }
   }

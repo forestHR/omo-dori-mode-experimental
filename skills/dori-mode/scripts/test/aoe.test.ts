@@ -275,20 +275,32 @@ test("a lane whose session ended within 20 s of its prompt is a STARTUP_ERROR, t
 
 // dori-superagent issue #50 reproduced here (MIT): https://github.com/sisyphuslabs/dori-superagent/issues/50
 // A lane that runs but never set its goal stops after its first turn, so a running agent is not yet a good start.
-const goalLaunch = async (reads: readonly GoalRead[], during?: (read: number) => void, config: Partial<DoriConfig> = {}, cwd = "/tmp/w") => {
+// late: when given, the clock moves with every sleep, each overrunning by late ms as on a loaded host; else it stands still
+const goalLaunch = async (reads: readonly GoalRead[], during?: (read: number) => void, config: Partial<DoriConfig> = {}, cwd = "/tmp/w", late?: number) => {
   const brief = join(state.dir, "brief.md");
   await Bun.write(brief, "# brief\n");
   let read = 0;
-  const deps: FlowDeps = { ...at(T0), config: { ...at(T0).config, ...config }, readGoal: async () => { during?.(read); return reads[Math.min(read++, reads.length - 1)] as GoalRead; } };
+  const still = fakeClock(T0);
+  const clock = late === undefined ? still : { now: () => still.at, sleep: async (ms: number) => void (still.at += ms + late) };
+  const deps: FlowDeps = { ...at(T0), clock, config: { ...at(T0).config, ...config }, readGoal: async () => { during?.(read); return reads[Math.min(read++, reads.length - 1)] as GoalRead; } };
   const r = await launchLane(deps, { noThread: "test lane", key: "smoke", title: "smoke", brief, done: "file /tmp/ok", cwd });
   return { startup: r.startup, read };
 };
 
 test("a lane whose first turn ended without a goal is STARTUP_NO_GOAL with its last lines after three idle reads", async () => {
   world.screen = "working on it\n❯ ";
-  const r = await goalLaunch(["none"]);
+  const r = await goalLaunch(["none"], undefined, {}, "/tmp/w", 0);
   expect(r.startup).toBe(`STARTUP_NO_GOAL smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}: the agent runs but no goal in its session: its first turn ended 40 s after its prompt; last lines: working on it / ❯`);
   expect(r.read).toBe(3);
+});
+
+// dori-superagent PR #83 (MIT): https://github.com/sisyphuslabs/dori-superagent/pull/83
+test("STARTUP_NO_GOAL names the time launch really waited, not the planned 40 s", async () => {
+  // Given a host where every sleep overruns by 5 s, and a first turn that ends with no goal.
+  world.screen = "working on it\n❯ ";
+  const r = await goalLaunch(["none"], undefined, {}, "/tmp/w", 5_000);
+  // Then the message gives the 20 s check plus two 10 s re-reads, each 5 s late.
+  expect(r.startup).toStartWith(`STARTUP_NO_GOAL smoke aoe_smoke_${NEW_AOE_ID.slice(0, 8)}: the agent runs but no goal in its session: its first turn ended 55 s after its prompt;`);
 });
 
 test("a goal that shows up after the first check is still STARTUP_OK", async () => {
@@ -371,7 +383,7 @@ const FOOT_BUSY = ["reading the brief", `── • Working (3s • esc to inter
 
 test("pending goal footer scope: an idle first turn whose status lines read esc to interrupt is STARTUP_NO_GOAL", async () => {
   world.screen = FOOT_IDLE;
-  const idle = await goalLaunch(["none"]);
+  const idle = await goalLaunch(["none"], undefined, {}, "/tmp/w", 0);
   expect(idle.startup).toStartWith(`STARTUP_NO_GOAL smoke ${pendingPane}: the agent runs but no goal in its session: its first turn ended 40 s after its prompt`);
   expect(idle.read).toBe(3);
 });
@@ -1144,7 +1156,10 @@ const limitWorld = () => {
   const reply = (ms: number, errorMessage?: string) =>
     appendFileSync(leadFile, `${JSON.stringify({ timestamp: iso(ms), type: "message", message: { role: "assistant", content: [], ...(errorMessage ? { stopReason: "error", errorMessage } : { stopReason: "stop" }) } })}\n`);
   const laneReply = (ms: number, errorMessage?: string) => w.entry(ms, { type: "message", message: { role: "assistant", content: [], ...(errorMessage ? { stopReason: "error", errorMessage } : { stopReason: "stop" }) } });
-  return { deps, posts, row, reply, laneReply };
+  // an image the lead read: one tool-result line of base64 longer than the transcript tail the watch reads (2 MB)
+  const image = (ms: number, bytes: number) =>
+    appendFileSync(leadFile, `${JSON.stringify({ timestamp: iso(ms), type: "message", message: { role: "toolResult", toolName: "read", content: [{ type: "image", data: "A".repeat(bytes), mimeType: "image/png" }] } })}\n`);
+  return { deps, posts, row, reply, laneReply, image };
 };
 const blockedError = (until: number) => `All Claude accounts for anthropic-subscription are currently blocked (rate limit or auth errors).\n  Soonest automatic retry: ${iso(until)}.\n  /claude-account list  - inspect account states`;
 
@@ -1211,6 +1226,22 @@ test("an owner message the lead has not answered for leadWakeMin is typed into i
   l.reply(T0 + 15 * MIN);
   expect(await watchTick(l.deps(T0 + 40 * MIN))).toEqual([]);
   expect(sent(world)).toHaveLength(3);
+});
+
+test("a lead whose transcript ends in an image longer than the read tail answered the owner: nothing waits; a message after it still wakes the lead", async () => {
+  // live 2026-11-04 17:48Z: the lead read a 3.1 MB screenshot, the 2 MB tail held no reply, and 95 answered owner
+  // messages of the day read as waiting (LEAD_OWNER_WAITING ... 1332 min)
+  const l = limitWorld();
+  world.screen = watching("5: Dori inbox");
+  l.reply(T0 - 60 * MIN);
+  l.row(T0 - 30 * MIN, "m-1", "이 스레드 닫아도 되나?");
+  l.reply(T0 - 29 * MIN);
+  l.image(T0 - 28 * MIN, 3 * 1024 * 1024);
+  expect(await watchTick(l.deps(T0))).toEqual([]);
+  expect(sent(world)).toEqual([]);
+  l.row(T0 + MIN, "m-2", "도리야?");
+  expect(await watchTick(l.deps(T0 + 12 * MIN))).toEqual([`LEAD_OWNER_WAITING aoe_Dori_0a1b2c3d 1 owner message(s), oldest ${iso(T0 + MIN)} (11 min); woke the lead (SUBMITTED)`]);
+  expect(sent(world)[0]).toContain('The oldest: "도리야?"');
 });
 
 test("the limit lifted: the lead and a working lane stopped on a usage-limit error are woken once each on the first tick after the retry time; a paused lane, another error, a session that went on or a still-blocked pool are not", async () => {
