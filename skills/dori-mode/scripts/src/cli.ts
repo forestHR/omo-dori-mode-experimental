@@ -15,6 +15,7 @@ import { winSignal } from "./win-suspend.ts";
 import { type AskPlace, AskPlaceError, askPlace } from "./ask-place.ts";
 import { CheckpointError, Checkpoints } from "./checkpoints.ts";
 import { isLessonOutcome, LessonError, Lessons } from "./lessons.ts";
+import { Worklog, WorklogError } from "./worklog.ts";
 import { type BudgetLimits, laneLimits } from "./supervision.ts";
 import { addItem, BacklogError, backlogTick, byTurn, decideItem, dropItem, type FeedTodo, feedIntake, inboxReader, instanceOf, itemLine, laneKeyOf, lastRun, listItems, orderIntake, pairIntake, readItem, type TickDeps, withBacklogLock } from "./backlog.ts";
 import { poolFree } from "./lead-limit.ts";
@@ -298,6 +299,11 @@ const USAGE = `dori <command> [options]
   lesson list [--cwd DIR]              current lessons, newest first; a damaged journal line is a LESSON_WARNING
   lesson mark <id> --outcome pending|helped|no-effect|harmful|encoded
                                        only pending and helped ones reach new briefs
+  worklog add <title> --source REF     record an owner request when it arrives (upstream dori-superagent#96)
+  worklog next|note <id> <text>        set the item's next step, or add a note (a decision, an owner)
+  worklog close <id> --result TEXT     close the item with what came of it
+  worklog list [--open]                items as JSON; <stateDir>/worklog.md holds the same for reading, and the
+                                       dori handover note lists the open ones
   close  <key> [--note TEXT] [--summary TEXT] [--posted ID|LINK] [--lesson TEXT [--evidence PATH]]...
                                        close now (Done signals must read back live); a lane with a work thread first posts
                                        its summary for the owner there (--summary, the claim's, else one a model writes from
@@ -600,6 +606,7 @@ const flags = parseArgs({
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
     "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
     "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
+    source: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -2412,6 +2419,36 @@ try {
       }
       break;
     }
+    // The lead's record of owner requests, from upstream https://github.com/sisyphuslabs/dori-superagent/pull/96.
+    case "worklog": {
+      const worklog = new Worklog(config.stateDir);
+      const id = () => flags.positionals[1] ?? die(`worklog ${key} needs an item id`);
+      const text = () => flags.positionals.slice(2).join(" ").trim() || die(`worklog ${key} needs text`);
+      const now = realClock.now();
+      switch (key) {
+        case "add":
+          console.log(JSON.stringify(worklog.add(flags.positionals.slice(1).join(" ").trim() || die("worklog add needs a title"), need("source"), now)));
+          break;
+        case "next":
+          console.log(JSON.stringify(worklog.next(id(), text(), now)));
+          break;
+        case "note":
+          console.log(JSON.stringify(worklog.note(id(), text(), now)));
+          break;
+        case "close":
+          console.log(JSON.stringify(worklog.close(id(), need("result"), now)));
+          break;
+        case "list": {
+          const read = worklog.read();
+          for (const problem of [...read.problems, ...read.warnings]) console.error(`WORKLOG_WARNING ${problem}`);
+          console.log(JSON.stringify(flags.values.open ? read.items.filter((item) => item.closedAt === undefined) : read.items, null, 2));
+          break;
+        }
+        default:
+          die("worklog needs add, next, note, close or list");
+      }
+      break;
+    }
     case "checkpoint": {
       const target = await lane(key ?? die("checkpoint needs a lane key"));
       // parseArgs takes one value per flag; a second bare receipt would otherwise be dropped and its effect repeated later.
@@ -2447,6 +2484,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError || e instanceof LessonError) die(e.message);
+  if (e instanceof LeadError || e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof QuestionError || e instanceof ThreadRefError || e instanceof LaneStateError || e instanceof ScorecardError || e instanceof TreeError || e instanceof ChallengeError || e instanceof GateRefusal || e instanceof ForkError || e instanceof DirectiveError || e instanceof HeavyJobError || e instanceof CheckpointError || e instanceof LessonError || e instanceof WorklogError) die(e.message);
   throw e;
 }
