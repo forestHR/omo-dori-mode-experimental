@@ -13,6 +13,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
 import type { BacklogSettings } from "./config.ts";
+import { flock, LOCK_EX, LOCK_NB } from "./checkpoints.ts";
 import { doneSyntaxErrors } from "./done-signals.ts";
 import { LANE_KEY, type Lane, NO_THREAD, statusOf, threadRefProblem } from "./registry.ts";
 
@@ -807,9 +808,23 @@ export type Held = { readonly release: () => Promise<void> };
  * An exclusive flock(1) on a directory, held by a child process: the kernel lets go when that child ends, our process
  * with it, so a crash leaves no lock behind and there is no half-written lock file to misread. A directory, not a file:
  * every account can open it, also another user's in a sticky /tmp directory. undefined when not free within waitSec.
+ * macOS has no flock(1): there this process holds the lock itself through libc on a descriptor closed on exec, so the
+ * kernel lets go when this process ends and a child started under the lock (a lane) never keeps it.
  */
 export const flockDir = async (path: string, waitSec: number): Promise<Held | undefined> => {
   mkdirSync(path, { recursive: true });
+  if (process.platform === "darwin") {
+    const fd = openSync(path, "r");
+    const deadline = performance.now() + waitSec * 1000;
+    while (flock(fd, LOCK_EX | LOCK_NB) !== 0) {
+      if (performance.now() >= deadline) {
+        closeSync(fd);
+        return undefined;
+      }
+      await Bun.sleep(100);
+    }
+    return { release: async () => closeSync(fd) };
+  }
   const p = Bun.spawn(["flock", "-x", ...(waitSec > 0 ? ["-w", String(waitSec)] : ["-n"]), path, "sh", "-c", "echo LOCKED; exec cat >/dev/null"], { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
   const first = await p.stdout.getReader().read();
   if (first.done || !new TextDecoder().decode(first.value).includes("LOCKED")) {

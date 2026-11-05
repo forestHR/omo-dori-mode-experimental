@@ -37,15 +37,15 @@ type LockOwner = { readonly pid: number; readonly host: string; readonly at: str
 // owner record is checked and then deleted. A check and a delete on a pathname are never one step, so upstream's takeover
 // of a stale lock could delete a live writer's lock and let two writers append at once. The kernel drops a flock when its
 // process dies, so a writer killed mid-write never locks the lane and nothing is taken over by age.
-const LOCK_EX = 2;
-const LOCK_NB = 4;
+export const LOCK_EX = 2;
+export const LOCK_NB = 4;
 // libc is opened on first use, not at import: every dori command imports this module, and native Windows has no libc
 // (dlopen at import made the whole CLI fail there). Windows takes the lock its own way (takeWindowsLock below).
 let libc: ReturnType<typeof openLibc> | undefined;
 const openLibc = () => dlopen(process.platform === "darwin" ? "libc.dylib" : "libc.so.6", {
   flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
 });
-const flock = (fd: number, op: number): number => {
+export const flock = (fd: number, op: number): number => {
   libc ??= openLibc();
   return libc.symbols.flock(fd, op);
 };

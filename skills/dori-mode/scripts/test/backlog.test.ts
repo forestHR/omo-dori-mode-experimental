@@ -306,6 +306,52 @@ test("a host slot is counted and written only under the host directory's lock th
   expect(existsSync(join(hostDir, "me.i1.ay.json"))).toBe(true);
 });
 
+test("a lock wait of 0 tries once and a positive wait gives up at its limit", async () => {
+  // Given: a held lock
+  const d = join(root, "lock");
+  const holder = await flockDir(d, 0);
+  // When: a 0 wait is under way as the holder lets go; a 1 s wait meets a holder that stays
+  const once = flockDir(d, 0);
+  const started = performance.now();
+  const waited = await flockDir(d, 1);
+  const elapsed = performance.now() - started;
+  await holder?.release();
+  // Then
+  expect(holder).toBeDefined();
+  expect(await once).toBeUndefined();
+  expect(waited).toBeUndefined();
+  expect(elapsed).toBeGreaterThanOrEqual(1000);
+});
+
+test("a holder killed outright frees the lock, also while a child it started under the lock runs on", async () => {
+  // Given: another process holds the lock and has started a long child
+  const d = join(root, "lock");
+  const script = `import { flockDir } from ${JSON.stringify(join(import.meta.dir, "../src/backlog.ts"))};
+    const held = await flockDir(${JSON.stringify(d)}, 0);
+    const child = Bun.spawn(["sleep", "600"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    console.log(held ? child.pid : "NOT_HELD");
+    await child.exited;`;
+  const holder = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "inherit" });
+  const first = await holder.stdout.getReader().read();
+  const child = Number(new TextDecoder().decode(first.value).trim());
+  try {
+    const whileHeld = await flockDir(d, 0);
+    // When
+    holder.kill("SIGKILL");
+    await holder.exited;
+    const after = await flockDir(d, 5);
+    const childRuns = process.kill(child, 0);
+    await after?.release();
+    // Then
+    expect(child).toBeGreaterThan(0);
+    expect(whileHeld).toBeUndefined();
+    expect(childRuns).toBe(true);
+    expect(after).toBeDefined();
+  } finally {
+    if (child > 0) process.kill(child, "SIGKILL");
+  }
+});
+
 test("an unsafe shared host directory is refused, and a link planted at a slot's name is replaced, never followed", async () => {
   // Given: a victim file, a host dir that is a link, one without the sticky bit, and a sticky one with a planted link
   const victim = join(root, "victim.txt");
