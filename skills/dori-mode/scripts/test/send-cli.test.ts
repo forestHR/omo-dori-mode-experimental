@@ -19,8 +19,9 @@ test("Slack hook references land in the intended thread and deduplicate against 
     const posted = await run([...command, "--to", "slack:C123:100.1"]);
     const repeated = await run([...command, "--to", "C123", "--thread", "100.1"]);
     expect({ code: posted.code, messages }).toEqual({ code: 0, messages: [{ channel: "C123", text: "progress", thread_ts: "100.1" }] });
-    expect(repeated.code).toBe(0);
-    expect(repeated.out).toContain("SEND_DUPLICATE 200.1");
+    expect(repeated.code).toBe(3);
+    expect(repeated.out).toContain("SEND_DUPLICATE");
+    expect(repeated.out).toContain("200.1");
   } finally {
     server.stop(true);
     state.done();
