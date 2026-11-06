@@ -248,12 +248,17 @@ export const checkMeaning = async (deps: Pick<FlowDeps, "run" | "config" | "cloc
   const oc = deps.config.reviewers;
   const listed = reviewers(deps.config.defaultModel, oc.first ? [oc.first, ...deps.config.reviewers.models.filter((m) => m !== oc.first)] : deps.config.reviewers.models);
   let calls: string[] = [];
+  // why none is callable: the host check's error, or each listed reviewer's note
+  let why = listed.length ? "" : "none listed";
   try {
-    calls = (await checkReviewers(deps as FlowDeps, listed)).flatMap((c) => (c.call ? [c.call] : []));
+    const checks = await checkReviewers(deps as FlowDeps, listed);
+    calls = checks.flatMap((c) => (c.call ? [c.call] : []));
+    if (!calls.length && checks.length) why = checks.map((c) => `${c.listed}: ${c.note}`).join("; ");
   } catch (e) {
     if (!(e instanceof ChallengeError)) throw e;
+    why = e.message;
   }
-  if (!calls.length) return { ok: false, lines: [...lines, ...fresh.map((e) => `DIRECTIVES_MEANING_FAILED ${e.id}: no callable reviewer of another family than ${deps.config.defaultModel} in reviewers.models`)] };
+  if (!calls.length) return { ok: false, lines: [...lines, ...fresh.map((e) => `DIRECTIVES_MEANING_FAILED ${e.id}: no callable reviewer of another family than ${deps.config.defaultModel} in reviewers.models (${why})`)] };
   let ok = true;
   // four at a time: a reviewer call takes minutes, and thirty at once trips provider rate limits
   const results: string[] = new Array(fresh.length);

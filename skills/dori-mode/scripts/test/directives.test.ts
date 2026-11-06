@@ -476,6 +476,20 @@ test("directives check: a reviewer of another family reads each new prompt again
   expect(readFileSync(kept, "utf8")).toBe("I think it is fine");
 });
 
+test("directives check: when the host cannot list its models, the failure says why", async () => {
+  const base = await ledgerDeps();
+  const run: Runner = async (argv, opts) => {
+    if (argv[0] !== "omo") return fakeRunner(world)(argv, opts);
+    if (argv[1] === "--list-models") return { code: 78, out: "", err: "omo: trust-load-mismatch (provenance)" };
+    return { code: 0, out: "VERDICT: SAME", err: "" };
+  };
+  const deps = { ...base, run, config: { ...base.config, defaultModel: "anthropic/claude-opus-5-5", reviewers: { ...base.config.reviewers, models: ["openai/gpt-6"], first: "" }, explore: { ...base.config.explore, modelsCommand: ["omo", "--list-models"] } } };
+  const r = await checkMeaning(deps, loadLedger(deps.config));
+  expect(r.ok).toBe(false);
+  expect(r.lines[0]).toStartWith("DIRECTIVES_MEANING_FAILED ");
+  expect(r.lines[0]).toContain("cannot list this host's models (omo --list-models: exit 78 omo: trust-load-mismatch (provenance))");
+});
+
 test("the blocks the ledger names are the ones launch inserts", async () => {
   const deps = await ledgerDeps();
   const r = await renderBrief(deps, input(await write("ui.md", fields), { ui: true }));
