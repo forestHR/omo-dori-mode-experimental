@@ -402,7 +402,7 @@
       "source": "형 2026-10-20 00:55 KST(#zzangdori, 리드 질문에 대한 답), 전달 짱돌 리드 [LEAD → lane yoodori-message-ux]",
       "scope": {
         "keywords": [
-          "도리 ?(?:방|톡방|페어)|dori[- ]?pair|pair ?(?:채널|channel)|도리끼리|다른 도리|도리들|유돌|유도리|옥돌|옥도리|무돌|무도리|공돌|공도리|수돌|수도리|고돌|고도리|짱돌|짱도리|yoodori|okdori|moodori|gongdori|soodori|zzangdori"
+          "도리 ?(?:방|톡방|페어)|dori[- ]?pair|pair ?(?:채널|channel)|도리끼리|다른 도리|도리들|유돌|유도리|옥돌|옥도리|무돌|무도리|공돌|공도리|수돌|수도리|고돌|고도리|짱돌|짱도리|yoodori|okdori|moodori|gongdori|soodori|zzangdori|은돌|은돌이|eundori"
         ],
         "briefOnly": true
       },
@@ -448,7 +448,7 @@
       "source": "형 2026-10-24 10:56 KST(그 도리 채널, 음성, 짱돌 봇 글 답), 10:59 KST(#zzangdori); 전달 짱돌 리드, 레인 yoodori-pair-route",
       "scope": {
         "keywords": [
-          "도리 ?(?:방|톡방|페어)|dori[- ]?pair|pair ?(?:채널|channel)|도리끼리|다른 도리|도리들|유돌|유도리|옥돌|옥도리|무돌|무도리|공돌|공도리|수돌|수도리|고돌|고도리|짱돌|짱도리|yoodori|okdori|moodori|gongdori|soodori|zzangdori"
+          "도리 ?(?:방|톡방|페어)|dori[- ]?pair|pair ?(?:채널|channel)|도리끼리|다른 도리|도리들|유돌|유도리|옥돌|옥도리|무돌|무도리|공돌|공도리|수돌|수도리|고돌|고도리|짱돌|짱도리|yoodori|okdori|moodori|gongdori|soodori|zzangdori|은돌|은돌이|eundori"
         ],
         "briefOnly": true
       },
