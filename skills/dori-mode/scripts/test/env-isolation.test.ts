@@ -112,3 +112,18 @@ test("aoe and tmux, which can start the tmux server every pane inherits from, ru
   const env = { PATH: "/bin", DORI_DISCORD_TOKEN: "t", DORI_CONFIG: "/c" };
   expect([childEnv(["tmux", "new-session"], env), childEnv(["/usr/bin/tmux", "ls"], env), childEnv(["aoe", "session", "start", "x"], env), childEnv(["git", "status"], env)]).toEqual([{ PATH: "/bin" }, { PATH: "/bin" }, { PATH: "/bin" }, env]);
 });
+
+// 2026-11-07: EunDori's lead (an omo) left SENPI_ENGINE_TRUST_HOP in its shells; omo --list-models from there exited 78
+// trust-load-mismatch and dori directives check found no callable reviewer
+test("omo runs without the lead omo's SENPI_ENGINE_TRUST and SENPI_ENGINE_TRUST_HOP; other commands keep them", async () => {
+  const state = withState();
+  try {
+    const omo = join(state.dir, "omo");
+    writeFileSync(omo, "#!/bin/sh\necho \"trust=${SENPI_ENGINE_TRUST-unset} hop=${SENPI_ENGINE_TRUST_HOP-unset} keep=${SSL_CERT_DIR-unset}\"\n", { mode: 0o755 });
+    const env = { SENPI_ENGINE_TRUST: "{}", SENPI_ENGINE_TRUST_HOP: "1", SSL_CERT_DIR: "/d" };
+    expect((await run([omo], { env })).out).toBe("trust=unset hop=unset keep=/d");
+    expect((await run(["sh", omo], { env })).out).toBe("trust={} hop=1 keep=/d");
+  } finally {
+    state.done();
+  }
+});

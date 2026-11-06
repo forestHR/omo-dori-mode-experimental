@@ -9,8 +9,15 @@ export type Runner = (argv: readonly string[], opts?: RunOptions) => Promise<Ran
 // aoe and tmux can start the tmux server, and every pane it opens later inherits the server's environment: a Dori's
 // variables (token, inbox, lead) handed to them would make every session, another Dori's included, run as this one.
 // herdr's panes take the herdr server's environment too, so herdr gets the same.
-export const childEnv = (argv: readonly string[], env: Readonly<Record<string, string | undefined>>): Record<string, string | undefined> =>
-  ["aoe", "tmux", "herdr"].includes(argv[0]?.split("/").pop() ?? "") ? Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith("DORI_"))) : { ...env };
+// omo started from a lead's shell inherits the lead omo's SENPI_ENGINE_TRUST and SENPI_ENGINE_TRUST_HOP, and refuses to
+// start with them (exit 78 trust-load-mismatch): the reviewer checks (--list-models, auth check) and calls run without both.
+const OMO_TRUST = ["SENPI_ENGINE_TRUST", "SENPI_ENGINE_TRUST_HOP"];
+export const childEnv = (argv: readonly string[], env: Readonly<Record<string, string | undefined>>): Record<string, string | undefined> => {
+  const name = argv[0]?.split("/").pop() ?? "";
+  if (["aoe", "tmux", "herdr"].includes(name)) return Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith("DORI_")));
+  if (name === "omo") return Object.fromEntries(Object.entries(env).filter(([k]) => !OMO_TRUST.includes(k)));
+  return { ...env };
+};
 
 // A hook such as ["dori", "thread", "reply", ...] names the dori command. On native Windows that command is dori.ps1,
 // which Bun.spawn cannot start, so the hook runs this CLI with this Bun directly (no shell, the arguments as they are).
