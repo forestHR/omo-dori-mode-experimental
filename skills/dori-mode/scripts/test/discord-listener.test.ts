@@ -245,6 +245,21 @@ test.each([["fails", true], ["succeeds", false]] as const)("a READY that joins t
   expect(inbox().map((r) => r.id)).toEqual(["1000", "1001"]);
 });
 
+test("a channel list that keeps failing does not stop the configured channels, and the scan still retries", async () => {
+  const route = (req: HttpRequest) => {
+    if (req.url.endsWith("/threads/active")) throw cutOff();
+    return isChannelPage(req) ? [msg("1001")] : [];
+  };
+  const { listener, gw, t, logs, inbox } = setup(route, seeded);
+  listener.start();
+  gw.push({ op: 0, s: 1, t: "READY", d: {} });
+  await listener.settled();
+  expect(inbox().map((r) => r.id)).toEqual(["1000", "1001"]);
+  expect(logs).toContain(`DISCORD_LISTENER_FAIL backfill stage=channels ${cutOff().message}`);
+  expect(logs.some((l) => l.startsWith("DISCORD_BACKFILL since="))).toBe(false);
+  expect(t.timeouts).toEqual([1000]);
+});
+
 test("a channel that keeps failing does not stop the channels after it, and the scan still retries", async () => {
   const route = (req: HttpRequest) => {
     if (req.url.endsWith("/threads/active")) return { threads: [{ id: THREAD, parent_id: CHANNEL }] };
