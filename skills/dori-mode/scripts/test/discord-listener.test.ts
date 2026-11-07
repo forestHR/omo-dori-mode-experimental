@@ -245,6 +245,71 @@ test.each([["fails", true], ["succeeds", false]] as const)("a READY that joins t
   expect(inbox().map((r) => r.id)).toEqual(["1000", "1001"]);
 });
 
+test("a channel that keeps failing does not stop the channels after it, and the scan still retries", async () => {
+  const route = (req: HttpRequest) => {
+    if (req.url.endsWith("/threads/active")) return { threads: [{ id: THREAD, parent_id: CHANNEL }] };
+    if (isChannelPage(req)) throw cutOff();
+    if (req.url.includes(`/channels/${THREAD}/messages?`)) return [msg("1001", { channel_id: THREAD, guild_id: undefined })];
+    return [];
+  };
+  const { listener, gw, t, logs, inbox } = setup(route, seeded);
+  listener.start();
+  gw.push({ op: 0, s: 1, t: "READY", d: {} });
+  await listener.settled();
+  expect(inbox().map((r) => r.id)).toEqual(["1000", "1001"]);
+  expect(logs.some((l) => l.startsWith("DISCORD_BACKFILL since="))).toBe(false);
+  expect(t.timeouts).toEqual([1000]);
+});
+
+test("the failure line counts a page cut off halfway, and its cursor stays at the last finished page", async () => {
+  const route = (req: HttpRequest) => (isChannelPage(req) ? [msg("1001"), { id: "1002", channel_id: CHANNEL }] : []);
+  const { listener, logs } = setup(route, seeded);
+  await expect(listener.backfill()).rejects.toThrow();
+  expect(logs.some((l) => l.startsWith(`DISCORD_LISTENER_FAIL backfill channel=${CHANNEL} since=1000 cursor=1000 scanned=1 added=1 at=1/2 `))).toBe(true);
+});
+
+test("a finished scan disarms a pending retry, so the next failure waits one second and the old timer scans nothing", async () => {
+  let fail = true;
+  const route = (req: HttpRequest) => {
+    if (fail && isChannelPage(req)) throw cutOff();
+    return [];
+  };
+  const { listener, gw, t, calls } = setup(route, seeded);
+  listener.start();
+  gw.push({ op: 0, s: 1, t: "READY", d: {} });
+  await listener.settled();
+  t.reconnect();
+  await listener.settled();
+  fail = false;
+  gw.push({ op: 0, s: 2, t: "READY", d: {} });
+  await listener.settled();
+  const scans = calls().length;
+  t.reconnect();
+  await listener.settled();
+  expect(calls()).toHaveLength(scans);
+  fail = true;
+  gw.push({ op: 0, s: 3, t: "READY", d: {} });
+  await listener.settled();
+  expect(t.timeouts.at(-1)).toBe(1000);
+});
+
+test("a READY during a long wait starts the wait over: the link just came back", async () => {
+  const route = (req: HttpRequest) => {
+    if (isChannelPage(req)) throw cutOff();
+    return [];
+  };
+  const { listener, gw, t } = setup(route, seeded);
+  listener.start();
+  gw.push({ op: 0, s: 1, t: "READY", d: {} });
+  await listener.settled();
+  t.reconnect();
+  await listener.settled();
+  expect(t.timeouts).toEqual([1000, 2000]);
+  gw.push({ op: 0, s: 2, t: "READY", d: {} });
+  await listener.settled();
+  expect(t.timeouts).toEqual([1000, 2000, 1000]);
+});
+
 test("scan retries back off to a cap, and a finished scan starts the wait over", async () => {
   let fail = true;
   const route = (req: HttpRequest) => {
