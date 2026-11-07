@@ -521,16 +521,12 @@ export class DiscordListener {
     }, wait);
   }
 
-  private configuredChannels(): readonly string[] {
-    const watched = this.d.watchBots?.length ? (this.d.watchChannels ?? []) : [];
-    return [this.d.channel, ...(this.d.pairChannel ? [this.d.pairChannel] : []), ...watched];
-  }
-
   private async scanTargets(): Promise<{ readonly channels: readonly string[]; readonly dm: string | undefined }> {
     const dm = this.d.shadow ? this.dmChannel : (await this.d.dc.call<{ id: string }>("POST", "/users/@me/channels", { recipient_id: this.d.owner })).id;
     const active = await this.d.dc.call<{ threads?: { id: string; parent_id: string }[] }>("GET", `/guilds/${this.d.guild}/threads/active`);
+    const watched = this.d.watchBots?.length ? (this.d.watchChannels ?? []) : [];
     for (const t of active.threads ?? []) this.parents.set(t.id, t.parent_id);
-    return { dm, channels: [...new Set([...this.configuredChannels(), ...(active.threads ?? []).filter((t) => t.parent_id === this.d.channel).map((t) => t.id), ...(dm ? [dm] : [])])] };
+    return { dm, channels: [...new Set([this.d.channel, ...(this.d.pairChannel ? [this.d.pairChannel] : []), ...watched, ...(active.threads ?? []).filter((t) => t.parent_id === this.d.channel).map((t) => t.id), ...(dm ? [dm] : [])])] };
   }
 
   // One channel that fails must not cost the channels after it their history; the scan still fails at the end, so it retries.
@@ -540,7 +536,8 @@ export class DiscordListener {
     const { channels, dm } = await this.scanTargets().catch((e: unknown) => {
       this.d.log(`DISCORD_LISTENER_FAIL backfill stage=channels ${errText(e)}`);
       failures.push(e);
-      return { channels: [...new Set(this.configuredChannels())], dm: undefined };
+      // watched channels wait for the list: one may be a thread of ours, and a page read without its parent would skip owner messages
+      return { channels: [this.d.channel, ...(this.d.pairChannel ? [this.d.pairChannel] : [])], dm: undefined };
     });
     let added = 0;
     for (const [i, ch] of channels.entries()) {

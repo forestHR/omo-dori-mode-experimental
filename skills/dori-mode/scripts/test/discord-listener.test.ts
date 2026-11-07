@@ -260,6 +260,30 @@ test("a channel list that keeps failing does not stop the configured channels, a
   expect(t.timeouts).toEqual([1000]);
 });
 
+test("a watched thread waits for its channel list: with lookups down its cursor stays, and the retry delivers the owner's message", async () => {
+  let down = true;
+  const route = (req: HttpRequest) => {
+    if (req.url.endsWith("/threads/active")) {
+      if (down) throw cutOff();
+      return { threads: [{ id: THREAD, parent_id: CHANNEL }] };
+    }
+    if (req.url.endsWith(`/channels/${THREAD}`)) {
+      if (down) throw cutOff();
+      return { id: THREAD, parent_id: CHANNEL };
+    }
+    if (req.url.includes(`/channels/${THREAD}/messages?after=0&`)) return [msg("1001", { channel_id: THREAD, guild_id: undefined })];
+    return [];
+  };
+  const { listener, gw, t, inbox } = setup(route, { ...seeded, watchChannels: [THREAD], watchBots: [MONITOR_BOT] });
+  listener.start();
+  gw.push({ op: 0, s: 1, t: "READY", d: {} });
+  await listener.settled();
+  down = false;
+  t.reconnect();
+  await listener.settled();
+  expect(inbox().filter((r) => r.id === "1001").map((r) => r.scope)).toEqual(["thread"]);
+});
+
 test("a channel that keeps failing does not stop the channels after it, and the scan still retries", async () => {
   const route = (req: HttpRequest) => {
     if (req.url.endsWith("/threads/active")) return { threads: [{ id: THREAD, parent_id: CHANNEL }] };
