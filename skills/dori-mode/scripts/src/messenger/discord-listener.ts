@@ -16,6 +16,8 @@ export const LISTENER_INTENTS = 1 | (1 << 9) | (1 << 12) | (1 << 15);
 const FATAL_CLOSE = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
 // Short cap: a dead network fails each try at once, so a long wait only delays READY after the link is back.
 const MAX_BACKOFF_MS = 10_000;
+// Long cap: a scan can fail for good (a channel it may no longer read), and each retry logs a line.
+const MAX_SCAN_BACKOFF_MS = 300_000;
 
 export type GatewayConnection = {
   send(data: string): void;
@@ -204,6 +206,8 @@ export class DiscordListener {
   private cursor = "0";
   private seq: number | null = null;
   private backoff = 1_000;
+  private scanBackoff = 1_000;
+  private pendingRetry: object | null = null;
 
   constructor(private readonly d: ListenerDeps) {
     mkdirSync(dirname(d.inboxFile), { recursive: true, mode: 0o700 });
@@ -487,25 +491,75 @@ export class DiscordListener {
 
   // A live event must not jump a history scan past another channel's reconnect gap.
   backfill(): Promise<number> {
-    this.backfilling ??= this.scanHistory().finally(() => { this.backfilling = null; });
+    this.backfilling ??= this.scanHistory().then((added) => {
+      this.pendingRetry = null;
+      return added;
+    }).finally(() => { this.backfilling = null; });
     return this.backfilling;
   }
 
-  private async scanHistory(): Promise<number> {
-    const since = this.cursor;
+  // A connect's gap must get read: no other scan comes until the next READY, and the gateway can stay up for hours. A READY
+  // that joins an older connection's scan scans again after it, since that scan may already have passed a channel.
+  private catchUp(): void {
+    const joined = this.backfilling !== null;
+    this.track(this.backfill().then(() => {
+      if (joined) this.catchUp();
+    }, () => this.retryScan()), "backfill");
+  }
+
+  private retryScan(): void {
+    if (this.pendingRetry) return;
+    const mine = {};
+    this.pendingRetry = mine;
+    const wait = this.scanBackoff;
+    this.scanBackoff = Math.min(wait * 2, MAX_SCAN_BACKOFF_MS);
+    this.d.log(`DISCORD_BACKFILL_RETRY in=${wait}ms`);
+    this.d.timers.setTimeout(() => {
+      if (this.pendingRetry !== mine) return;
+      this.pendingRetry = null;
+      this.catchUp();
+    }, wait);
+  }
+
+  private async scanTargets(): Promise<{ readonly channels: readonly string[]; readonly dm: string | undefined }> {
     const dm = this.d.shadow ? this.dmChannel : (await this.d.dc.call<{ id: string }>("POST", "/users/@me/channels", { recipient_id: this.d.owner })).id;
     const active = await this.d.dc.call<{ threads?: { id: string; parent_id: string }[] }>("GET", `/guilds/${this.d.guild}/threads/active`);
     const watched = this.d.watchBots?.length ? (this.d.watchChannels ?? []) : [];
-    const channels = [this.d.channel, ...(this.d.pairChannel ? [this.d.pairChannel] : []), ...watched, ...(active.threads ?? []).filter((t) => t.parent_id === this.d.channel).map((t) => t.id), ...(dm ? [dm] : [])];
     for (const t of active.threads ?? []) this.parents.set(t.id, t.parent_id);
+    return { dm, channels: [...new Set([this.d.channel, ...(this.d.pairChannel ? [this.d.pairChannel] : []), ...watched, ...(active.threads ?? []).filter((t) => t.parent_id === this.d.channel).map((t) => t.id), ...(dm ? [dm] : [])])] };
+  }
+
+  // One channel that fails must not cost the channels after it their history; the scan still fails at the end, so it retries.
+  private async scanHistory(): Promise<number> {
+    const since = this.cursor;
+    const failures: unknown[] = [];
+    const { channels, dm } = await this.scanTargets().catch((e: unknown) => {
+      this.d.log(`DISCORD_LISTENER_FAIL backfill stage=channels ${errText(e)}`);
+      failures.push(e);
+      // watched channels wait for the list: one may be a thread of ours, and a page read without its parent would skip owner messages
+      return { channels: [this.d.channel, ...(this.d.pairChannel ? [this.d.pairChannel] : [])], dm: undefined };
+    });
     let added = 0;
-    for (const ch of new Set(channels)) {
+    for (const [i, ch] of channels.entries()) {
       if (this.goneChannels.has(ch)) continue;
-      let after = this.scanCursors[ch] ?? "0";
-      const start = after;
-      let scanned = 0;
-      let accepted = 0;
-      let gone = false;
+      try {
+        added += await this.scanChannel(ch, dm, `at=${i + 1}/${channels.length}`);
+      } catch (e) {
+        failures.push(e);
+      }
+    }
+    if (failures.length) throw failures[0];
+    this.d.log(`DISCORD_BACKFILL since=${since} added=${added}`);
+    return added;
+  }
+
+  // The failure line carries the fields of DISCORD_BACKFILL_SCAN, so a log alone can bound what a failed scan left unread.
+  private async scanChannel(ch: string, dm: string | undefined, place: string): Promise<number> {
+    let after = this.scanCursors[ch] ?? "0";
+    const start = after;
+    let scanned = 0;
+    let accepted = 0;
+    try {
       for (;;) {
         let msgs: DiscordMessage[];
         try {
@@ -518,13 +572,12 @@ export class DiscordListener {
             this.saveScanCursors();
           }
           this.d.log(`DISCORD_BACKFILL_GONE channel=${ch} (404 Unknown Channel: cursor dropped, not retried; remove it from the settings)`);
-          gone = true;
-          break;
+          return accepted;
         }
         for (const m of [...msgs].sort((a, b) => (newer(b.id, a.id) ? -1 : 1))) {
           const before = this.seen.size;
           await this.onMessage({ ...m, guild_id: ch === dm ? undefined : this.d.guild });
-          if (this.seen.size > before) { added++; accepted++; }
+          if (this.seen.size > before) accepted++;
           if (newer(m.id, after)) after = m.id;
           scanned++;
         }
@@ -534,10 +587,12 @@ export class DiscordListener {
         if (newer(after, this.cursor)) this.cursor = after;
         if (msgs.length < 100) break;
       }
-      if (!gone) this.d.log(`DISCORD_BACKFILL_SCAN channel=${ch} since=${start} cursor=${after} scanned=${scanned} added=${accepted}`);
+    } catch (e) {
+      this.d.log(`DISCORD_LISTENER_FAIL backfill channel=${ch} since=${start} cursor=${this.scanCursors[ch] ?? "0"} scanned=${scanned} added=${accepted} ${place} ${errText(e)}`);
+      throw e;
     }
-    this.d.log(`DISCORD_BACKFILL since=${since} added=${added}`);
-    return added;
+    this.d.log(`DISCORD_BACKFILL_SCAN channel=${ch} since=${start} cursor=${after} scanned=${scanned} added=${accepted}`);
+    return accepted;
   }
 
   private saveScanCursors(): void {
@@ -550,7 +605,10 @@ export class DiscordListener {
       this.backoff = 1_000;
       this.self = String((data.user as { id?: string } | undefined)?.id ?? "");
       this.d.log(this.d.shadow ? "DISCORD_LISTENER_READY shadow" : "DISCORD_LISTENER_READY");
-      this.track(this.backfill().then(() => {}), "backfill");
+      // a new connection means the link is back: an older, long wait no longer applies
+      this.pendingRetry = null;
+      this.scanBackoff = 1_000;
+      this.catchUp();
       this.rolesStale = true;
       this.track(this.readRoles(), "roles");
     } else if (type === "GUILD_CREATE" && data.id === this.d.guild) {
