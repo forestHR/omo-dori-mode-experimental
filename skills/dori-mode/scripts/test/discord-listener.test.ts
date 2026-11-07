@@ -166,6 +166,109 @@ test("a failed history page keeps its cursor for the next reconnect", async () =
   expect(inbox().map((r) => r.id)).toEqual(["1000", "1001"]);
 });
 
+const cutOff = () => new Error("ECONNRESET: The socket connection was closed unexpectedly.");
+const seeded = { inbox: `${JSON.stringify({ id: "1000", channel_id: CHANNEL, scope: "channel" })}\n` };
+const isChannelPage = (req: HttpRequest) => req.url.includes(`/channels/${CHANNEL}/messages?`);
+
+test("a scan the network cuts off says where it stopped and scans again by itself, with no reconnect", async () => {
+  let fail = true;
+  const route = (req: HttpRequest) => {
+    if (!isChannelPage(req)) return [];
+    if (fail) throw cutOff();
+    return [msg("1001")];
+  };
+  const { listener, gw, t, logs, inbox } = setup(route, seeded);
+  listener.start();
+  gw.push({ op: 0, s: 1, t: "READY", d: {} });
+  await listener.settled();
+  expect(logs).toContain(`DISCORD_LISTENER_FAIL backfill channel=${CHANNEL} since=1000 cursor=1000 scanned=0 added=0 at=1/2 ${cutOff().message}`);
+  expect(inbox().map((r) => r.id)).toEqual(["1000"]);
+  fail = false;
+  t.reconnect();
+  await listener.settled();
+  expect(inbox().map((r) => r.id)).toEqual(["1000", "1001"]);
+  expect(logs).toContain("DISCORD_BACKFILL since=1000 added=1");
+});
+
+test("the failure line's cursor is the last finished page, where the next scan starts", async () => {
+  const page = Array.from({ length: 100 }, (_, i) => msg(String(1001 + i)));
+  const route = (req: HttpRequest) => {
+    if (!isChannelPage(req)) return [];
+    if (req.url.includes("after=1100")) throw cutOff();
+    return page;
+  };
+  const { listener, logs } = setup(route, seeded);
+  await expect(listener.backfill()).rejects.toThrow("ECONNRESET");
+  expect(logs).toContain(`DISCORD_LISTENER_FAIL backfill channel=${CHANNEL} since=1000 cursor=1100 scanned=100 added=100 at=1/2 ${cutOff().message}`);
+});
+
+test("a scan cut off before it knows its channels says so", async () => {
+  const route = (req: HttpRequest) => {
+    if (req.url.endsWith("/threads/active")) throw cutOff();
+    return [];
+  };
+  const { listener, logs } = setup(route);
+  await expect(listener.backfill()).rejects.toThrow("ECONNRESET");
+  expect(logs).toContain(`DISCORD_LISTENER_FAIL backfill stage=channels ${cutOff().message}`);
+});
+
+test.each([["fails", true], ["succeeds", false]] as const)("a READY that joins the older connection's scan scans again when that scan %s", async (_outcome, dies) => {
+  let entered = () => {};
+  let release = () => {};
+  const atGate = new Promise<void>((r) => { entered = r; });
+  const held = new Promise<void>((r) => { release = r; });
+  let pages = 0;
+  const gate = async (req: HttpRequest) => {
+    if (!isChannelPage(req) || pages > 0) return;
+    pages++;
+    entered();
+    await held;
+  };
+  const route = (req: HttpRequest) => {
+    if (!isChannelPage(req)) return [];
+    if (pages === 1 && dies) { pages++; throw cutOff(); }
+    if (pages === 1) { pages++; return []; }
+    pages++;
+    return [msg("1001")];
+  };
+  const { listener, gw, t, logs, inbox } = setup(route, { ...seeded, gate });
+  listener.start();
+  gw.push({ op: 0, s: 1, t: "READY", d: {} });
+  await atGate;
+  gw.push({ op: 0, s: 2, t: "READY", d: {} });
+  release();
+  await listener.settled();
+  expect(t.timeouts).toEqual(dies ? [1000] : []);
+  expect(logs.filter((l) => l.startsWith("DISCORD_LISTENER_FAIL backfill"))).toHaveLength(dies ? 1 : 0);
+  if (dies) t.reconnect();
+  await listener.settled();
+  expect(inbox().map((r) => r.id)).toEqual(["1000", "1001"]);
+});
+
+test("scan retries back off to a cap, and a finished scan starts the wait over", async () => {
+  let fail = true;
+  const route = (req: HttpRequest) => {
+    if (fail && isChannelPage(req)) throw cutOff();
+    return [];
+  };
+  const { listener, gw, t } = setup(route, seeded);
+  listener.start();
+  gw.push({ op: 0, s: 1, t: "READY", d: {} });
+  await listener.settled();
+  for (let i = 0; i < 9; i++) {
+    t.reconnect();
+    await listener.settled();
+  }
+  expect(t.timeouts).toEqual([1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 300000]);
+  fail = false;
+  t.reconnect();
+  await listener.settled();
+  fail = true;
+  gw.push({ op: 0, s: 2, t: "READY", d: {} });
+  await listener.settled();
+  expect(t.timeouts.at(-1)).toBe(1000);
+});
+
 test("the listener identifies with the message-content intents after hello, heartbeats, and drops a zombie connection", () => {
   const { listener, gw, t } = setup();
   listener.start();

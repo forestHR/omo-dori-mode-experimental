@@ -16,6 +16,8 @@ export const LISTENER_INTENTS = 1 | (1 << 9) | (1 << 12) | (1 << 15);
 const FATAL_CLOSE = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
 // Short cap: a dead network fails each try at once, so a long wait only delays READY after the link is back.
 const MAX_BACKOFF_MS = 10_000;
+// Long cap: a scan can fail for good (a channel it may no longer read), and each retry logs a line.
+const MAX_SCAN_BACKOFF_MS = 300_000;
 
 export type GatewayConnection = {
   send(data: string): void;
@@ -204,6 +206,8 @@ export class DiscordListener {
   private cursor = "0";
   private seq: number | null = null;
   private backoff = 1_000;
+  private scanBackoff = 1_000;
+  private scanRetrying = false;
 
   constructor(private readonly d: ListenerDeps) {
     mkdirSync(dirname(d.inboxFile), { recursive: true, mode: 0o700 });
@@ -491,15 +495,46 @@ export class DiscordListener {
     return this.backfilling;
   }
 
+  // A connect's gap must get read: no other scan comes until the next READY, and the gateway can stay up for hours. A READY
+  // that joins an older connection's scan scans again after it, since that scan may already have passed a channel.
+  private catchUp(): void {
+    const joined = this.backfilling !== null;
+    this.track(this.backfill().then(() => {
+      this.scanBackoff = 1_000;
+      if (joined) this.catchUp();
+    }, () => this.retryScan()), "backfill");
+  }
+
+  private retryScan(): void {
+    if (this.scanRetrying) return;
+    this.scanRetrying = true;
+    const wait = this.scanBackoff;
+    this.scanBackoff = Math.min(wait * 2, MAX_SCAN_BACKOFF_MS);
+    this.d.log(`DISCORD_BACKFILL_RETRY in=${wait}ms`);
+    this.d.timers.setTimeout(() => {
+      this.scanRetrying = false;
+      this.catchUp();
+    }, wait);
+  }
+
+  // The failure line carries the fields of DISCORD_BACKFILL_SCAN, so a log alone can bound what a failed scan left unread.
   private async scanHistory(): Promise<number> {
+    const at = { where: "stage=channels" };
+    return this.scanChannels(at).catch((e: unknown) => {
+      this.d.log(`DISCORD_LISTENER_FAIL backfill ${at.where} ${errText(e)}`);
+      throw e;
+    });
+  }
+
+  private async scanChannels(at: { where: string }): Promise<number> {
     const since = this.cursor;
     const dm = this.d.shadow ? this.dmChannel : (await this.d.dc.call<{ id: string }>("POST", "/users/@me/channels", { recipient_id: this.d.owner })).id;
     const active = await this.d.dc.call<{ threads?: { id: string; parent_id: string }[] }>("GET", `/guilds/${this.d.guild}/threads/active`);
     const watched = this.d.watchBots?.length ? (this.d.watchChannels ?? []) : [];
-    const channels = [this.d.channel, ...(this.d.pairChannel ? [this.d.pairChannel] : []), ...watched, ...(active.threads ?? []).filter((t) => t.parent_id === this.d.channel).map((t) => t.id), ...(dm ? [dm] : [])];
+    const channels = [...new Set([this.d.channel, ...(this.d.pairChannel ? [this.d.pairChannel] : []), ...watched, ...(active.threads ?? []).filter((t) => t.parent_id === this.d.channel).map((t) => t.id), ...(dm ? [dm] : [])])];
     for (const t of active.threads ?? []) this.parents.set(t.id, t.parent_id);
     let added = 0;
-    for (const ch of new Set(channels)) {
+    for (const [i, ch] of channels.entries()) {
       if (this.goneChannels.has(ch)) continue;
       let after = this.scanCursors[ch] ?? "0";
       const start = after;
@@ -507,6 +542,7 @@ export class DiscordListener {
       let accepted = 0;
       let gone = false;
       for (;;) {
+        at.where = `channel=${ch} since=${start} cursor=${after} scanned=${scanned} added=${accepted} at=${i + 1}/${channels.length}`;
         let msgs: DiscordMessage[];
         try {
           msgs = await this.d.dc.call<DiscordMessage[]>("GET", `/channels/${ch}/messages?after=${after}&limit=100`);
@@ -550,7 +586,7 @@ export class DiscordListener {
       this.backoff = 1_000;
       this.self = String((data.user as { id?: string } | undefined)?.id ?? "");
       this.d.log(this.d.shadow ? "DISCORD_LISTENER_READY shadow" : "DISCORD_LISTENER_READY");
-      this.track(this.backfill().then(() => {}), "backfill");
+      this.catchUp();
       this.rolesStale = true;
       this.track(this.readRoles(), "roles");
     } else if (type === "GUILD_CREATE" && data.id === this.d.guild) {
