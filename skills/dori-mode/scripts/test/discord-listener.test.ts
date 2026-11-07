@@ -268,7 +268,7 @@ test("the failure line counts a page cut off halfway, and its cursor stays at th
   expect(logs.some((l) => l.startsWith(`DISCORD_LISTENER_FAIL backfill channel=${CHANNEL} since=1000 cursor=1000 scanned=1 added=1 at=1/2 `))).toBe(true);
 });
 
-test("a finished scan disarms a pending retry, so the next failure waits one second and the old timer scans nothing", async () => {
+test("a finished scan disarms a pending retry: the old timer scans nothing", async () => {
   let fail = true;
   const route = (req: HttpRequest) => {
     if (fail && isChannelPage(req)) throw cutOff();
@@ -281,16 +281,11 @@ test("a finished scan disarms a pending retry, so the next failure waits one sec
   t.reconnect();
   await listener.settled();
   fail = false;
-  gw.push({ op: 0, s: 2, t: "READY", d: {} });
-  await listener.settled();
+  await listener.backfill();
   const scans = calls().length;
   t.reconnect();
   await listener.settled();
   expect(calls()).toHaveLength(scans);
-  fail = true;
-  gw.push({ op: 0, s: 3, t: "READY", d: {} });
-  await listener.settled();
-  expect(t.timeouts.at(-1)).toBe(1000);
 });
 
 test("a READY during a long wait starts the wait over: the link just came back", async () => {
@@ -310,7 +305,7 @@ test("a READY during a long wait starts the wait over: the link just came back",
   expect(t.timeouts).toEqual([1000, 2000, 1000]);
 });
 
-test("scan retries back off to a cap, and a finished scan starts the wait over", async () => {
+test("scan retries back off to a cap, and the next READY starts the wait over", async () => {
   let fail = true;
   const route = (req: HttpRequest) => {
     if (fail && isChannelPage(req)) throw cutOff();

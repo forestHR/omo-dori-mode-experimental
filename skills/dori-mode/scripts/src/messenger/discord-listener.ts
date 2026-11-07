@@ -491,7 +491,10 @@ export class DiscordListener {
 
   // A live event must not jump a history scan past another channel's reconnect gap.
   backfill(): Promise<number> {
-    this.backfilling ??= this.scanHistory().finally(() => { this.backfilling = null; });
+    this.backfilling ??= this.scanHistory().then((added) => {
+      this.pendingRetry = null;
+      return added;
+    }).finally(() => { this.backfilling = null; });
     return this.backfilling;
   }
 
@@ -500,8 +503,6 @@ export class DiscordListener {
   private catchUp(): void {
     const joined = this.backfilling !== null;
     this.track(this.backfill().then(() => {
-      this.scanBackoff = 1_000;
-      this.pendingRetry = null;
       if (joined) this.catchUp();
     }, () => this.retryScan()), "backfill");
   }
