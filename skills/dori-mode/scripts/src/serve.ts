@@ -104,22 +104,34 @@ export const installTaskRefusal = (only: readonly string[], log: string | undefi
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
 
-// The names of the tasks whose action runs this instance's entry point, each as base64 of its UTF-8 so no console
-// encoding changes them. Asked before taskArgv rewrites that entry point.
-export const entryTasksArgv = (stateDir: string): string[] => ["powershell", "-NoProfile", "-NonInteractive", "-Command", [
+// Asked before taskArgv rewrites anything: "runs <name>" for each task whose action runs this instance's entry point,
+// and "other <action>" when the root-folder task called NAME (which Register-ScheduledTask -Force would replace) runs
+// something else. Values are base64 of their UTF-8 so no console encoding changes them; PowerShell's -eq ignores case,
+// as Task Scheduler names do.
+export const entryTasksArgv = (stateDir: string, name: string): string[] => ["powershell", "-NoProfile", "-NonInteractive", "-Command", [
   "$ErrorActionPreference = 'Stop'",
   `$entry = ${data(join(resolve(stateDir), "serve-task.ps1"))}`,
-  "Get-ScheduledTask | Where-Object { @($_.Actions | Where-Object { ([string]$_.Arguments).IndexOf($entry, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_.TaskName)) }",
+  `$name = ${data(name)}`,
+  "$b64 = { param($s) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$s)) }",
+  "foreach ($t in Get-ScheduledTask) { if (@($t.Actions | Where-Object { ([string]$_.Arguments).IndexOf($entry, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) { 'runs ' + (& $b64 $t.TaskName) } elseif ($t.TaskPath -eq '\\' -and $t.TaskName -eq $name) { 'other ' + (& $b64 (@($t.Actions | ForEach-Object { \"$($_.Execute) $($_.Arguments)\" }) -join '; ')) } }",
 ].join("; ")];
-export const entryTasksOf = (out: string): string[] =>
-  out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => Buffer.from(l, "base64").toString("utf8"));
+export type EntryTasks = { readonly runs: readonly string[]; readonly other?: string };
+export const entryTasksOf = (out: string): EntryTasks => {
+  const lines = out.split(/\r?\n/).map((l) => l.trim().split(" ")).filter(([kind, value]) => value !== undefined && (kind === "runs" || kind === "other"));
+  const text = (value: string | undefined) => Buffer.from(value ?? "", "base64").toString("utf8");
+  const other = lines.find(([kind]) => kind === "other");
+  return { runs: lines.filter(([kind]) => kind === "runs").map(([, value]) => text(value)), ...(other ? { other: text(other[1]) } : {}) };
+};
 
-// One task per instance: a task under another name already runs this entry point, and registering a second one would
-// rewrite the launcher it runs and start the same Dori twice. Task Scheduler names ignore case.
-export const entryTaskRefusal = (name: string, owners: readonly string[]): string | undefined => {
-  const other = owners.find((o) => o.toLowerCase() !== name.toLowerCase());
-  return other === undefined ? undefined
-    : `SERVE_TASK_REFUSED this instance already runs as the task "${other}"; register it again under that name (--task-name "${other}") or remove that task first (Unregister-ScheduledTask -TaskName "${other}")`;
+// One task per instance, one instance per task. A task under another name already runs this entry point: a second one
+// would rewrite the launcher it runs and start the same Dori twice. The task called NAME runs something else (another
+// Dori, another program): registering would replace it. Re-registering the task that runs this instance, in any case,
+// goes through.
+export const entryTaskRefusal = (name: string, found: EntryTasks): string | undefined => {
+  const other = found.runs.find((o) => o.toLowerCase() !== name.toLowerCase());
+  if (other !== undefined) return `SERVE_TASK_REFUSED this instance already runs as the task "${other}"; register it again under that name (--task-name "${other}") or remove that task first (Unregister-ScheduledTask -TaskName "${other}")`;
+  if (found.other !== undefined) return `SERVE_TASK_REFUSED the task "${name}" runs something else (${found.other.slice(0, 160)}); pick another --task-name, or remove that task first if it is not needed`;
+  return undefined;
 };
 export const taskArgv = (bun: string, cli: string, stateDir: string, name: string = TASK_NAME): string[] => {
   const state = resolve(stateDir);

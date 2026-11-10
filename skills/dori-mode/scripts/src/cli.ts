@@ -2053,7 +2053,7 @@ try {
         const refused = installTaskRefusal((Array.isArray(flags.values.only) ? flags.values.only : []).map(String), opt("log"), taskName);
         if (refused) die(refused);
         const name = taskName ?? TASK_NAME;
-        const owners = await run(entryTasksArgv(config.stateDir));
+        const owners = await run(entryTasksArgv(config.stateDir, name));
         if (owners.code !== 0) die(`SERVE_TASK_FAIL cannot list the tasks that run this instance: ${(owners.err || owners.out).slice(0, 200)}`);
         const taken = entryTaskRefusal(name, entryTasksOf(owners.out));
         if (taken) die(taken);

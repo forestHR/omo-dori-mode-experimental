@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { powershellLiteral as quote } from "../src/powershell.ts";
@@ -176,6 +176,18 @@ test.skipIf(process.platform !== "win32")("dori serve --install-task --task-name
     expect(await cli("--install-task")).toMatchObject({ code: 1, text: expect.stringContaining("SERVE_TASK_REFUSED this instance already runs") });
     expect({ other: await registered(`${name}-other`), defaultTask: await registered(TASK_NAME), launcher: readFileSync(join(state, "serve-task.ps1")).equals(launcher) })
       .toEqual({ other: "False", defaultTask: defaultBefore, launcher: true });
+    // When another instance asks for that name, then it is refused and the task still runs the first instance.
+    const action = async () => (await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+      `(Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction Stop).Actions[0].Arguments`])).trim();
+    const before = await action();
+    const otherState = join(root, "other state");
+    const otherConfig = join(root, "other.json");
+    writeFileSync(otherConfig, JSON.stringify({ stateDir: otherState }));
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/cli.ts"), "serve", "--install-task", "--task-name", name],
+      { env: { ...env, DORI_CONFIG: otherConfig, DORI_STATE_DIR: otherState }, stdout: "pipe", stderr: "pipe" });
+    const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    expect({ code, text: out + err }).toMatchObject({ code: 1, text: expect.stringContaining(`SERVE_TASK_REFUSED the task "${name}" runs something else`) });
+    expect({ action: await action(), otherLauncher: existsSync(join(otherState, "serve-task.ps1")) }).toEqual({ action: before, otherLauncher: false });
     // When it is registered again under its own name, then that goes through in place.
     expect(await cli("--install-task", "--task-name", name.toUpperCase())).toMatchObject({ code: 0 });
   } finally {

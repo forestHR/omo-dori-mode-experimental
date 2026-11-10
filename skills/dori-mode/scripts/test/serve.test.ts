@@ -146,13 +146,17 @@ test("--install-task --task-name takes any non-blank name and refuses a blank on
   expect(installTaskRefusal([], undefined, "  ")).toStartWith("SERVE_TASK_REFUSED --task-name");
 });
 
-test("an instance already run by a task under another name is refused; the same name, in any case, registers again in place", () => {
-  const owners = entryTasksOf(`${Buffer.from("Dori serve (맛도리)").toString("base64")}\r\n\r\n`);
-  expect(owners).toEqual(["Dori serve (맛도리)"]);
-  expect(entryTaskRefusal("Dori serve (맛도리)", owners)).toBeUndefined();
-  expect(entryTaskRefusal("dori SERVE (맛도리)", owners)).toBeUndefined();
-  expect(entryTaskRefusal("Dori serve", owners)).toStartWith('SERVE_TASK_REFUSED this instance already runs as the task "Dori serve (맛도리)"');
-  expect(entryTaskRefusal("Dori serve", [])).toBeUndefined();
+test("an instance already run by a task under another name, or a name whose task runs something else, is refused; the task that runs this instance registers again in place", () => {
+  const b64 = (s: string) => Buffer.from(s).toString("base64");
+  const found = entryTasksOf(`runs ${b64("Dori serve (맛도리)")}\r\n\r\n`);
+  expect(found).toEqual({ runs: ["Dori serve (맛도리)"] });
+  expect(entryTaskRefusal("Dori serve (맛도리)", found)).toBeUndefined();
+  expect(entryTaskRefusal("dori SERVE (맛도리)", found)).toBeUndefined();
+  expect(entryTaskRefusal("Dori serve", found)).toStartWith('SERVE_TASK_REFUSED this instance already runs as the task "Dori serve (맛도리)"');
+  const taken = entryTasksOf(`other ${b64("C:\\Windows\\System32\\conhost.exe --headless ... metdori")}\n`);
+  expect(taken).toEqual({ runs: [], other: "C:\\Windows\\System32\\conhost.exe --headless ... metdori" });
+  expect(entryTaskRefusal("Dori serve (metdori)", taken)).toStartWith('SERVE_TASK_REFUSED the task "Dori serve (metdori)" runs something else');
+  expect(entryTaskRefusal("Dori serve", entryTasksOf(""))).toBeUndefined();
 });
 
 test("on native Windows a hook naming dori runs this CLI with this Bun, the arguments as they are; elsewhere it runs as named", () => {
