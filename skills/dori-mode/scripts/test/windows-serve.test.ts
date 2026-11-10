@@ -197,6 +197,33 @@ test.skipIf(process.platform !== "win32")("dori serve --install-task --task-name
   }
 }, 60_000);
 
+test.skipIf(process.platform !== "win32")("a task that only mentions the instance's launcher is not taken for it: installing under its name is refused and it stays", async () => {
+  // Given a task whose action merely prints this instance's launcher path.
+  const root = mkdtempSync(join(tmpdir(), "dori-task-mention-"));
+  const state = join(root, "state");
+  const config = join(root, "config.json");
+  writeFileSync(config, JSON.stringify({ stateDir: state }));
+  const name = `Dori-test-${crypto.randomUUID()}`;
+  const mention = `-NoProfile -Command "Write-Output '${join(state, "serve-task.ps1")}'"`;
+  const actionOf = async () => (await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+    `(Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction Stop).Actions[0].Arguments`])).trim();
+  try {
+    await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+      `Register-ScheduledTask -TaskName ${quote(name)} -Action (New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${quote(mention)}) -RunLevel Limited | Out-Null`]);
+    // When this instance is installed under that name.
+    const env = { ...Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("DORI_"))), DORI_CONFIG: config, DORI_STATE_DIR: state, DORI_ENV_FILE: join(root, "dori.env") };
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/cli.ts"), "serve", "--install-task", "--task-name", name], { env, stdout: "pipe", stderr: "pipe" });
+    const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    // Then it is refused as a task that runs something else, and the task keeps its action.
+    expect({ code, text: out + err }).toMatchObject({ code: 1, text: expect.stringContaining(`SERVE_TASK_REFUSED the task "${name}" runs something else`) });
+    expect(await actionOf()).toBe(mention);
+  } finally {
+    await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+      `Get-ScheduledTask | Where-Object { $_.TaskName -eq ${quote(name)} } | Unregister-ScheduledTask -Confirm:$false`]);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test.skipIf(process.platform !== "win32")("review 2 registered action preserves quoted instance paths without inherited environment", async () => {
   // Given an actual registered task with curly quotes and shell metacharacters in its paths.
   await using task = taskFixture();

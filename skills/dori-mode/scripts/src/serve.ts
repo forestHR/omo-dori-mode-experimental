@@ -104,7 +104,8 @@ export const installTaskRefusal = (only: readonly string[], log: string | undefi
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
 
-// Asked before taskArgv rewrites anything: "runs <name>" for each task whose action runs this instance's entry point,
+// Asked before taskArgv rewrites anything: "runs <path+name>" for each task (in any folder) with an action that runs
+// this instance's entry point (its arguments end in -File "<entry>", as both the windowless and the older launcher do),
 // and "other <action>" when the root-folder task called NAME (which Register-ScheduledTask -Force would replace) runs
 // something else. Values are base64 of their UTF-8 so no console encoding changes them; PowerShell's -eq ignores case,
 // as Task Scheduler names do.
@@ -113,7 +114,8 @@ export const entryTasksArgv = (stateDir: string, name: string): string[] => ["po
   `$entry = ${data(join(resolve(stateDir), "serve-task.ps1"))}`,
   `$name = ${data(name)}`,
   "$b64 = { param($s) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$s)) }",
-  "foreach ($t in Get-ScheduledTask) { if (@($t.Actions | Where-Object { ([string]$_.Arguments).IndexOf($entry, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) { 'runs ' + (& $b64 $t.TaskName) } elseif ($t.TaskPath -eq '\\' -and $t.TaskName -eq $name) { 'other ' + (& $b64 (@($t.Actions | ForEach-Object { \"$($_.Execute) $($_.Arguments)\" }) -join '; ')) } }",
+  "$tail = '-File \"' + $entry + '\"'",
+  "foreach ($t in Get-ScheduledTask) { if (@($t.Actions | Where-Object { ([string]$_.Arguments).TrimEnd().EndsWith($tail, [StringComparison]::OrdinalIgnoreCase) }).Count) { 'runs ' + (& $b64 ($t.TaskPath + $t.TaskName)) } elseif ($t.TaskPath -eq '\\' -and $t.TaskName -eq $name) { 'other ' + (& $b64 (@($t.Actions | ForEach-Object { \"$($_.Execute) $($_.Arguments)\" }) -join '; ')) } }",
 ].join("; ")];
 export type EntryTasks = { readonly runs: readonly string[]; readonly other?: string };
 export const entryTasksOf = (out: string): EntryTasks => {
@@ -128,7 +130,8 @@ export const entryTasksOf = (out: string): EntryTasks => {
 // Dori, another program): registering would replace it. Re-registering the task that runs this instance, in any case,
 // goes through.
 export const entryTaskRefusal = (name: string, found: EntryTasks): string | undefined => {
-  const other = found.runs.find((o) => o.toLowerCase() !== name.toLowerCase());
+  // runs holds full paths: only the root-folder task called NAME is the one registering replaces in place
+  const other = found.runs.find((o) => o.toLowerCase() !== `\\${name}`.toLowerCase())?.replace(/^\\(?=[^\\]*$)/, "");
   if (other !== undefined) return `SERVE_TASK_REFUSED this instance already runs as the task "${other}"; register it again under that name (--task-name "${other}") or remove that task first (Unregister-ScheduledTask -TaskName "${other}")`;
   if (found.other !== undefined) return `SERVE_TASK_REFUSED the task "${name}" runs something else (${found.other.slice(0, 160)}); pick another --task-name, or remove that task first if it is not needed`;
   return undefined;

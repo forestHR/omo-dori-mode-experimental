@@ -148,8 +148,11 @@ test("--install-task --task-name takes any non-blank name and refuses a blank on
 
 test("an instance already run by a task under another name, or a name whose task runs something else, is refused; the task that runs this instance registers again in place", () => {
   const b64 = (s: string) => Buffer.from(s).toString("base64");
-  const found = entryTasksOf(`runs ${b64("Dori serve (맛도리)")}\r\n\r\n`);
-  expect(found).toEqual({ runs: ["Dori serve (맛도리)"] });
+  const found = entryTasksOf(`runs ${b64("\\Dori serve (맛도리)")}\r\n\r\n`);
+  expect(found).toEqual({ runs: ["\\Dori serve (맛도리)"] });
+  // the same name in another folder is another task: registering the root one would be a second task for this instance
+  expect(entryTaskRefusal("Dori serve (맛도리)", { runs: ["\\Dori\\Dori serve (맛도리)"] }))
+    .toStartWith('SERVE_TASK_REFUSED this instance already runs as the task "\\Dori\\Dori serve (맛도리)"');
   expect(entryTaskRefusal("Dori serve (맛도리)", found)).toBeUndefined();
   expect(entryTaskRefusal("dori SERVE (맛도리)", found)).toBeUndefined();
   expect(entryTaskRefusal("Dori serve", found)).toStartWith('SERVE_TASK_REFUSED this instance already runs as the task "Dori serve (맛도리)"');
