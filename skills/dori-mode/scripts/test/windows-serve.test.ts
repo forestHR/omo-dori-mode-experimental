@@ -170,9 +170,17 @@ test.skipIf(process.platform !== "win32")("dori serve --install-task --task-name
     // When it comes with --install-task, then the task is registered under it and the line names it.
     expect(await cli("--install-task", "--task-name", name)).toMatchObject({ code: 0, text: expect.stringContaining(`SERVE_TASK_INSTALLED "${name}" at logon`) });
     expect({ named: await registered(), defaultTask: await registered(TASK_NAME) }).toEqual({ named: "True", defaultTask: defaultBefore });
+    // When the same instance is registered under another name, or none, then that is refused and its launcher stays as it was.
+    const launcher = readFileSync(join(state, "serve-task.ps1"));
+    expect(await cli("--install-task", "--task-name", `${name}-other`)).toMatchObject({ code: 1, text: expect.stringContaining(`SERVE_TASK_REFUSED this instance already runs as the task "${name}"`) });
+    expect(await cli("--install-task")).toMatchObject({ code: 1, text: expect.stringContaining("SERVE_TASK_REFUSED this instance already runs") });
+    expect({ other: await registered(`${name}-other`), defaultTask: await registered(TASK_NAME), launcher: readFileSync(join(state, "serve-task.ps1")).equals(launcher) })
+      .toEqual({ other: "False", defaultTask: defaultBefore, launcher: true });
+    // When it is registered again under its own name, then that goes through in place.
+    expect(await cli("--install-task", "--task-name", name.toUpperCase())).toMatchObject({ code: 0 });
   } finally {
     await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-      `Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false`]);
+      `Get-ScheduledTask | Where-Object { $_.TaskName -in @(${quote(name)}, ${quote(`${name}-other`)}) } | Unregister-ScheduledTask -Confirm:$false`]);
     rmSync(root, { recursive: true, force: true });
   }
 }, 60_000);

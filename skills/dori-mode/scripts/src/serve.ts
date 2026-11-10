@@ -103,6 +103,24 @@ export const installTaskRefusal = (only: readonly string[], log: string | undefi
 
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
+
+// The names of the tasks whose action runs this instance's entry point, each as base64 of its UTF-8 so no console
+// encoding changes them. Asked before taskArgv rewrites that entry point.
+export const entryTasksArgv = (stateDir: string): string[] => ["powershell", "-NoProfile", "-NonInteractive", "-Command", [
+  "$ErrorActionPreference = 'Stop'",
+  `$entry = ${data(join(resolve(stateDir), "serve-task.ps1"))}`,
+  "Get-ScheduledTask | Where-Object { @($_.Actions | Where-Object { ([string]$_.Arguments).IndexOf($entry, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count } | ForEach-Object { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_.TaskName)) }",
+].join("; ")];
+export const entryTasksOf = (out: string): string[] =>
+  out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => Buffer.from(l, "base64").toString("utf8"));
+
+// One task per instance: a task under another name already runs this entry point, and registering a second one would
+// rewrite the launcher it runs and start the same Dori twice. Task Scheduler names ignore case.
+export const entryTaskRefusal = (name: string, owners: readonly string[]): string | undefined => {
+  const other = owners.find((o) => o.toLowerCase() !== name.toLowerCase());
+  return other === undefined ? undefined
+    : `SERVE_TASK_REFUSED this instance already runs as the task "${other}"; register it again under that name (--task-name "${other}") or remove that task first (Unregister-ScheduledTask -TaskName "${other}")`;
+};
 export const taskArgv = (bun: string, cli: string, stateDir: string, name: string = TASK_NAME): string[] => {
   const state = resolve(stateDir);
   const entry = join(state, "serve-task.ps1");

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { fileLog, installTaskRefusal, keep, linesOf, type Running, serve, serveLoops, spawnLoop } from "../src/serve.ts";
+import { entryTaskRefusal, entryTasksOf, fileLog, installTaskRefusal, keep, linesOf, type Running, serve, serveLoops, spawnLoop } from "../src/serve.ts";
 import { commandArgv } from "../src/run.ts";
 import { fakeClock } from "./fakes.ts";
 
@@ -144,6 +144,15 @@ test("--install-task --task-name takes any non-blank name and refuses a blank on
   expect(installTaskRefusal([], undefined, "Dori serve (mydori)")).toBeUndefined();
   expect(installTaskRefusal([], undefined, "")).toStartWith("SERVE_TASK_REFUSED --task-name");
   expect(installTaskRefusal([], undefined, "  ")).toStartWith("SERVE_TASK_REFUSED --task-name");
+});
+
+test("an instance already run by a task under another name is refused; the same name, in any case, registers again in place", () => {
+  const owners = entryTasksOf(`${Buffer.from("Dori serve (맛도리)").toString("base64")}\r\n\r\n`);
+  expect(owners).toEqual(["Dori serve (맛도리)"]);
+  expect(entryTaskRefusal("Dori serve (맛도리)", owners)).toBeUndefined();
+  expect(entryTaskRefusal("dori SERVE (맛도리)", owners)).toBeUndefined();
+  expect(entryTaskRefusal("Dori serve", owners)).toStartWith('SERVE_TASK_REFUSED this instance already runs as the task "Dori serve (맛도리)"');
+  expect(entryTaskRefusal("Dori serve", [])).toBeUndefined();
 });
 
 test("on native Windows a hook naming dori runs this CLI with this Bun, the arguments as they are; elsewhere it runs as named", () => {
