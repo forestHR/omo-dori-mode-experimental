@@ -140,19 +140,51 @@ test.skipIf(process.platform !== "win32")("the task registers under the given na
     .toEqual({ runLevel: "Limited", restartCount: 3, restartInterval: "PT1M", instances: "IgnoreNew" });
 }, 40_000);
 
+test.skipIf(process.platform !== "win32")("dori serve --install-task --task-name registers that name and prints it; --task-name alone or blank registers nothing", async () => {
+  // Given a throwaway instance and a unique task name.
+  const root = mkdtempSync(join(tmpdir(), "dori-task-cli-"));
+  const state = join(root, "state");
+  const config = join(root, "config.json");
+  writeFileSync(config, JSON.stringify({ stateDir: state }));
+  const name = `Dori-test-${crypto.randomUUID()}`;
+  const env = { ...Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("DORI_"))), DORI_CONFIG: config, DORI_STATE_DIR: state, DORI_ENV_FILE: join(root, "dori.env") };
+  const cli = async (...args: string[]) => {
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/cli.ts"), "serve", ...args], { env, stdout: "pipe", stderr: "pipe" });
+    const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    return { code, text: out + err };
+  };
+  const registered = async () => (await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+    `[bool](Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction SilentlyContinue)`])).trim();
+  try {
+    // When --task-name comes without --install-task, or blank, then nothing is registered.
+    expect(await cli("--task-name", name)).toMatchObject({ code: 1, text: expect.stringContaining("SERVE_TASK_REFUSED") });
+    expect(await cli("--install-task", "--task-name", " ")).toMatchObject({ code: 1, text: expect.stringContaining("SERVE_TASK_REFUSED") });
+    expect(await registered()).toBe("False");
+    // When it comes with --install-task, then the task is registered under it and the line names it.
+    expect(await cli("--install-task", "--task-name", name)).toMatchObject({ code: 0, text: expect.stringContaining(`SERVE_TASK_INSTALLED "${name}" at logon`) });
+    expect(await registered()).toBe("True");
+  } finally {
+    await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+      `Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false`]);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test.skipIf(process.platform !== "win32")("review 2 registered action preserves quoted instance paths without inherited environment", async () => {
   // Given an actual registered task with curly quotes and shell metacharacters in its paths.
   await using task = taskFixture();
   await task.register();
   // conhost --headless runs its child only under Task Scheduler (started from a pipe it returns at once), so the task itself is started
-  const written = new Promise<void>((resolve) => {
-    const watcher = watch(dirname(task.capture), (_event, file) => {
-      if (file === basename(task.capture)) { watcher.close(); resolve(); }
-    });
-  });
-  // When Task Scheduler starts it with its own logon environment, none of this process's DORI_ variables.
-  await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command", `Start-ScheduledTask -TaskName ${quote(task.name)} -ErrorAction Stop`]);
-  await written;
+  let done = () => {};
+  const written = new Promise<void>((resolve) => { done = resolve; });
+  const watcher = watch(dirname(task.capture), (_event, file) => { if (file === basename(task.capture)) done(); });
+  try {
+    // When Task Scheduler starts it with its own logon environment, none of this process's DORI_ variables.
+    await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command", `Start-ScheduledTask -TaskName ${quote(task.name)} -ErrorAction Stop`]);
+    await written;
+  } finally {
+    watcher.close();
+  }
   // Then the real child receives the selected instance and exact arguments.
   expect(await Bun.file(task.capture).json()).toEqual(task.expected);
 }, 40_000);
