@@ -140,6 +140,12 @@ test("--install-task with --only or --log is refused, not registered without the
   expect(installTaskRefusal([], undefined)).toBeUndefined();
 });
 
+test("--install-task --task-name takes any non-blank name and refuses a blank one", () => {
+  expect(installTaskRefusal([], undefined, "Dori serve (mydori)")).toBeUndefined();
+  expect(installTaskRefusal([], undefined, "")).toStartWith("SERVE_TASK_REFUSED --task-name");
+  expect(installTaskRefusal([], undefined, "  ")).toStartWith("SERVE_TASK_REFUSED --task-name");
+});
+
 test("on native Windows a hook naming dori runs this CLI with this Bun, the arguments as they are; elsewhere it runs as named", () => {
   const argv = ["dori", "thread", "reply", "chat:1", "a & b | \"c\""];
   const win = commandArgv(argv, "win32");

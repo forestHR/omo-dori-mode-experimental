@@ -94,9 +94,12 @@ export const fileLog = (file: string, clock: Clock): ((line: string) => void) =>
   return (line) => appendFileSync(file, `${new Date(clock.now()).toISOString().slice(0, 19)}Z ${line}\n`);
 };
 
-// The logon task always runs every loop with the default log; --only or --log with --install-task is refused, not dropped.
-export const installTaskRefusal = (only: readonly string[], log: string | undefined): string | undefined =>
-  only.length || log ? "SERVE_TASK_REFUSED --install-task registers every loop with the default log; run it without --only and --log" : undefined;
+// The logon task always runs every loop with the default log; --only or --log with --install-task is refused, not dropped,
+// and so is a blank --task-name (Task Scheduler has no task without a name).
+export const installTaskRefusal = (only: readonly string[], log: string | undefined, name?: string): string | undefined =>
+  only.length || log ? "SERVE_TASK_REFUSED --install-task registers every loop with the default log; run it without --only and --log"
+  : name !== undefined && !name.trim() ? "SERVE_TASK_REFUSED --task-name needs a name, for example --task-name \"Dori serve (mydori)\""
+  : undefined;
 
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
@@ -115,11 +118,13 @@ exit $LASTEXITCODE
 `);
   const registration = [
     "$ErrorActionPreference = 'Stop'",
-    `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${data(`-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${entry}"`)}`,
+    // conhost --headless gives the task a console with no window
+    `$action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\\conhost.exe') -Argument ${data(`--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${entry}"`)}`,
     // a logon trigger for this user only: an all-users trigger needs an elevated caller
     "$trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)",
-    // keep supervising on a laptop that runs on battery
-    "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+    // keep supervising on a laptop that runs on battery, start again up to 3 times a minute apart when it fails,
+    // and never run a second copy next to a running one
+    "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew",
     "$settings.ExecutionTimeLimit = 'PT0S'",
     `Register-ScheduledTask -TaskName ${data(name)} -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null`,
   ].join("; ");

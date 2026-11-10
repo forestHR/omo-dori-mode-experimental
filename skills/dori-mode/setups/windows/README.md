@@ -49,9 +49,10 @@ For logon startup:
 
 ```powershell
 dori serve --install-task
+dori serve --install-task --task-name "Dori serve (mydori)"
 ```
 
-This registers the limited-privilege task `Dori serve` with a logon trigger for the current user only (no elevation needed), `ExecutionTimeLimit=PT0S` (no execution timeout), and battery power allowed both to start it and to keep it running. Its generated entry point preserves the selected configuration, environment-file and state paths. Registering it again updates that task to the currently selected instance.
+This registers the limited-privilege task `Dori serve`, or the name `--task-name` gives (a blank name is refused), and prints `SERVE_TASK_INSTALLED "<name>" at logon`. Give each Dori on one PC its own name, run through its own wrapper so the right instance is selected; tasks that share a name replace each other. The task has a logon trigger for the current user only (no elevation needed, `RunLevel Limited`) and runs `%WINDIR%\System32\conhost.exe --headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<stateDir>\serve-task.ps1"`, so no window opens. A task that fails is started again up to 3 times a minute apart (`RestartCount 3`, `RestartInterval PT1M`), a start while it runs is ignored (`MultipleInstances IgnoreNew`), `ExecutionTimeLimit=PT0S` (no execution timeout), and battery power is allowed both to start it and to keep it running. Its generated entry point preserves the selected configuration, environment-file and state paths. Registering it again under the same name updates that task to the currently selected instance.
 
 Lane checkpoints (`dori checkpoint`) are refused on native Windows for now: the journal's durability flushes need handles Windows cannot flush, so the step is refused before anything is written. The cost-record lock that closing a lane takes works natively.
 

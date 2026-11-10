@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { powershellLiteral as quote } from "../src/powershell.ts";
 import { taskArgv, TASK_NAME } from "../src/serve.ts";
 
@@ -22,10 +22,12 @@ const taskFixture = () => {
   const envFile = join(dir, "chosen.env");
   const capture = join(root, "task.json");
   const cli = join(dir, "task-child.ts");
-  writeFileSync(cli, `await Bun.write(${JSON.stringify(capture)}, JSON.stringify({
+  // written whole, then renamed into place, so its appearance means it is complete
+  writeFileSync(cli, `await Bun.write(${JSON.stringify(`${capture}.tmp`)}, JSON.stringify({
     config: process.env.DORI_CONFIG, env: process.env.DORI_ENV_FILE, state: process.env.DORI_STATE_DIR,
     argv: process.argv.slice(2),
-  }));`);
+  }));
+  require("node:fs").renameSync(${JSON.stringify(`${capture}.tmp`)}, ${JSON.stringify(capture)});`);
   const previousConfig = process.env.DORI_CONFIG;
   const previousEnv = process.env.DORI_ENV_FILE;
   let argv: string[];
@@ -42,14 +44,17 @@ const taskFixture = () => {
   }
   let registered = false;
   return {
-    capture, expected: { config, env: envFile, state, argv: ["serve", "--log", join(state, "serve.log")] },
+    name, state, capture, expected: { config, env: envFile, state, argv: ["serve", "--log", join(state, "serve.log")] },
     async register() { await execute(argv); registered = true; },
     async query() {
       const output = await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command", `
         $task = Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction Stop
         @{ limit = $task.Settings.ExecutionTimeLimit; execute = $task.Actions[0].Execute; arguments = $task.Actions[0].Arguments;
            user = [string]$task.Triggers[0].UserId; me = [Security.Principal.WindowsIdentity]::GetCurrent().Name;
-           noBatteryStart = [bool]$task.Settings.DisallowStartIfOnBatteries; batteryStop = [bool]$task.Settings.StopIfGoingOnBatteries } | ConvertTo-Json -Compress
+           noBatteryStart = [bool]$task.Settings.DisallowStartIfOnBatteries; batteryStop = [bool]$task.Settings.StopIfGoingOnBatteries;
+           name = $task.TaskName; runLevel = [string]$task.Principal.RunLevel; restartCount = [int]$task.Settings.RestartCount;
+           restartInterval = [string]$task.Settings.RestartInterval; instances = [string]$task.Settings.MultipleInstances;
+           windir = $env:WINDIR } | ConvertTo-Json -Compress
       `]);
       const value: unknown = JSON.parse(output);
       if (typeof value !== "object" || value === null ||
@@ -58,8 +63,14 @@ const taskFixture = () => {
           !("arguments" in value) || typeof value.arguments !== "string" ||
           !("user" in value) || typeof value.user !== "string" || !("me" in value) || typeof value.me !== "string" ||
           !("noBatteryStart" in value) || typeof value.noBatteryStart !== "boolean" ||
-          !("batteryStop" in value) || typeof value.batteryStop !== "boolean") throw new TypeError("Invalid registered task settings");
-      return { limit: value.limit, execute: value.execute, arguments: value.arguments, user: value.user, me: value.me, noBatteryStart: value.noBatteryStart, batteryStop: value.batteryStop };
+          !("batteryStop" in value) || typeof value.batteryStop !== "boolean" ||
+          !("name" in value) || typeof value.name !== "string" || !("runLevel" in value) || typeof value.runLevel !== "string" ||
+          !("restartCount" in value) || typeof value.restartCount !== "number" ||
+          !("restartInterval" in value) || typeof value.restartInterval !== "string" ||
+          !("instances" in value) || typeof value.instances !== "string" ||
+          !("windir" in value) || typeof value.windir !== "string") throw new TypeError("Invalid registered task settings");
+      return { limit: value.limit, execute: value.execute, arguments: value.arguments, user: value.user, me: value.me, noBatteryStart: value.noBatteryStart, batteryStop: value.batteryStop,
+        name: value.name, runLevel: value.runLevel, restartCount: value.restartCount, restartInterval: value.restartInterval, instances: value.instances, windir: value.windir };
     },
     async [Symbol.asyncDispose]() {
       try {
@@ -115,18 +126,33 @@ test.skipIf(process.platform !== "win32")("review 1 of #306 the logon trigger is
   expect({ noBatteryStart: got.noBatteryStart, batteryStop: got.batteryStop }).toEqual({ noBatteryStart: false, batteryStop: false });
 }, 40_000);
 
+test.skipIf(process.platform !== "win32")("the task registers under the given name with the helper's settings: no window, Limited, 3 restarts a minute apart, no second copy", async () => {
+  // Given the production registration of an actual Windows task under a chosen name.
+  await using task = taskFixture();
+  await task.register();
+  // When it is read back by that name.
+  const got = await task.query();
+  // Then it is the name given, run through a headless conhost, without elevation, restarted 3 times a minute apart, never twice at once.
+  expect(got.name).toBe(task.name);
+  expect(got.execute.toLowerCase()).toBe(join(got.windir, "System32", "conhost.exe").toLowerCase());
+  expect(got.arguments).toBe(`--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${join(task.state, "serve-task.ps1")}"`);
+  expect({ runLevel: got.runLevel, restartCount: got.restartCount, restartInterval: got.restartInterval, instances: got.instances })
+    .toEqual({ runLevel: "Limited", restartCount: 3, restartInterval: "PT1M", instances: "IgnoreNew" });
+}, 40_000);
+
 test.skipIf(process.platform !== "win32")("review 2 registered action preserves quoted instance paths without inherited environment", async () => {
   // Given an actual registered task with curly quotes and shell metacharacters in its paths.
   await using task = taskFixture();
   await task.register();
-  const action = await task.query();
-  const env = Object.fromEntries(Object.entries(Bun.env).filter(([name]) => !name.startsWith("DORI_")));
-  // When its registered action executes under a clean logon-like environment.
-  const child = Bun.spawn(["cmd", "/d", "/s", "/c", `"${action.execute} ${action.arguments}"`], {
-    env, stdout: "pipe", stderr: "pipe", windowsVerbatimArguments: true,
+  // conhost --headless runs its child only under Task Scheduler (started from a pipe it returns at once), so the task itself is started
+  const written = new Promise<void>((resolve) => {
+    const watcher = watch(dirname(task.capture), (_event, file) => {
+      if (file === basename(task.capture)) { watcher.close(); resolve(); }
+    });
   });
-  const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  // When Task Scheduler starts it with its own logon environment, none of this process's DORI_ variables.
+  await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command", `Start-ScheduledTask -TaskName ${quote(task.name)} -ErrorAction Stop`]);
+  await written;
   // Then the real child receives the selected instance and exact arguments.
-  expect({ code, out, err }).toMatchObject({ code: 0 });
   expect(await Bun.file(task.capture).json()).toEqual(task.expected);
 }, 40_000);

@@ -89,12 +89,13 @@ const USAGE = `dori <command> [options]
 
   lead                                 print the live lead as "<aoe-id> <tmux-session>" (herdr: "<omo session id> <pane>"),
                                        " stopped" after it when its session or agent is not running
-  serve [--log FILE] [--only TAG ...] [--install-task]
+  serve [--log FILE] [--only TAG ...] [--install-task [--task-name NAME]]
                                        keep this Dori's loops running in one process where there is no systemd (native
                                        Windows): watch, freshness, dead-panes, guard, state-git, inbound discord and the
                                        session watcher, each started again when it exits, every line stamped and tagged in
                                        --log (default <stateDir>/serve.log); --install-task registers it with the Windows
-                                       Task Scheduler to start at logon with no execution time limit
+                                       Task Scheduler as NAME (default "Dori serve") to start at logon with no window, no
+                                       execution time limit, 3 restarts a minute apart and no second copy
   revive <herdr pane> [--text TEXT]    start the omo session recorded for a herdr pane whose agent is gone again in that
                                        pane (omo --session-id), wait for its prompt and type TEXT; REVIVE_OK or REVIVE_FAIL;
                                        a pane whose agent runs is left alone (REVIVE_ALREADY_RUNNING)
@@ -605,7 +606,7 @@ const flags = parseArgs({
     reply: { type: "string" }, again: { type: "boolean" }, channel: { type: "string" }, "reply-to": { type: "string" }, posted: { type: "string" }, "post-summary": { type: "boolean" }, "rollover-outcome": { type: "string" }, "rollover-unresolved": { type: "boolean" }, stuck: { type: "boolean" },
     step: { type: "string" }, "remote-effect": { type: "string", multiple: true },
     "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
-    "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
+    "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, "task-name": { type: "string" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
     source: { type: "string" },
   },
 });
@@ -2046,12 +2047,15 @@ try {
     case "serve": {
       const cli = fileURLToPath(import.meta.url);
       const sessionWatch = fileURLToPath(new URL("../../setups/discord-aoe/session-watch.ts", import.meta.url));
+      const taskName = opt("task-name");
+      if (taskName !== undefined && !flags.values["install-task"]) die("SERVE_TASK_REFUSED --task-name names the task --install-task registers; add --install-task");
       if (flags.values["install-task"]) {
-        const refused = installTaskRefusal((Array.isArray(flags.values.only) ? flags.values.only : []).map(String), opt("log"));
+        const refused = installTaskRefusal((Array.isArray(flags.values.only) ? flags.values.only : []).map(String), opt("log"), taskName);
         if (refused) die(refused);
-        const argv = taskArgv(process.execPath, cli, config.stateDir);
+        const name = taskName ?? TASK_NAME;
+        const argv = taskArgv(process.execPath, cli, config.stateDir, name);
         const r = await run(argv);
-        console.log(r.code === 0 ? `SERVE_TASK_INSTALLED "${TASK_NAME}" at logon` : `SERVE_TASK_FAIL ${(r.err || r.out).slice(0, 200)}`);
+        console.log(r.code === 0 ? `SERVE_TASK_INSTALLED "${name}" at logon` : `SERVE_TASK_FAIL ${(r.err || r.out).slice(0, 200)}`);
         if (r.code !== 0) process.exitCode = 1;
         break;
       }
