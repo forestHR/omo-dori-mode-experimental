@@ -74,8 +74,14 @@ const taskFixture = () => {
     },
     async [Symbol.asyncDispose]() {
       try {
-        if (registered) await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-          `Unregister-ScheduledTask -TaskName ${quote(name)} -Confirm:$false -ErrorAction Stop`]);
+        // Unregister-ScheduledTask leaves a started task running: end every process naming this fixture's folder, and their
+        // descendants, first
+        if (registered) await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command", `
+          $all = @(Get-CimInstance Win32_Process); $ids = [Collections.Generic.HashSet[uint32]]::new()
+          $all | Where-Object { $_.CommandLine -and $_.CommandLine.Contains(${quote(root)}) -and $_.ProcessId -ne $PID } | ForEach-Object { [void]$ids.Add($_.ProcessId) }
+          do { $grew = $false; foreach ($p in $all) { if ($ids.Contains($p.ParentProcessId) -and $ids.Add($p.ProcessId)) { $grew = $true } } } while ($grew)
+          foreach ($id in $ids) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+          Unregister-ScheduledTask -TaskName ${quote(name)} -Confirm:$false -ErrorAction Stop`]);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -153,16 +159,17 @@ test.skipIf(process.platform !== "win32")("dori serve --install-task --task-name
     const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
     return { code, text: out + err };
   };
-  const registered = async () => (await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-    `[bool](Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction SilentlyContinue)`])).trim();
+  const registered = async (task = name) => (await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+    `[bool](Get-ScheduledTask -TaskName ${quote(task)} -ErrorAction SilentlyContinue)`])).trim();
+  const defaultBefore = await registered(TASK_NAME);
   try {
     // When --task-name comes without --install-task, or blank, then nothing is registered.
     expect(await cli("--task-name", name)).toMatchObject({ code: 1, text: expect.stringContaining("SERVE_TASK_REFUSED") });
     expect(await cli("--install-task", "--task-name", " ")).toMatchObject({ code: 1, text: expect.stringContaining("SERVE_TASK_REFUSED") });
-    expect(await registered()).toBe("False");
+    expect({ named: await registered(), defaultTask: await registered(TASK_NAME) }).toEqual({ named: "False", defaultTask: defaultBefore });
     // When it comes with --install-task, then the task is registered under it and the line names it.
     expect(await cli("--install-task", "--task-name", name)).toMatchObject({ code: 0, text: expect.stringContaining(`SERVE_TASK_INSTALLED "${name}" at logon`) });
-    expect(await registered()).toBe("True");
+    expect({ named: await registered(), defaultTask: await registered(TASK_NAME) }).toEqual({ named: "True", defaultTask: defaultBefore });
   } finally {
     await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
       `Get-ScheduledTask -TaskName ${quote(name)} -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false`]);
@@ -178,11 +185,14 @@ test.skipIf(process.platform !== "win32")("review 2 registered action preserves 
   let done = () => {};
   const written = new Promise<void>((resolve) => { done = resolve; });
   const watcher = watch(dirname(task.capture), (_event, file) => { if (file === basename(task.capture)) done(); });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("the task wrote no capture in 30 s")), 30_000); });
   try {
     // When Task Scheduler starts it with its own logon environment, none of this process's DORI_ variables.
     await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command", `Start-ScheduledTask -TaskName ${quote(task.name)} -ErrorAction Stop`]);
-    await written;
+    await Promise.race([written, late]);
   } finally {
+    clearTimeout(timer);
     watcher.close();
   }
   // Then the real child receives the selected instance and exact arguments.
