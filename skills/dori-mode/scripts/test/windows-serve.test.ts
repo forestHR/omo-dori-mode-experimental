@@ -224,6 +224,35 @@ test.skipIf(process.platform !== "win32")("a task that only mentions the instanc
   }
 }, 60_000);
 
+test.skipIf(process.platform !== "win32")("a task with more actions that also launches the instance still counts: another name for that instance is refused", async () => {
+  // Given task A whose actions are this instance's launcher and one more.
+  const root = mkdtempSync(join(tmpdir(), "dori-task-multi-"));
+  const state = join(root, "state");
+  const config = join(root, "config.json");
+  writeFileSync(config, JSON.stringify({ stateDir: state }));
+  const a = `Dori-test-${crypto.randomUUID()}`;
+  const b = `${a}-b`;
+  const launcher = `--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${join(state, "serve-task.ps1")}"`;
+  const exists = async (task: string) => (await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+    `[bool](Get-ScheduledTask -TaskName ${quote(task)} -ErrorAction SilentlyContinue)`])).trim();
+  try {
+    await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command", `Register-ScheduledTask -TaskName ${quote(a)} -RunLevel Limited -Action @(
+      (New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\\conhost.exe') -Argument ${quote(launcher)}),
+      (New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0')) | Out-Null`]);
+    // When the same instance is installed under name B.
+    const env = { ...Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("DORI_"))), DORI_CONFIG: config, DORI_STATE_DIR: state, DORI_ENV_FILE: join(root, "dori.env") };
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "../src/cli.ts"), "serve", "--install-task", "--task-name", b], { env, stdout: "pipe", stderr: "pipe" });
+    const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    // Then it is refused as already run by A, and B is not registered.
+    expect({ code, text: out + err }).toMatchObject({ code: 1, text: expect.stringContaining(`SERVE_TASK_REFUSED this instance already runs as the task "${a}"`) });
+    expect(await exists(b)).toBe("False");
+  } finally {
+    await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+      `Get-ScheduledTask | Where-Object { $_.TaskName -in @(${quote(a)}, ${quote(b)}) } | Unregister-ScheduledTask -Confirm:$false`]);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test.skipIf(process.platform !== "win32")("review 2 registered action preserves quoted instance paths without inherited environment", async () => {
   // Given an actual registered task with curly quotes and shell metacharacters in its paths.
   await using task = taskFixture();
