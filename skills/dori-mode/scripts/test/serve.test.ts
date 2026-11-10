@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { fileLog, installTaskRefusal, keep, linesOf, type Running, serve, serveLoops, spawnLoop } from "../src/serve.ts";
+import { entryTaskRefusal, entryTasksOf, fileLog, installTaskRefusal, keep, linesOf, type Running, serve, serveLoops, spawnLoop } from "../src/serve.ts";
 import { commandArgv } from "../src/run.ts";
 import { fakeClock } from "./fakes.ts";
 
@@ -138,6 +138,28 @@ test("--install-task with --only or --log is refused, not registered without the
   expect(installTaskRefusal(["watch"], undefined)).toStartWith("SERVE_TASK_REFUSED");
   expect(installTaskRefusal([], "C:\\logs\\serve.log")).toStartWith("SERVE_TASK_REFUSED");
   expect(installTaskRefusal([], undefined)).toBeUndefined();
+});
+
+test("--install-task --task-name takes any non-blank name and refuses a blank one", () => {
+  expect(installTaskRefusal([], undefined, "Dori serve (mydori)")).toBeUndefined();
+  expect(installTaskRefusal([], undefined, "")).toStartWith("SERVE_TASK_REFUSED --task-name");
+  expect(installTaskRefusal([], undefined, "  ")).toStartWith("SERVE_TASK_REFUSED --task-name");
+});
+
+test("an instance already run by a task under another name, or a name whose task runs something else, is refused; the task that runs this instance registers again in place", () => {
+  const b64 = (s: string) => Buffer.from(s).toString("base64");
+  const found = entryTasksOf(`runs ${b64("\\Dori serve (맛도리)")}\r\n\r\n`);
+  expect(found).toEqual({ runs: ["\\Dori serve (맛도리)"] });
+  // the same name in another folder is another task: registering the root one would be a second task for this instance
+  expect(entryTaskRefusal("Dori serve (맛도리)", { runs: ["\\Dori\\Dori serve (맛도리)"] }))
+    .toStartWith('SERVE_TASK_REFUSED this instance already runs as the task "\\Dori\\Dori serve (맛도리)"');
+  expect(entryTaskRefusal("Dori serve (맛도리)", found)).toBeUndefined();
+  expect(entryTaskRefusal("dori SERVE (맛도리)", found)).toBeUndefined();
+  expect(entryTaskRefusal("Dori serve", found)).toStartWith('SERVE_TASK_REFUSED this instance already runs as the task "Dori serve (맛도리)"');
+  const taken = entryTasksOf(`other ${b64("C:\\Windows\\System32\\conhost.exe --headless ... metdori")}\n`);
+  expect(taken).toEqual({ runs: [], other: "C:\\Windows\\System32\\conhost.exe --headless ... metdori" });
+  expect(entryTaskRefusal("Dori serve (metdori)", taken)).toStartWith('SERVE_TASK_REFUSED the task "Dori serve (metdori)" runs something else');
+  expect(entryTaskRefusal("Dori serve", entryTasksOf(""))).toBeUndefined();
 });
 
 test("on native Windows a hook naming dori runs this CLI with this Bun, the arguments as they are; elsewhere it runs as named", () => {

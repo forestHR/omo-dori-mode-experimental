@@ -94,12 +94,50 @@ export const fileLog = (file: string, clock: Clock): ((line: string) => void) =>
   return (line) => appendFileSync(file, `${new Date(clock.now()).toISOString().slice(0, 19)}Z ${line}\n`);
 };
 
-// The logon task always runs every loop with the default log; --only or --log with --install-task is refused, not dropped.
-export const installTaskRefusal = (only: readonly string[], log: string | undefined): string | undefined =>
-  only.length || log ? "SERVE_TASK_REFUSED --install-task registers every loop with the default log; run it without --only and --log" : undefined;
+// The logon task always runs every loop with the default log; --only or --log with --install-task is refused, not dropped,
+// and so is a blank --task-name (Task Scheduler has no task without a name).
+export const installTaskRefusal = (only: readonly string[], log: string | undefined, name?: string): string | undefined =>
+  only.length || log ? "SERVE_TASK_REFUSED --install-task registers every loop with the default log; run it without --only and --log"
+  : name !== undefined && !name.trim() ? "SERVE_TASK_REFUSED --task-name needs a name, for example --task-name \"Dori serve (mydori)\""
+  : undefined;
 
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
+
+// Asked before taskArgv rewrites anything: "runs <path+name>" for each task (in any folder) with an action that is this
+// instance's launcher exactly as --install-task registers it (%WINDIR%\System32\conhost.exe windowless, or the older
+// powershell.exe form), and "other <actions>" when the root-folder task called NAME (which Register-ScheduledTask -Force
+// would replace whole) is anything but that one launcher action. Values are base64 of their UTF-8 so no console encoding changes them; PowerShell's -eq ignores case,
+// as Task Scheduler names do.
+export const entryTasksArgv = (stateDir: string, name: string): string[] => ["powershell", "-NoProfile", "-NonInteractive", "-Command", [
+  "$ErrorActionPreference = 'Stop'",
+  `$entry = ${data(join(resolve(stateDir), "serve-task.ps1"))}`,
+  `$name = ${data(name)}`,
+  "$b64 = { param($s) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$s)) }",
+  "$old = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"' + $entry + '\"'",
+  "$con = Join-Path $env:WINDIR 'System32\\conhost.exe'",
+  "$launcher = { param($x) $e = ([string]$x.Execute).Trim().Trim([char]34); $g = ([string]$x.Arguments).Trim(); ($e -eq $con -and $g -eq ('--headless powershell.exe ' + $old)) -or ($e -eq 'powershell.exe' -and $g -eq $old) }",
+  "foreach ($t in Get-ScheduledTask) { $a = @($t.Actions); $n = @($a | Where-Object { & $launcher $_ }).Count; if ($n) { 'runs ' + (& $b64 ($t.TaskPath + $t.TaskName)) }; if ($t.TaskPath -eq '\\' -and $t.TaskName -eq $name -and -not ($n -eq 1 -and $a.Count -eq 1)) { 'other ' + (& $b64 (@($t.Actions | ForEach-Object { \"$($_.Execute) $($_.Arguments)\" }) -join '; ')) } }",
+].join("; ")];
+export type EntryTasks = { readonly runs: readonly string[]; readonly other?: string };
+export const entryTasksOf = (out: string): EntryTasks => {
+  const lines = out.split(/\r?\n/).map((l) => l.trim().split(" ")).filter(([kind, value]) => value !== undefined && (kind === "runs" || kind === "other"));
+  const text = (value: string | undefined) => Buffer.from(value ?? "", "base64").toString("utf8");
+  const other = lines.find(([kind]) => kind === "other");
+  return { runs: lines.filter(([kind]) => kind === "runs").map(([, value]) => text(value)), ...(other ? { other: text(other[1]) } : {}) };
+};
+
+// One task per instance, one instance per task. A task under another name already runs this entry point: a second one
+// would rewrite the launcher it runs and start the same Dori twice. The task called NAME runs something else (another
+// Dori, another program): registering would replace it. Re-registering the task that runs this instance, in any case,
+// goes through.
+export const entryTaskRefusal = (name: string, found: EntryTasks): string | undefined => {
+  // runs holds full paths: only the root-folder task called NAME is the one registering replaces in place
+  const other = found.runs.find((o) => o.toLowerCase() !== `\\${name}`.toLowerCase())?.replace(/^\\(?=[^\\]*$)/, "");
+  if (other !== undefined) return `SERVE_TASK_REFUSED this instance already runs as the task "${other}"; register it again under that name (--task-name "${other}") or remove that task first (Unregister-ScheduledTask -TaskName "${other}")`;
+  if (found.other !== undefined) return `SERVE_TASK_REFUSED the task "${name}" runs something else (${found.other.slice(0, 160)}); pick another --task-name, or remove that task first if it is not needed`;
+  return undefined;
+};
 export const taskArgv = (bun: string, cli: string, stateDir: string, name: string = TASK_NAME): string[] => {
   const state = resolve(stateDir);
   const entry = join(state, "serve-task.ps1");
@@ -115,11 +153,13 @@ exit $LASTEXITCODE
 `);
   const registration = [
     "$ErrorActionPreference = 'Stop'",
-    `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${data(`-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${entry}"`)}`,
+    // conhost --headless gives the task a console with no window
+    `$action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\\conhost.exe') -Argument ${data(`--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${entry}"`)}`,
     // a logon trigger for this user only: an all-users trigger needs an elevated caller
     "$trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)",
-    // keep supervising on a laptop that runs on battery
-    "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+    // keep supervising on a laptop that runs on battery, start again up to 3 times a minute apart when it fails,
+    // and never run a second copy next to a running one
+    "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew",
     "$settings.ExecutionTimeLimit = 'PT0S'",
     `Register-ScheduledTask -TaskName ${data(name)} -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited -Force | Out-Null`,
   ].join("; ");
