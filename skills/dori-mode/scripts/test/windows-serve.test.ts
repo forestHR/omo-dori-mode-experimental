@@ -246,6 +246,13 @@ test.skipIf(process.platform !== "win32")("a task with more actions that also la
     // Then it is refused as already run by A, and B is not registered.
     expect({ code, text: out + err }).toMatchObject({ code: 1, text: expect.stringContaining(`SERVE_TASK_REFUSED this instance already runs as the task "${a}"`) });
     expect(await exists(b)).toBe("False");
+    // When it is installed under A's own name, then that is refused too: replacing A would drop its other action.
+    const again = Bun.spawn([process.execPath, join(import.meta.dir, "../src/cli.ts"), "serve", "--install-task", "--task-name", a], { env, stdout: "pipe", stderr: "pipe" });
+    const [againCode, againOut, againErr] = await Promise.all([again.exited, new Response(again.stdout).text(), new Response(again.stderr).text()]);
+    expect({ code: againCode, text: againOut + againErr }).toMatchObject({ code: 1, text: expect.stringContaining(`SERVE_TASK_REFUSED the task "${a}" runs something else`) });
+    expect((await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+      `@((Get-ScheduledTask -TaskName ${quote(a)} -ErrorAction Stop).Actions).Count`])).trim()).toBe("2");
+    expect(existsSync(join(state, "serve-task.ps1"))).toBe(false);
   } finally {
     await execute(["powershell", "-NoProfile", "-NonInteractive", "-Command",
       `Get-ScheduledTask | Where-Object { $_.TaskName -in @(${quote(a)}, ${quote(b)}) } | Unregister-ScheduledTask -Confirm:$false`]);
