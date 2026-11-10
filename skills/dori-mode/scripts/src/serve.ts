@@ -104,8 +104,8 @@ export const installTaskRefusal = (only: readonly string[], log: string | undefi
 // Windows: a Task Scheduler entry that starts dori serve at the user's logon, in place of the systemd units
 export const TASK_NAME = "Dori serve";
 
-// Asked before taskArgv rewrites anything: "runs <path+name>" for each task (in any folder) with an action that runs
-// this instance's entry point (its arguments end in -File "<entry>", as both the windowless and the older launcher do),
+// Asked before taskArgv rewrites anything: "runs <path+name>" for each task (in any folder) whose one action is this
+// instance's launcher exactly as --install-task registers it, windowless or in the older powershell.exe form,
 // and "other <action>" when the root-folder task called NAME (which Register-ScheduledTask -Force would replace) runs
 // something else. Values are base64 of their UTF-8 so no console encoding changes them; PowerShell's -eq ignores case,
 // as Task Scheduler names do.
@@ -114,8 +114,9 @@ export const entryTasksArgv = (stateDir: string, name: string): string[] => ["po
   `$entry = ${data(join(resolve(stateDir), "serve-task.ps1"))}`,
   `$name = ${data(name)}`,
   "$b64 = { param($s) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$s)) }",
-  "$tail = '-File \"' + $entry + '\"'",
-  "foreach ($t in Get-ScheduledTask) { if (@($t.Actions | Where-Object { ([string]$_.Arguments).TrimEnd().EndsWith($tail, [StringComparison]::OrdinalIgnoreCase) }).Count) { 'runs ' + (& $b64 ($t.TaskPath + $t.TaskName)) } elseif ($t.TaskPath -eq '\\' -and $t.TaskName -eq $name) { 'other ' + (& $b64 (@($t.Actions | ForEach-Object { \"$($_.Execute) $($_.Arguments)\" }) -join '; ')) } }",
+  "$old = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"' + $entry + '\"'",
+  "$launches = { param($t) $a = @($t.Actions); $x = if ($a.Count -eq 1) { ([string]$a[0].Execute).Trim().Trim([char]34) } else { '' }; $exe = $x.Substring($x.LastIndexOf('\\') + 1); $arg = if ($a.Count -eq 1) { ([string]$a[0].Arguments).Trim() } else { '' }; ($exe -eq 'conhost.exe' -and $arg -eq ('--headless powershell.exe ' + $old)) -or ($exe -eq 'powershell.exe' -and $arg -eq $old) }",
+  "foreach ($t in Get-ScheduledTask) { if (& $launches $t) { 'runs ' + (& $b64 ($t.TaskPath + $t.TaskName)) } elseif ($t.TaskPath -eq '\\' -and $t.TaskName -eq $name) { 'other ' + (& $b64 (@($t.Actions | ForEach-Object { \"$($_.Execute) $($_.Arguments)\" }) -join '; ')) } }",
 ].join("; ")];
 export type EntryTasks = { readonly runs: readonly string[]; readonly other?: string };
 export const entryTasksOf = (out: string): EntryTasks => {
