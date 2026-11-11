@@ -2,7 +2,7 @@
 // The web app's address and secret come from dori.env (DORI_GCAL_URL, DORI_GCAL_SECRET) and never reach a line this
 // prints or logs. A write (create, update, delete) needs the approval the owner answered: an answered card id (Q<n>) or
 // a Discord message link; without one nothing is sent. The web app checks the same again, plus the 도리 mark.
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { Question } from "./messenger/discord-cards.ts";
@@ -141,6 +141,17 @@ export type WriteRecord = {
   request_id?: string; event_id?: string; title?: string; start?: string; end?: string; reminder_minutes?: number; duplicate?: boolean;
 };
 
+export const writesOf = (file: string): WriteRecord[] => {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").flatMap((line) => {
+    try {
+      return line.trim() ? [JSON.parse(line) as WriteRecord] : [];
+    } catch {
+      return [];
+    }
+  });
+};
+
 export const appendWrite = (file: string, rec: WriteRecord): void => {
   mkdirSync(dirname(file), { recursive: true });
   appendFileSync(file, `${JSON.stringify(rec)}\n`);
@@ -177,6 +188,12 @@ const gcalCall = async (action: GcalAction, o: GcalOptions, d: GcalDeps): Promis
   if (missing.length) throw new GcalError("GCAL_NOT_CONFIGURED", `${missing.join(" and ")} not set in ${d.envFile} (the owner puts them there; see setups/gcal-apps-script/README.md)`);
   const approval = action === "read" ? undefined : await checkApproval(o.approval, d.cards(), d.owner?.trim() ?? "", d.author);
   const body = gcalBody(action, o, d.newId);
+  // the write log is the lasting record of request ids: one that already made an event is not sent again, however far
+  // that event was moved since (the web app's own lookup only searches a year around it)
+  if (action === "create") {
+    const done = writesOf(d.writesFile).find((w) => w.action === "create" && w.request_id === body.request_id && w.outcome === "ok");
+    if (done) refused(`request_id_done: request ${String(body.request_id)} already made event ${done.event_id ?? "?"} at ${done.at}`);
+  }
   if (approval) body.approval = approval.ref;
   // whatever the web app echoes back (titles, details) is printed and logged with the secret and address taken out
   const show = (v: unknown): string => JSON.stringify(hideDeep(v, [secret, url]));

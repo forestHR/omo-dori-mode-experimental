@@ -195,7 +195,14 @@ test("missing env, a sign-in page and an unreachable web app never print the add
   expect(gone.err).toContain("GCAL_FAIL web app not reached");
   const lost = await dori(["create", "--title", "x", "--start", "2026-11-12T10:00+09:00", "--end", "2026-11-12T11:00+09:00", "--approval", "Q1", "--request-id", "req-9"], { DORI_GCAL_URL: dead, DORI_GCAL_SECRET: SECRET });
   expect(lost.err).toContain("run the same create again with --request-id req-9");
+  // the lost create may be sent again; once the log holds it as made, the same id is never sent again
+  reply = (b) => ({ ok: true, event: { id: "ev9", title: b.title, start: b.start, end: b.end, location: "", dori: true, reminder_minutes: 30 } });
+  const create9 = ["create", "--title", "x", "--start", "2026-11-12T10:00+09:00", "--end", "2026-11-12T11:00+09:00", "--approval", "Q1", "--request-id", "req-9"];
+  expect((await dori(create9)).out).toStartWith("GCAL_CREATED ev9");
+  const sent = posts();
+  const twice = await dori(create9);
+  expect({ code: twice.code, done: twice.err.includes("GCAL_REFUSED request_id_done: request req-9 already made event ev9"), posts: posts() }).toEqual({ code: 1, done: true, posts: sent });
   expect(gone.err).not.toContain(String(closed.port));
-  expect(writes()).toMatchObject([{ action: "delete", outcome: expect.stringContaining("fail: GCAL_FAIL web app not reached") }, { action: "create", request_id: "req-9" }]);
+  expect(writes()).toMatchObject([{ action: "delete", outcome: expect.stringContaining("fail: GCAL_FAIL web app not reached") }, { action: "create", request_id: "req-9" }, { action: "create", request_id: "req-9", outcome: "ok" }]);
   expect(readFileSync(join(dir, "gcal", "writes.jsonl"), "utf8")).not.toContain(SECRET);
 });
