@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { checkApproval, redact } from "../src/gcal.ts";
+import { checkApproval, gcalRun, isYes, redact } from "../src/gcal.ts";
 import type { Question } from "../src/messenger/discord-cards.ts";
 
 const SECRET = "gcal-secret-XYZ-never-printed";
@@ -29,6 +29,29 @@ test("approval: an answered yes card, a link to one, or a link Discord says the 
     await expect(checkApproval(ref, CARDS, OWNER, lookup)).rejects.toThrow(`GCAL_REFUSED ${code}`);
   }
   await expect(checkApproval("https://discord.com/channels/9/8/333", CARDS, OWNER, async () => { throw new Error("403"); })).rejects.toThrow("GCAL_REFUSED approval_unverifiable");
+});
+
+test("only a plain yes approves: an answer with a negation anywhere, or no yes at its start, does not", async () => {
+  for (const yes of ["네", "네, 넣어줘", "승인", "넣어", "지워", "응 해줘", "좋아요", "OK", "yes"]) expect([yes, isYes(yes)]).toEqual([yes, true]);
+  for (const no of ["지우지 마", "안 넣어", "넣지 마세요", "아니", "네 아니 잠깐", "나중에", "보류", "no", "yes but not now", "몰라", ""]) expect([no, isYes(no)]).toEqual([no, false]);
+  const dont = [...CARDS, card("Q4", "answered", "666", "지우지 마")];
+  await expect(checkApproval("Q4", dont)).rejects.toThrow("GCAL_REFUSED approval_declined");
+});
+
+test("a secret with a quote or backslash is hidden in printed lines, the log and every error", async () => {
+  const secret = 'q"uo\\te\nline';
+  const file = join(mkdtempSync(join(tmpdir(), "gcal-hide-")), "w.jsonl");
+  const fetchFake = async (_u: string, init: RequestInit) => init.method === "POST"
+    ? new Response(null, { status: 302, headers: { location: "https://echo.example/x" } })
+    : Response.json({ ok: true, event: { id: "ev", title: `t ${secret}`, start: "s", end: "e", location: "", dori: true } });
+  const deps = { url: "https://script.example/exec", secret, envFile: "env", cards: () => CARDS, writesFile: file, now: () => new Date(0), newId: () => "r", fetch: fetchFake };
+  const lines = await gcalRun("create", { title: "t", start: "2026-11-12T10:00+09:00", end: "2026-11-12T11:00+09:00", approval: "Q1" }, deps);
+  expect(lines.join("\n")).toContain("<hidden>");
+  expect([lines.join("\n"), readFileSync(file, "utf8")].some((t) => t.includes(JSON.stringify(secret).slice(1, -1)) || t.includes(secret))).toBe(false);
+  const bad = [...CARDS, card("Q5", "answered", "777", `말고 ${secret}`)];
+  const err = await gcalRun("delete", { id: "ev", approval: "Q5" }, { ...deps, cards: () => bad }).catch((e: Error) => e.message);
+  expect(String(err)).toContain("approval_declined");
+  expect(String(err)).not.toContain(secret.slice(0, 4));
 });
 
 test("redact hides every secret value and any URL", () => {

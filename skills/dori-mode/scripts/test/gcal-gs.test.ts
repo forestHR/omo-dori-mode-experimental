@@ -131,6 +131,11 @@ test("a refused update changes nothing, and a create sent again with its request
   expect([app.events[0]!.start.toISOString(), app.events[0]!.title, app.events[0]!.location, app.events[0]!.reminders]).toEqual([T0, "도리 시험", "", [30]]);
   const again = app.call({ secret: SECRET, action: "create", title: "도리 시험", start: T0, end: T1, request_id: "r1", approval: "Q1" });
   expect({ id: again.event.id, duplicate: again.event.duplicate, events: app.events.length }).toEqual({ id, duplicate: true, events: 1 });
+  expect(app.call({ secret: SECRET, action: "create", title: "다른 일정", start: T0, end: T1, request_id: "r1", approval: "Q1" }).error).toBe("request_id_reused");
+  // moved days away, the same request is still found and never made twice
+  app.call({ secret: SECRET, action: "update", id, start: "2026-11-20T01:00:00Z", end: "2026-11-20T02:00:00Z", approval: "Q1" });
+  expect(app.call({ secret: SECRET, action: "create", title: "도리 시험", start: T0, end: T1, request_id: "r1", approval: "Q1" }).error).toBe("request_id_reused");
+  expect(app.events.length).toBe(1);
 });
 
 test("read returns only id, title, start, end, location and the 도리 mark, and caps the span", () => {

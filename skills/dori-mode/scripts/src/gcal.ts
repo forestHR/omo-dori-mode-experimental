@@ -20,8 +20,11 @@ export type Approval = { ref: string; kind: "card" | "link" };
 
 const CARD = /^Q\d+$/;
 const DISCORD_LINK = /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/channels\/(?:\d+|@me)\/(\d+)\/(\d+)$/;
-// an answer that says no (or not now): the card was answered, but not with an approval
-const REFUSAL = /^\s*(?:아니|아뇨|안\s*돼|안\s*해|하지\s*마|거절|취소|보류|싫|기다려|no\b|nope|reject|cancel|wait)/i;
+// An approval is an answer that starts with a yes and holds no negation anywhere ("지우지 마", "안 넣어", "not now"); anything
+// else is not one. A false refusal costs one more card; a false approval writes the owner's calendar.
+const YES = /^\s*(?:네|예|응|어|그래|좋아|좋아요|승인|진행|넣어|만들어|고쳐|지워|해|해줘|해 줘|맞아|ok|okay|yes|y|approve|go)(?=$|[\s.,!~ㄹㅎ]|요|주|줘)/i;
+const NEGATION = /아니|아뇨|안\s|안돼|않|마|말|못|싫|취소|보류|거절|기다|나중|잠깐|\bno\b|\bnot\b|\bdon'?t\b|\bcancel|\breject|\bwait|\blater/i;
+export const isYes = (answer: string): boolean => YES.test(answer) && !NEGATION.test(answer);
 
 const refused = (why: string): never => {
   throw new GcalError("GCAL_REFUSED", `${why}; nothing was sent`);
@@ -29,7 +32,7 @@ const refused = (why: string): never => {
 
 const answeredYes = (q: Question, named: string): Approval["kind"] => {
   if (q.status !== "answered") refused(`approval_open: ${named} is not answered yet`);
-  if (REFUSAL.test(q.answer ?? "")) refused(`approval_declined: ${named} was answered ${JSON.stringify(q.answer ?? "")}, not an approval`);
+  if (!isYes(q.answer ?? "")) refused(`approval_declined: ${named} was not answered with a plain yes (${JSON.stringify((q.answer ?? "").slice(0, 40))}); ask again with a card whose yes option starts with 네 or 승인`);
   return "card";
 };
 
@@ -149,7 +152,25 @@ export type GcalDeps = {
 };
 
 // One dori gcal call: the lines to print. Throws GcalError for a refusal or failure (its message is safe to print).
+// every string inside a value, with the secret and address taken out before it is serialized (an escaped quote or
+// backslash in the secret would hide it from a search over the JSON text)
+const hideDeep = (v: unknown, secrets: readonly string[]): unknown =>
+  typeof v === "string" ? secrets.flatMap((s) => (s ? [s, JSON.stringify(s).slice(1, -1)] : [])).reduce((t, s) => t.split(s).join("<hidden>"), v)
+    : Array.isArray(v) ? v.map((x) => hideDeep(x, secrets))
+    : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, hideDeep(x, secrets)])) : v;
+
 export const gcalRun = async (action: GcalAction, o: GcalOptions, d: GcalDeps): Promise<string[]> => {
+  const secrets = [d.secret?.trim() ?? "", d.url?.trim() ?? ""];
+  try {
+    return await gcalCall(action, o, d);
+  } catch (e) {
+    // no refusal or failure line carries the secret or address, whatever text went into it
+    if (e instanceof GcalError) throw new GcalError(e.code, String(hideDeep(e.message.slice(e.code.length + 1), secrets)));
+    throw e;
+  }
+};
+
+const gcalCall = async (action: GcalAction, o: GcalOptions, d: GcalDeps): Promise<string[]> => {
   const url = d.url?.trim() ?? "";
   const secret = d.secret?.trim() ?? "";
   const missing = [url ? "" : "DORI_GCAL_URL", secret ? "" : "DORI_GCAL_SECRET"].filter(Boolean);
@@ -158,19 +179,19 @@ export const gcalRun = async (action: GcalAction, o: GcalOptions, d: GcalDeps): 
   const body = gcalBody(action, o, d.newId);
   if (approval) body.approval = approval.ref;
   // whatever the web app echoes back (titles, details) is printed and logged with the secret and address taken out
-  const hide = (text: string): string => [secret, url].reduce((t, s) => t.split(s).join("<hidden>"), text);
+  const show = (v: unknown): string => JSON.stringify(hideDeep(v, [secret, url]));
   const write = (outcome: string, event?: Record<string, unknown>): void => {
     if (!approval || action === "read") return;
     const e = event ?? {};
     const pick = (k: string): string | undefined => (typeof e[k] === "string" ? (e[k] as string) : typeof body[k] === "string" ? (body[k] as string) : undefined);
-    appendWrite(d.writesFile, JSON.parse(hide(JSON.stringify({
+    appendWrite(d.writesFile, hideDeep({
       at: d.now().toISOString(), action, approval: approval.ref, approval_kind: approval.kind, outcome,
       ...(typeof body.request_id === "string" ? { request_id: body.request_id } : {}),
       ...(pick("id") ? { event_id: pick("id") } : {}), ...(pick("title") ? { title: pick("title") } : {}),
       ...(pick("start") ? { start: pick("start") } : {}), ...(pick("end") ? { end: pick("end") } : {}),
       ...(typeof e.reminder_minutes === "number" ? { reminder_minutes: e.reminder_minutes } : {}),
       ...(e.duplicate === true ? { duplicate: true } : {}),
-    }))) as WriteRecord);
+    }, [secret, url]) as WriteRecord);
   };
   let out: Record<string, unknown>;
   try {
@@ -190,10 +211,10 @@ export const gcalRun = async (action: GcalAction, o: GcalOptions, d: GcalDeps): 
   }
   if (action === "read") {
     const events = Array.isArray(out.events) ? (out.events as Record<string, unknown>[]) : [];
-    return [`GCAL_EVENTS ${events.length}`, ...events.map((e) => hide(JSON.stringify(e)))];
+    return [`GCAL_EVENTS ${events.length}`, ...events.map(show)];
   }
   const event = (action === "delete" ? out.deleted : out.event) as Record<string, unknown> | undefined;
   write("ok", event);
   const verb = { create: event?.duplicate === true ? "GCAL_CREATED_BEFORE" : "GCAL_CREATED", update: "GCAL_UPDATED", delete: "GCAL_DELETED" }[action];
-  return [hide(`${verb} ${String(event?.id ?? body.id ?? "")} ${JSON.stringify(event ?? {})}`)];
+  return [`${verb} ${String(hideDeep(String(event?.id ?? body.id ?? ""), [secret, url]))} ${show(event ?? {})}`];
 };

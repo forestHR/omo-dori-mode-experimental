@@ -124,12 +124,17 @@ function create_(body) {
     var s = span_(body);
     var minutes = reminder_(body.reminder_minutes);
     var cal = CalendarApp.getDefaultCalendar();
-    // a request sent again (its reply was lost) finds the event it made instead of making a second one
-    var made = cal.getEvents(s.start, s.end).filter(function (x) {
+    // a request sent again (its reply was lost) finds the event it made instead of making a second one, wherever it
+    // was moved within a year; the same id with other fields is a different request and is refused
+    var year = 366 * 86400000;
+    var made = cal.getEvents(new Date(s.start.getTime() - year), new Date(s.end.getTime() + year), { search: requestId }).filter(function (x) {
       return isDori_(x) && String(x.getDescription() || '').split('\n')[0] === DORI_MARK + requestId;
     })[0];
     if (made) {
       var again = view_(made);
+      if (made.getTitle() !== title || again.start !== s.start.toISOString() || again.end !== s.end.toISOString()) {
+        return { ok: false, error: 'request_id_reused', detail: 'an event with this request id exists with other title or times' };
+      }
       again.duplicate = true;
       return { ok: true, event: again };
     }
