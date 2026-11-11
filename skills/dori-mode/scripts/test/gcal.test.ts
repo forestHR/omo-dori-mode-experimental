@@ -39,7 +39,8 @@ test("only a plain yes approves: an answer with a negation anywhere, or no yes a
 });
 
 test("a secret with a quote or backslash is hidden in printed lines, the log and every error", async () => {
-  const secret = 'q"uo\\te\nline';
+  // Xuo and Wte sit between the characters JSON escapes, so they show in the raw and the escaped secret alike
+  const secret = 'Zq"Xuo\\Wte\nVline';
   const file = join(mkdtempSync(join(tmpdir(), "gcal-hide-")), "w.jsonl");
   const fetchFake = async (_u: string, init: RequestInit) => init.method === "POST"
     ? new Response(null, { status: 302, headers: { location: "https://echo.example/x" } })
@@ -51,7 +52,7 @@ test("a secret with a quote or backslash is hidden in printed lines, the log and
   const bad = [...CARDS, card("Q5", "answered", "777", `말고 ${secret}`)];
   const err = await gcalRun("delete", { id: "ev", approval: "Q5" }, { ...deps, cards: () => bad }).catch((e: Error) => e.message);
   expect(String(err)).toContain("approval_declined");
-  expect(String(err)).not.toContain(secret.slice(0, 4));
+  expect([String(err).includes("Xuo"), String(err).includes("Wte")]).toEqual([false, false]);
 });
 
 test("redact hides every secret value and any URL", () => {
