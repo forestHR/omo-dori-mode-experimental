@@ -28,6 +28,7 @@ import { appendRollover, AUTO_GRANT_ENV, decidedBy, dueReasons, holdTyped, LEAD_
 import { procTable, resolveSession } from "./session-id.ts";
 import { restartService } from "./update-ready.ts";
 import { ConfigError, configPath, envFilePath, fill, loadConfig, loadEnvFile, resolveInstance } from "./config.ts";
+import { GCAL_ACTIONS, type GcalAction, GcalError, gcalRun } from "./gcal.ts";
 import { checkRepo, commitDir, initRepo, logDir, restoreDir, type StateGitDeps, stateGitDirs } from "./state-git.ts";
 import { approve, backupTick, type BackupDeps, envFilesIn, guardDir, loadSecrets, msToNextSlot, previewDir, pushAll, pushCheck } from "./state-backup.ts";
 import { backupRemoteUrl, backupVisibility } from "./backup-visibility.ts";
@@ -503,6 +504,15 @@ const USAGE = `dori <command> [options]
   thread map discord:<id> <session|none>
                                        set the mapped session, preserving the title
   thread list                          print mapped thread ids, sessions and titles
+  gcal read --from TIME --to TIME      the owner's default Google Calendar through the Apps Script web app
+  gcal create --title T --start TIME --end TIME [--location L] [--description D] [--reminder MIN] [--request-id ID] --approval REF
+  gcal update <id> [--title T] [--start TIME] [--end TIME] [--location L] [--description D] [--reminder MIN] --approval REF
+  gcal delete <id> --approval REF      (setups/gcal-apps-script/Code.gs): GCAL_EVENTS N and one JSON line per event, or
+                                       GCAL_CREATED|UPDATED|DELETED <id> <json>; a write needs REF, an answered card id
+                                       (Q12) or a Discord link of the owner's approval, else GCAL_REFUSED and nothing sent;
+                                       only events 도리 made (tag dori=1, description "[도리] <request id>") change; the
+                                       reminder defaults to 30 minutes; each write is a line in <stateDir>/gcal/writes.jsonl
+                                       (env: DORI_GCAL_URL, DORI_GCAL_SECRET, never printed)
   thread set discord:<id> working|waiting|done|standing|unstanding [--open-card]
                                        queue its status; done archives it and removes its mapping
   thread <reply|wait|done> discord:<id> <text> | --text-file FILE [--file PATH ...]
@@ -608,6 +618,7 @@ const flags = parseArgs({
     "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" }, "activity-path": { type: "string", multiple: true },
     "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, "task-name": { type: "string" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
     source: { type: "string" },
+    start: { type: "string" }, end: { type: "string" }, location: { type: "string" }, description: { type: "string" }, reminder: { type: "string" }, approval: { type: "string" }, "request-id": { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -2458,6 +2469,37 @@ try {
         }
         default:
           die("worklog needs add, next, note, close or list");
+      }
+      break;
+    }
+    case "gcal": {
+      const action = (GCAL_ACTIONS as readonly string[]).includes(key ?? "") ? (key as GcalAction) : die(`usage: dori gcal ${GCAL_ACTIONS.join("|")} ...`, 2);
+      const write = ["approval", "request-id"];
+      const fields = ["title", "start", "end", "location", "description", "reminder"];
+      onlyOptions(`gcal ${action}`, { read: ["from", "to"], create: [...fields, ...write], update: [...fields, "approval"], delete: ["approval"] }[action], action === "read" || action === "create" ? 1 : 2);
+      try {
+        // the raw value of a text option: an empty --description clears it, so it is not trimmed away into "absent"
+        const raw = (name: string): string | undefined => (typeof flags.values[name] === "string" ? (flags.values[name] as string) : undefined);
+        const lines = await gcalRun(action, {
+          id: flags.positionals[1], from: opt("from"), to: opt("to"), start: opt("start"), end: opt("end"), title: raw("title"),
+          location: raw("location"), description: raw("description"), reminder: opt("reminder"), approval: opt("approval"), requestId: opt("request-id"),
+        }, {
+          url: process.env.DORI_GCAL_URL, secret: process.env.DORI_GCAL_SECRET, envFile: envFilePath(),
+          cards: () => new QuestionStore(cardDir()).all(), writesFile: join(config.stateDir, "gcal", "writes.jsonl"),
+          now: () => new Date(realClock.now()), newId: () => Bun.randomUUIDv7(),
+          // a link as approval is the owner's only if Discord says he wrote it
+          owner: process.env.DORI_DISCORD_OWNER,
+          author: (() => {
+            const token = process.env.DORI_DISCORD_TOKEN?.trim();
+            if (!token || discordBotProblem(token)) return undefined;
+            const dc = new Discord(fetchHttp, realClock, token, discordApi()).once();
+            return async (channel: string, message: string) => (await dc.call<{ author?: { id?: string } }>("GET", `/channels/${channel}/messages/${message}`)).author?.id;
+          })(),
+        });
+        for (const line of lines) console.log(line);
+      } catch (e) {
+        if (e instanceof GcalError) die(e.message, e.code === "GCAL_USAGE" || e.code === "GCAL_NOT_CONFIGURED" ? 2 : 1);
+        throw e;
       }
       break;
     }
