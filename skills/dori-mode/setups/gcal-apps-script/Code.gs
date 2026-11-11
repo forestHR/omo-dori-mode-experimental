@@ -123,8 +123,18 @@ function create_(body) {
     if (!requestId) throw new BadRequest_('request_id is empty');
     var s = span_(body);
     var minutes = reminder_(body.reminder_minutes);
+    var cal = CalendarApp.getDefaultCalendar();
+    // a request sent again (its reply was lost) finds the event it made instead of making a second one
+    var made = cal.getEvents(s.start, s.end).filter(function (x) {
+      return isDori_(x) && String(x.getDescription() || '').split('\n')[0] === DORI_MARK + requestId;
+    })[0];
+    if (made) {
+      var again = view_(made);
+      again.duplicate = true;
+      return { ok: true, event: again };
+    }
     var description = DORI_MARK + requestId + (body.description ? '\n' + String(body.description) : '');
-    var ev = CalendarApp.getDefaultCalendar().createEvent(title, s.start, s.end, { location: String(body.location || ''), description: description });
+    var ev = cal.createEvent(title, s.start, s.end, { location: String(body.location || ''), description: description });
     ev.setTag(DORI_TAG, '1');
     ev.removeAllReminders();
     ev.addPopupReminder(minutes);
@@ -149,25 +159,23 @@ function update_(body) {
     var found = ownEvent_(body);
     if (found.refusal) return found.refusal;
     var ev = found.ev;
-    if (body.start !== undefined || body.end !== undefined) {
-      var s = span_({ start: body.start !== undefined ? body.start : ev.getStartTime().toISOString(), end: body.end !== undefined ? body.end : ev.getEndTime().toISOString() });
-      ev.setTime(s.start, s.end);
-    }
-    if (body.title !== undefined) {
-      var title = String(body.title).trim();
-      if (!title) throw new BadRequest_('title is empty');
-      ev.setTitle(title);
-    }
+    // every field is checked before the first change, so a refused update leaves the event as it was
+    var times = body.start !== undefined || body.end !== undefined;
+    var s = times ? span_({ start: body.start !== undefined ? body.start : ev.getStartTime().toISOString(), end: body.end !== undefined ? body.end : ev.getEndTime().toISOString() }) : null;
+    var title = body.title !== undefined ? String(body.title).trim() : null;
+    if (title === '') throw new BadRequest_('title is empty');
+    var minutes = body.reminder_minutes !== undefined ? reminder_(body.reminder_minutes) : null;
+    if (s) ev.setTime(s.start, s.end);
+    if (title !== null) ev.setTitle(title);
     if (body.location !== undefined) ev.setLocation(String(body.location));
     // the mark line stays first whatever the new description says
     if (body.description !== undefined) ev.setDescription(String(ev.getDescription() || '').split('\n')[0] + (body.description ? '\n' + String(body.description) : ''));
-    var out = view_(ev);
-    if (body.reminder_minutes !== undefined) {
-      var minutes = reminder_(body.reminder_minutes);
+    if (minutes !== null) {
       ev.removeAllReminders();
       ev.addPopupReminder(minutes);
-      out.reminder_minutes = minutes;
     }
+    var out = view_(ev);
+    if (minutes !== null) out.reminder_minutes = minutes;
     return { ok: true, event: out };
   });
 }

@@ -2487,6 +2487,14 @@ try {
           url: process.env.DORI_GCAL_URL, secret: process.env.DORI_GCAL_SECRET, envFile: envFilePath(),
           cards: () => new QuestionStore(cardDir()).all(), writesFile: join(config.stateDir, "gcal", "writes.jsonl"),
           now: () => new Date(realClock.now()), newId: () => Bun.randomUUIDv7(),
+          // a link as approval is the owner's only if Discord says he wrote it
+          owner: process.env.DORI_DISCORD_OWNER,
+          author: (() => {
+            const token = process.env.DORI_DISCORD_TOKEN?.trim();
+            if (!token || discordBotProblem(token)) return undefined;
+            const dc = new Discord(fetchHttp, realClock, token, discordApi()).once();
+            return async (channel: string, message: string) => (await dc.call<{ author?: { id?: string } }>("GET", `/channels/${channel}/messages/${message}`)).author?.id;
+          })(),
         });
         for (const line of lines) console.log(line);
       } catch (e) {

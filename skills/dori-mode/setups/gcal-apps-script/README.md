@@ -37,7 +37,8 @@ dori gcal delete <일정 id> --approval https://discord.com/channels/<서버>/<�
 ```
 
 - 읽기 결과는 한 줄에 일정 하나(JSON): `id`, `title`, `start`, `end`, `location`, `dori`(도리 표시 여부). `id` 는 고치기와 지우기에 쓴다.
-- `--approval` 은 내가 답한 카드 id(`dori questions` 에서 answered 인 것) 또는 내 승인 메시지의 디스코드 링크다. 아직 답하지 않은 카드는 거절된다.
+- `--approval` 은 내가 답한 카드 id(`dori questions` 에서 answered 인 것) 또는 내 승인 메시지의 디스코드 링크다. 아직 답하지 않은 카드, "아니"·"취소"·"보류"처럼 거절로 답한 카드는 거절된다. 링크는 도리 봇이 디스코드에서 그 메시지를 읽어 내가 쓴 것일 때만 통과한다(못 읽으면 거절).
+- 답을 못 받은 만들기는 `--request-id` 를 같게 해서 다시 보내면 이미 만든 일정을 찾아 돌려주고(`GCAL_CREATED_BEFORE`) 두 번 만들지 않는다.
 - 쓰기마다 `<stateDir>/gcal/writes.jsonl` 에 한 줄(언제, 무엇을, 어떤 승인 근거로, 결과)이 남는다. 멧돌이면 `~/.dori/state/gcal/writes.jsonl` 이다. 비밀값과 주소는 적히지 않는다.
 - 웹앱은 POST 에 302 로 답하고, 도구는 그 주소를 GET 으로 따라가 결과를 읽는다(Apps Script 의 동작).
 

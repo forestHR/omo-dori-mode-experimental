@@ -7,20 +7,28 @@ import { checkApproval, redact } from "../src/gcal.ts";
 import type { Question } from "../src/messenger/discord-cards.ts";
 
 const SECRET = "gcal-secret-XYZ-never-printed";
-const card = (id: string, status: Question["status"], message?: string): Question => ({
+const card = (id: string, status: Question["status"], message?: string, answer = "넣어"): Question => ({
   id, text: "일정 넣을까?", options: [], channel: "c", thread: null, session: null, tmux: null, created: "2026-11-11T00:00:00Z", status,
-  ...(message ? { message } : {}), ...(status === "answered" ? { answer: "넣어", answerKind: "button" as const, answeredAt: "2026-11-11T00:01:00Z" } : {}),
+  ...(message ? { message } : {}), ...(status === "answered" ? { answer, answerKind: "button" as const, answeredAt: "2026-11-11T00:01:00Z" } : {}),
 });
-const CARDS = [card("Q1", "answered", "111"), card("Q2", "open", "222")];
+const CARDS = [card("Q1", "answered", "111"), card("Q2", "open", "222"), card("Q3", "answered", "555", "아니, 다음에")];
+const OWNER = "900000000000000001";
+const authors: Record<string, string> = { "8/333": OWNER, "8/444": "900000000000000002" };
+const author = async (c: string, m: string) => authors[`${c}/${m}`];
 
-test("approval: an answered card or an owner link passes; no reference, an open or unknown card, a link to an open card is refused", () => {
-  expect(checkApproval("Q1", CARDS)).toEqual({ ref: "Q1", kind: "card" });
-  expect(checkApproval("https://discord.com/channels/9/8/111", CARDS)).toEqual({ ref: "https://discord.com/channels/9/8/111", kind: "link" });
-  expect(checkApproval("https://discord.com/channels/9/8/333", CARDS).kind).toBe("link");
-  for (const [ref, code] of [[undefined, "no_approval"], ["  ", "no_approval"], ["Q2", "approval_open"], ["Q9", "approval_unknown"],
-    ["https://discord.com/channels/9/8/222", "approval_open"], ["yes", "approval_malformed"], ["https://evil.example/channels/1/2/3", "approval_malformed"]] as const) {
-    expect(() => checkApproval(ref, CARDS)).toThrow(`GCAL_REFUSED ${code}`);
+test("approval: an answered yes card, a link to one, or a link Discord says the owner wrote passes; anything else is refused", async () => {
+  expect(await checkApproval("Q1", CARDS)).toEqual({ ref: "Q1", kind: "card" });
+  expect(await checkApproval("https://discord.com/channels/9/8/111", CARDS)).toEqual({ ref: "https://discord.com/channels/9/8/111", kind: "card" });
+  expect(await checkApproval("https://discord.com/channels/9/8/333", CARDS, OWNER, author)).toEqual({ ref: "https://discord.com/channels/9/8/333", kind: "link" });
+  for (const [ref, code, who] of [[undefined, "no_approval"], ["  ", "no_approval"], ["Q2", "approval_open"], ["Q9", "approval_unknown"], ["Q3", "approval_declined"],
+    ["https://discord.com/channels/9/8/222", "approval_open"], ["https://discord.com/channels/9/8/555", "approval_declined"], ["yes", "approval_malformed"],
+    ["https://evil.example/channels/1/2/3", "approval_malformed"],
+    ["https://discord.com/channels/9/8/333", "approval_unverifiable", "none"], ["https://discord.com/channels/9/8/777", "approval_unverifiable"],
+    ["https://discord.com/channels/9/8/444", "approval_not_owner"]] as const) {
+    const lookup = who === "none" ? undefined : author;
+    await expect(checkApproval(ref, CARDS, OWNER, lookup)).rejects.toThrow(`GCAL_REFUSED ${code}`);
   }
+  await expect(checkApproval("https://discord.com/channels/9/8/333", CARDS, OWNER, async () => { throw new Error("403"); })).rejects.toThrow("GCAL_REFUSED approval_unverifiable");
 });
 
 test("redact hides every secret value and any URL", () => {
@@ -40,6 +48,12 @@ beforeEach(() => {
   const replies = new Map<string, string>();
   server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
     const u = new URL(req.url);
+    const msg = /^\/api\/channels\/(\d+)\/messages\/(\d+)$/.exec(u.pathname);
+    if (req.method === "GET" && msg) {
+      hits.push({ method: "GET", path: "discord message" });
+      const who = authors[`${msg[1]}/${msg[2]}`];
+      return who ? Response.json({ id: msg[2], author: { id: who } }) : Response.json({ message: "Unknown Message" }, { status: 404 });
+    }
     if (req.method === "POST" && u.pathname === "/macros/s/DEPLOY/exec") {
       const body = (await req.json()) as Record<string, unknown>;
       hits.push({ method: "POST", path: u.pathname, body });
@@ -60,6 +74,9 @@ afterEach(() => {
 });
 
 const url = () => `http://127.0.0.1:${server.port}/macros/s/DEPLOY/exec`;
+const withDiscord = () => ({ DORI_GCAL_URL: url(), DORI_GCAL_SECRET: SECRET, DORI_DISCORD_TOKEN: `${Buffer.from("123456789012345678").toString("base64")}.x.y`,
+  DORI_DISCORD_API: `http://127.0.0.1:${server.port}/api`, DORI_DISCORD_OWNER: OWNER });
+const posts = () => hits.filter((h) => h.method === "POST").length;
 const dori = async (args: string[], env: Record<string, string> = { DORI_GCAL_URL: url(), DORI_GCAL_SECRET: SECRET }) => {
   // the address and secret reach the CLI only through its dori.env, as on a Dori
   writeFileSync(join(dir, "dori.env"), Object.entries(env).map(([k, v]) => `${k}=${v}\n`).join(""));
@@ -88,6 +105,15 @@ test("read posts the secret in the body, follows the 302 with GET and prints the
   expect(writes()).toEqual([]);
 });
 
+test("whatever the web app echoes back is printed and logged without the secret or address", async () => {
+  reply = (b) => ({ ok: true, event: { id: "ev2", title: `${b.title} ${SECRET} ${url()}`, start: b.start, end: b.end, location: "", dori: true } });
+  const r = await dori(["create", "--title", "echo", "--start", "2026-11-12T10:00+09:00", "--end", "2026-11-12T10:30+09:00", "--approval", "Q1"]);
+  expect(r.out).toContain("<hidden>");
+  expect(readFileSync(join(dir, "gcal", "writes.jsonl"), "utf8")).not.toContain(SECRET);
+  reply = () => ({ ok: true, events: [{ id: "e1", title: SECRET, start: "2026-11-12T01:00:00.000Z", end: "2026-11-12T02:00:00.000Z", location: url(), dori: false }] });
+  expect((await dori(["read", "--from", "2026-11-12", "--to", "2026-11-13"])).out).toContain('"title":"<hidden>"');
+});
+
 test("create with an answered card sends it, prints the event and logs the write without the secret", async () => {
   reply = (b) => ({ ok: true, event: { id: "ev1", title: b.title, start: b.start, end: b.end, location: "", dori: true, reminder_minutes: b.reminder_minutes ?? 30 } });
   const r = await dori(["create", "--title", "도리 시험", "--start", "2026-11-12T10:00+09:00", "--end", "2026-11-12T10:30+09:00", "--reminder", "10", "--approval", "Q1", "--request-id", "req-1"]);
@@ -110,11 +136,23 @@ test("a write without approval, or with an open card, is refused before anything
   expect(writes()).toEqual([]);
 });
 
+test("a made-up Discord link is refused with no POST: unreadable without Discord, or not the owner's message", async () => {
+  const create = ["create", "--title", "x", "--start", "2026-11-12T10:00+09:00", "--end", "2026-11-12T11:00+09:00", "--approval"];
+  const blind = await dori([...create, "https://discord.com/channels/9/8/333"]);
+  expect({ code: blind.code, refused: blind.err.includes("GCAL_REFUSED approval_unverifiable") }).toEqual({ code: 1, refused: true });
+  const fake = await dori([...create, "https://discord.com/channels/9/8/777"], withDiscord());
+  const other = await dori([...create, "https://discord.com/channels/9/8/444"], withDiscord());
+  expect([fake.err.includes("approval_unverifiable"), other.err.includes("approval_not_owner")]).toEqual([true, true]);
+  expect(posts()).toBe(0);
+  expect(writes()).toEqual([]);
+});
+
 test("the web app's refusal of an event without the 도리 mark is printed and logged as refused", async () => {
   reply = () => ({ ok: false, error: "not_dori", detail: "this event has no 도리 mark; only events 도리 made can be changed" });
-  const r = await dori(["delete", "owner@google.com", "--approval", "https://discord.com/channels/9/8/333"]);
+  const r = await dori(["delete", "owner@google.com", "--approval", "https://discord.com/channels/9/8/333"], withDiscord());
   expect(r.code).toBe(1);
   expect(r.err).toContain("GCAL_REFUSED web app: not_dori");
+  expect(hits.map((h) => `${h.method} ${h.path}`)).toEqual(["GET discord message", "POST /macros/s/DEPLOY/exec", "GET /macros/echo"]);
   expect(writes()).toMatchObject([{ action: "delete", approval_kind: "link", outcome: "refused: not_dori", event_id: "owner@google.com" }]);
 });
 
@@ -131,7 +169,9 @@ test("missing env, a sign-in page and an unreachable web app never print the add
   const gone = await dori(["delete", "ev1", "--approval", "Q1"], { DORI_GCAL_URL: dead, DORI_GCAL_SECRET: SECRET });
   expect(gone.code).toBe(1);
   expect(gone.err).toContain("GCAL_FAIL web app not reached");
+  const lost = await dori(["create", "--title", "x", "--start", "2026-11-12T10:00+09:00", "--end", "2026-11-12T11:00+09:00", "--approval", "Q1", "--request-id", "req-9"], { DORI_GCAL_URL: dead, DORI_GCAL_SECRET: SECRET });
+  expect(lost.err).toContain("run the same create again with --request-id req-9");
   expect(gone.err).not.toContain(String(closed.port));
-  expect(writes()).toMatchObject([{ action: "delete", outcome: expect.stringContaining("fail: GCAL_FAIL web app not reached") }]);
+  expect(writes()).toMatchObject([{ action: "delete", outcome: expect.stringContaining("fail: GCAL_FAIL web app not reached") }, { action: "create", request_id: "req-9" }]);
   expect(readFileSync(join(dir, "gcal", "writes.jsonl"), "utf8")).not.toContain(SECRET);
 });

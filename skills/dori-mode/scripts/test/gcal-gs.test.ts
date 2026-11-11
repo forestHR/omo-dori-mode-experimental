@@ -122,6 +122,17 @@ test("update and delete work on a 도리 event, and update keeps the mark line f
   expect(app.events[0]!.deleted).toBe(true);
 });
 
+test("a refused update changes nothing, and a create sent again with its request id finds the first event", () => {
+  const app = webApp(SECRET);
+  const id = app.call({ secret: SECRET, action: "create", title: "도리 시험", start: T0, end: T1, request_id: "r1", approval: "Q1" }).event.id;
+  const moved = app.call({ secret: SECRET, action: "update", id, start: "2026-11-13T01:00:00Z", end: "2026-11-13T02:00:00Z", title: " ", approval: "Q1" });
+  expect(moved.error).toBe("bad_request");
+  expect(app.call({ secret: SECRET, action: "update", id, location: "어디", reminder_minutes: -1, approval: "Q1" }).error).toBe("bad_request");
+  expect([app.events[0]!.start.toISOString(), app.events[0]!.title, app.events[0]!.location, app.events[0]!.reminders]).toEqual([T0, "도리 시험", "", [30]]);
+  const again = app.call({ secret: SECRET, action: "create", title: "도리 시험", start: T0, end: T1, request_id: "r1", approval: "Q1" });
+  expect({ id: again.event.id, duplicate: again.event.duplicate, events: app.events.length }).toEqual({ id, duplicate: true, events: 1 });
+});
+
 test("read returns only id, title, start, end, location and the 도리 mark, and caps the span", () => {
   const app = webApp(SECRET, [ownerEvent()]);
   const out = app.call({ secret: SECRET, action: "read", start: T0, end: T1 });

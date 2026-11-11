@@ -19,23 +19,39 @@ export class GcalError extends Error {
 export type Approval = { ref: string; kind: "card" | "link" };
 
 const CARD = /^Q\d+$/;
-const DISCORD_LINK = /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/channels\/(?:\d+|@me)\/\d+\/(\d+)$/;
+const DISCORD_LINK = /^https:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/channels\/(?:\d+|@me)\/(\d+)\/(\d+)$/;
+// an answer that says no (or not now): the card was answered, but not with an approval
+const REFUSAL = /^\s*(?:아니|아뇨|안\s*돼|안\s*해|하지\s*마|거절|취소|보류|싫|기다려|no\b|nope|reject|cancel|wait)/i;
 
-// The owner's approval for a write: a card he answered (dori ask), or a link to his message. A link to a card that is
-// still open is refused like the open card itself.
-export const checkApproval = (ref: string | undefined, cards: readonly Question[]): Approval => {
+const refused = (why: string): never => {
+  throw new GcalError("GCAL_REFUSED", `${why}; nothing was sent`);
+};
+
+const answeredYes = (q: Question, named: string): Approval["kind"] => {
+  if (q.status !== "answered") refused(`approval_open: ${named} is not answered yet`);
+  if (REFUSAL.test(q.answer ?? "")) refused(`approval_declined: ${named} was answered ${JSON.stringify(q.answer ?? "")}, not an approval`);
+  return "card";
+};
+
+// The author of one Discord message, read from Discord itself; undefined when this Dori cannot look it up.
+export type MessageAuthor = (channel: string, message: string) => Promise<string | undefined>;
+
+// The owner's approval for a write: a card he answered with something other than a no (dori ask), or a link to a
+// message Discord says he wrote. A link to a card is judged as that card. A link that cannot be checked is refused.
+export const checkApproval = async (ref: string | undefined, cards: readonly Question[], owner = "", author?: MessageAuthor): Promise<Approval> => {
   const r = ref?.trim() ?? "";
-  if (!r) throw new GcalError("GCAL_REFUSED", "no_approval: a write needs --approval <answered card id | Discord link of the owner's approval>; nothing was sent");
+  if (!r) refused("no_approval: a write needs --approval <answered card id | Discord link of the owner's approval>");
   if (CARD.test(r)) {
-    const q = cards.find((c) => c.id === r);
-    if (!q) throw new GcalError("GCAL_REFUSED", `approval_unknown: no card ${r} in this Dori's card records; nothing was sent`);
-    if (q.status !== "answered") throw new GcalError("GCAL_REFUSED", `approval_open: card ${r} is not answered yet; nothing was sent`);
-    return { ref: r, kind: "card" };
+    const q = cards.find((c) => c.id === r) ?? refused(`approval_unknown: no card ${r} in this Dori's card records`);
+    return { ref: r, kind: answeredYes(q, `card ${r}`) };
   }
-  const link = DISCORD_LINK.exec(r);
-  if (!link) throw new GcalError("GCAL_REFUSED", "approval_malformed: --approval takes a card id (Q12) or a Discord message link; nothing was sent");
-  const open = cards.find((c) => c.message === link[1] && c.status !== "answered");
-  if (open) throw new GcalError("GCAL_REFUSED", `approval_open: that link is card ${open.id}, not answered yet; nothing was sent`);
+  const [, channel = "", message = ""] = DISCORD_LINK.exec(r) ?? refused("approval_malformed: --approval takes a card id (Q12) or a Discord message link");
+  const card = cards.find((c) => c.message === message);
+  if (card) return { ref: r, kind: answeredYes(card, `that link is card ${card.id}, which`) };
+  if (!owner || !author) refused("approval_unverifiable: this Dori cannot read that message's author (DORI_DISCORD_TOKEN and DORI_DISCORD_OWNER)");
+  const who = await author!(channel, message).catch(() => undefined);
+  if (who === undefined) refused("approval_unverifiable: Discord did not show that message to this Dori's bot");
+  if (who !== owner) refused("approval_not_owner: that message is not the owner's");
   return { ref: r, kind: "link" };
 };
 
@@ -119,7 +135,7 @@ export const postWebApp = async (url: string, secret: string, body: Record<strin
 
 export type WriteRecord = {
   at: string; action: Exclude<GcalAction, "read">; approval: string; approval_kind: Approval["kind"]; outcome: string;
-  request_id?: string; event_id?: string; title?: string; start?: string; end?: string; reminder_minutes?: number;
+  request_id?: string; event_id?: string; title?: string; start?: string; end?: string; reminder_minutes?: number; duplicate?: boolean;
 };
 
 export const appendWrite = (file: string, rec: WriteRecord): void => {
@@ -129,7 +145,7 @@ export const appendWrite = (file: string, rec: WriteRecord): void => {
 
 export type GcalDeps = {
   url?: string; secret?: string; envFile: string; cards: () => readonly Question[]; writesFile: string;
-  now: () => Date; newId: () => string; fetch?: Fetch;
+  now: () => Date; newId: () => string; fetch?: Fetch; owner?: string; author?: MessageAuthor;
 };
 
 // One dori gcal call: the lines to print. Throws GcalError for a refusal or failure (its message is safe to print).
@@ -138,20 +154,23 @@ export const gcalRun = async (action: GcalAction, o: GcalOptions, d: GcalDeps): 
   const secret = d.secret?.trim() ?? "";
   const missing = [url ? "" : "DORI_GCAL_URL", secret ? "" : "DORI_GCAL_SECRET"].filter(Boolean);
   if (missing.length) throw new GcalError("GCAL_NOT_CONFIGURED", `${missing.join(" and ")} not set in ${d.envFile} (the owner puts them there; see setups/gcal-apps-script/README.md)`);
-  const approval = action === "read" ? undefined : checkApproval(o.approval, d.cards());
+  const approval = action === "read" ? undefined : await checkApproval(o.approval, d.cards(), d.owner?.trim() ?? "", d.author);
   const body = gcalBody(action, o, d.newId);
   if (approval) body.approval = approval.ref;
+  // whatever the web app echoes back (titles, details) is printed and logged with the secret and address taken out
+  const hide = (text: string): string => [secret, url].reduce((t, s) => t.split(s).join("<hidden>"), text);
   const write = (outcome: string, event?: Record<string, unknown>): void => {
     if (!approval || action === "read") return;
     const e = event ?? {};
     const pick = (k: string): string | undefined => (typeof e[k] === "string" ? (e[k] as string) : typeof body[k] === "string" ? (body[k] as string) : undefined);
-    appendWrite(d.writesFile, {
+    appendWrite(d.writesFile, JSON.parse(hide(JSON.stringify({
       at: d.now().toISOString(), action, approval: approval.ref, approval_kind: approval.kind, outcome,
       ...(typeof body.request_id === "string" ? { request_id: body.request_id } : {}),
       ...(pick("id") ? { event_id: pick("id") } : {}), ...(pick("title") ? { title: pick("title") } : {}),
       ...(pick("start") ? { start: pick("start") } : {}), ...(pick("end") ? { end: pick("end") } : {}),
       ...(typeof e.reminder_minutes === "number" ? { reminder_minutes: e.reminder_minutes } : {}),
-    });
+      ...(e.duplicate === true ? { duplicate: true } : {}),
+    }))) as WriteRecord);
   };
   let out: Record<string, unknown>;
   try {
@@ -159,20 +178,22 @@ export const gcalRun = async (action: GcalAction, o: GcalOptions, d: GcalDeps): 
   } catch (e) {
     // the write may have landed before the reply was lost: kept as unknown, never as done
     write(`fail: ${e instanceof Error ? e.message : String(e)}`);
+    // the same request id finds the event a lost reply made instead of making a second one
+    if (action === "create" && e instanceof GcalError) throw new GcalError(e.code, `${e.message.slice(e.code.length + 1)}; the event may exist: run the same create again with --request-id ${String(body.request_id)}`);
     throw e;
   }
   if (out.ok !== true) {
-    const code = typeof out.error === "string" ? out.error : "unknown";
+    const code = typeof out.error === "string" ? redact(out.error, [secret, url]) : "unknown";
     const detail = typeof out.detail === "string" ? `: ${redact(out.detail, [secret, url])}` : "";
     write(`refused: ${code}`);
     throw new GcalError(code === "internal" ? "GCAL_FAIL" : "GCAL_REFUSED", `web app: ${code}${detail}`);
   }
   if (action === "read") {
     const events = Array.isArray(out.events) ? (out.events as Record<string, unknown>[]) : [];
-    return [`GCAL_EVENTS ${events.length}`, ...events.map((e) => JSON.stringify(e))];
+    return [`GCAL_EVENTS ${events.length}`, ...events.map((e) => hide(JSON.stringify(e)))];
   }
   const event = (action === "delete" ? out.deleted : out.event) as Record<string, unknown> | undefined;
   write("ok", event);
-  const verb = { create: "GCAL_CREATED", update: "GCAL_UPDATED", delete: "GCAL_DELETED" }[action];
-  return [`${verb} ${String(event?.id ?? body.id ?? "")} ${JSON.stringify(event ?? {})}`];
+  const verb = { create: event?.duplicate === true ? "GCAL_CREATED_BEFORE" : "GCAL_CREATED", update: "GCAL_UPDATED", delete: "GCAL_DELETED" }[action];
+  return [hide(`${verb} ${String(event?.id ?? body.id ?? "")} ${JSON.stringify(event ?? {})}`)];
 };
