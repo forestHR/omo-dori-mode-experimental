@@ -607,6 +607,16 @@ A ready `hooks.threadReply` / `hooks.threadDone` for Discord: `["dori", "thread"
 ### `dori send discord --to <thread> [--edit <id>] --status working|done --text <text>`
 Writes the text as the progress message in `discord.statusStyle`: `working: <text>` / `done: <text>`, or `⏳ · <text>` / `✅ <text>` with emoji.
 
+### `dori gcal read --from TIME --to TIME` / `gcal create|update|delete ... --approval REF`
+
+The owner's default Google Calendar through the Apps Script web app in `setups/gcal-apps-script/` (`Code.gs`, install guide in its `README.md`; no Google Cloud console, no OAuth client). The web app address and its secret come from this Dori's `dori.env` (`DORI_GCAL_URL`, `DORI_GCAL_SECRET`) and are never printed or logged: an error names no URL (`<url>`) and no secret (`<hidden>`). The secret goes in the POST body (a web app cannot read headers); the web app answers with a 302 that the tool follows with GET, as Apps Script expects.
+
+- `read` prints `GCAL_EVENTS N`, then one JSON line per event: `id`, `title`, `start`, `end` (ISO), `location`, `dori` (the event carries the 도리 mark). Spans over 92 days are refused.
+- `create --title T --start TIME --end TIME [--location L] [--description D] [--reminder MIN] [--request-id ID]` makes an event with the tag `dori=1`, the description first line `[도리] <request id>` (a UUIDv7 when not given) and a popup reminder, 30 minutes when `--reminder` is not given. `update <id>` changes any of those fields and keeps the mark line; `delete <id>` removes the event. Both act only on events with the mark (`GCAL_REFUSED web app: not_dori` otherwise), so the owner's own events stay read-only.
+- Every write needs `--approval REF`: an answered card id (`Q12`, checked against this Dori's card records) or a Discord message link (a link to a card still open is refused). Without one, or with an open or unknown card, it prints `GCAL_REFUSED ...` (exit 1) and sends nothing; the web app refuses a write without a reference too. Times are ISO with an offset (`2026-11-12T10:00+09:00`) and go out in UTC.
+- Each write sent appends a line to `<stateDir>/gcal/writes.jsonl`: `at`, `action`, `approval`, `approval_kind` (card or link), `outcome` (`ok`, `refused: <code>`, `fail: ...` when the reply was lost and the write may have landed), `request_id`, `event_id`, `title`, `start`, `end`, `reminder_minutes`.
+- `GCAL_NOT_CONFIGURED` (exit 2): a value is missing in `dori.env`. `GCAL_FAIL`: the web app was not reached, answered non-200, or answered an HTML page (the deployment's access is not "Anyone"). `DORI_GCAL_*` is an instance variable: a process that inherited another Dori's environment drops it with the rest (`DORI_ENV_FOREIGN`).
+
 ### `dori transcribe <audio-file>`
 Runs `hooks.transcribe` and prints the transcript. A failed or empty transcription is an error, never an empty message.
 
