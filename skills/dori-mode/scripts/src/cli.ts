@@ -29,6 +29,7 @@ import { procTable, resolveSession } from "./session-id.ts";
 import { restartService } from "./update-ready.ts";
 import { ConfigError, configPath, envFilePath, fill, loadConfig, loadEnvFile, resolveInstance } from "./config.ts";
 import { GCAL_ACTIONS, type GcalAction, GcalError, gcalRun } from "./gcal.ts";
+import { MAIL_ACTIONS, type MailAction, MailError, mailRun } from "./mail.ts";
 import { checkRepo, commitDir, initRepo, logDir, restoreDir, type StateGitDeps, stateGitDirs } from "./state-git.ts";
 import { approve, backupTick, type BackupDeps, envFilesIn, guardDir, loadSecrets, msToNextSlot, previewDir, pushAll, pushCheck } from "./state-backup.ts";
 import { backupRemoteUrl, backupVisibility } from "./backup-visibility.ts";
@@ -513,6 +514,16 @@ const USAGE = `dori <command> [options]
                                        only events 도리 made (tag dori=1, description "[도리] <request id>") change; the
                                        reminder defaults to 30 minutes; each write is a line in <stateDir>/gcal/writes.jsonl
                                        (env: DORI_GCAL_URL, DORI_GCAL_SECRET, never printed)
+  mail list [--since DAY] [--until DAY] [--from ADDR|@DOMAIN] [--limit N]
+  mail read <uid>
+  mail draft <uid> --text T | --text-file FILE
+                                       the owner's NAVER WORKS INBOX over IMAP, only mail from DORI_MAIL_SENDERS or with a
+                                       DORI_MAIL_SUBJECT_KEYWORDS word in its subject: MAIL_LIST N
+                                       and one JSON line per mail (newest first, default the last 7 days, 30 mails);
+                                       MAIL_READ <uid>, a JSON line, a blank line and the text; MAIL_DRAFTED <json>: a reply
+                                       to the sender put into the drafts folder (\Draft), never sent; nothing is marked
+                                       read, deleted or moved (setups/naverworks-mail/README.md; env: DORI_MAIL_IMAP_USER,
+                                       DORI_MAIL_IMAP_PASSWORD (never printed), DORI_MAIL_IMAP_HOST, DORI_MAIL_IMAP_PORT)
   thread set discord:<id> working|waiting|done|standing|unstanding [--open-card]
                                        queue its status; done archives it and removes its mapping
   thread <reply|wait|done> discord:<id> <text> | --text-file FILE [--file PATH ...]
@@ -619,6 +630,7 @@ const flags = parseArgs({
     "delete-branch": { type: "boolean" }, "no-test": { type: "string" }, "install-task": { type: "boolean" }, "task-name": { type: "string" }, only: { type: "string", multiple: true }, log: { type: "string" }, priority: { type: "string" }, ask: { type: "string" }, "read-only": { type: "boolean" }, "owner-link": { type: "string" }, hash: { type: "string" }, question: { type: "string" },
     source: { type: "string" },
     start: { type: "string" }, end: { type: "string" }, location: { type: "string" }, description: { type: "string" }, reminder: { type: "string" }, approval: { type: "string" }, "request-id": { type: "string" },
+    limit: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -2499,6 +2511,25 @@ try {
         for (const line of lines) console.log(line);
       } catch (e) {
         if (e instanceof GcalError) die(e.message, e.code === "GCAL_USAGE" || e.code === "GCAL_NOT_CONFIGURED" ? 2 : 1);
+        throw e;
+      }
+      break;
+    }
+    case "mail": {
+      const action = (MAIL_ACTIONS as readonly string[]).includes(key ?? "") ? (key as MailAction) : die(`usage: dori mail ${MAIL_ACTIONS.join("|")} ...`, 2);
+      onlyOptions(`mail ${action}`, { list: ["since", "until", "from", "limit"], read: [], draft: ["text", "text-file"] }[action], action === "list" ? 1 : 2);
+      try {
+        const lines = await mailRun(action, {
+          uid: flags.positionals[1], since: opt("since"), until: opt("until"), from: opt("from"), limit: opt("limit"),
+          text: action === "draft" ? await textOrFile(opt("text"), "usage: dori mail draft <uid> --text TEXT | --text-file FILE") : undefined,
+        }, {
+          host: process.env.DORI_MAIL_IMAP_HOST, port: process.env.DORI_MAIL_IMAP_PORT, user: process.env.DORI_MAIL_IMAP_USER,
+          password: process.env.DORI_MAIL_IMAP_PASSWORD, senders: process.env.DORI_MAIL_SENDERS, keywords: process.env.DORI_MAIL_SUBJECT_KEYWORDS, envFile: envFilePath(),
+          now: () => new Date(realClock.now()), newId: () => Bun.randomUUIDv7(),
+        });
+        for (const line of lines) console.log(line);
+      } catch (e) {
+        if (e instanceof MailError) die(e.message, e.code === "MAIL_USAGE" || e.code === "MAIL_NOT_CONFIGURED" ? 2 : 1);
         throw e;
       }
       break;
