@@ -252,7 +252,7 @@ export const checkMeaning = async (deps: Pick<FlowDeps, "run" | "config" | "cloc
   let why = listed.length ? "" : "none listed";
   try {
     const checks = await checkReviewers(deps as FlowDeps, listed);
-    calls = checks.flatMap((c) => (c.call ? [c.call] : []));
+    calls = [...new Set(checks.flatMap((c) => (c.call ? [c.call] : [])))].slice(0, 3);
     if (!calls.length && checks.length) why = checks.map((c) => `${c.listed}: ${c.note}`).join("; ");
   } catch (e) {
     if (!(e instanceof ChallengeError)) throw e;
@@ -269,7 +269,7 @@ export const checkMeaning = async (deps: Pick<FlowDeps, "run" | "config" | "cloc
       const r = await deps.run(fill(oc.command, { model, prompt: meaningPrompt(e), system: MEANING_SYSTEM }), { timeoutMs: oc.minutes * 60_000 });
       const v = r.code === 0 ? parseMeaning(r.out) : undefined;
       if (!v) {
-        tried.push(`${model}: ${r.code !== 0 ? `exit ${r.code}` : "no VERDICT line"}; ${keepReviewerOutput(deps.config.stateDir, `directives-meaning-${e.id}`, r.out)}`);
+        tried.push(`${model}: ${r.err.endsWith("(timeout)") ? `timeout (exit ${r.code})` : r.code !== 0 ? `exit ${r.code}` : "no VERDICT line"}; ${keepReviewerOutput(deps.config.stateDir, `directives-meaning-${e.id}`, r.out)}`);
         continue;
       }
       if (v.same) {
