@@ -1,8 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 
 import type { DoriConfig } from "./config.ts";
 import { agentPath, herdrAgentArgv } from "./aoe.ts";
+import { takeLock } from "./handover-lock.ts";
 import { agentLine, herdrAgentPid, herdrSessions, herdrShellPid, HerdrShellError, requireHerdrPwsh } from "./herdr.ts";
 import type { Clock, Runner } from "./run.ts";
 import { splitModel } from "./lane-handover.ts";
@@ -26,7 +28,14 @@ export const readHerdrSessions = (stateDir: string): Record<string, HerdrSession
 
 export const recordHerdrSession = (stateDir: string, pane: string, rec: HerdrSessionRecord): void => {
   mkdirSync(stateDir, { recursive: true });
-  writeFileSync(file(stateDir), JSON.stringify({ ...readHerdrSessions(stateDir), [pane]: rec }, null, 1), { mode: 0o600 });
+  const target = file(stateDir);
+  const temp = join(stateDir, `.herdr-sessions-${process.pid}-${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temp, JSON.stringify({ ...readHerdrSessions(stateDir), [pane]: rec }, null, 1), { mode: 0o600, flag: "wx" });
+    renameSync(temp, target);
+  } finally {
+    rmSync(temp, { force: true });
+  }
 };
 
 const modelOf = (cmd: string): string | undefined => {
@@ -129,12 +138,37 @@ export const herdrLeadSession = async (run: Runner, config: Partial<Pick<DoriCon
   const same = kept?.session === hit.id ? kept : undefined;
   const log = hit.pid ? await sessionLog(run, table, hit.pid, hit.id, config.sessionsDir, cwd, same?.log) : same?.log;
   const model = (log ? sessionModel(log) : undefined) ?? same?.model ?? modelOf(cmd);
-  // recorded on every read, unchanged or not: its time is when it was last checked (lead-down reads again after 10 min)
-  if (config.stateDir) recordHerdrSession(config.stateDir, pane, { session: hit.id, cwd, ...(model ? { model } : {}), ...(log ? { log } : {}), at: new Date().toISOString() });
+  // Record under the handover lock. A lookup already in flight when the lead moves must not overwrite the new session id.
+  if (config.stateDir) {
+    const handoverDir = join(config.stateDir, "handover");
+    mkdirSync(handoverDir, { recursive: true });
+    const lock = join(handoverDir, "lock");
+    const busy = takeLock(lock, (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error)) throw error;
+        if (error.code === "EPERM") return true;
+        if (error.code === "ESRCH") return false;
+        throw error;
+      }
+    }, new Date().toISOString(), "herdr session refresh");
+    if (!busy) {
+      try {
+        const latest = readHerdrSessions(config.stateDir)[pane];
+        if (latest?.session === kept?.session || latest?.session === hit.id) {
+          recordHerdrSession(config.stateDir, pane, { session: hit.id, cwd, ...(model ? { model } : {}), ...(log ? { log } : {}), at: new Date().toISOString() });
+        }
+      } finally {
+        rmSync(lock, { force: true });
+      }
+    }
+  }
   return hit.id;
 };
 
-const omoInputBox = (screen: string): boolean => {
+export const omoInputBox = (screen: string): boolean => {
   const lines = screen.split("\n");
   return lines.some((l, i) => l.trimStart().startsWith("❯") && lines.slice(Math.max(0, i - 2), i).some((u) => u.trimStart().startsWith("─")));
 };

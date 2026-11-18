@@ -2,6 +2,10 @@
 
 `scripts/` is a bun + TypeScript package with one CLI, `dori`. Every external command runs as an argv array; nothing builds a shell string.
 
+From a Dori's own wrapper, `dori handover --key lead-handover --date YYYY-MM-DD [--dry-run]` reads the existing user-written `<stateDir>/handover/YYYY-MM-DD.md`; it refuses a missing or empty file and a running lead turn. The optional key is fixed to this command and never selects another Dori's pane. On herdr it starts a new OMO session id in the same pane and makes the file path plus instructions to read the directive ledger, memory and work records the new session's first input; if the old session had live OMO monitors, it also tells the new session to re-arm them as persistent watches without restarting launched work. The pane-to-session record changes only after the new prompt accepts that input and the new monitor manifest matches; if startup or verification fails, the old recorded session is resumed. Run the non-dry command through the Dori's wrapper from a separate shell outside the target pane and its active turn; `--dry-run` prints the plan without changing session state.
+
+When `handover.autoRolloverLead` is enabled for a Herdr Dori, the freshness loop runs that same safe transition in-process with the current UTC date's handover note. A missing or empty dated file refuses the attempt and leaves the pane and recorded session unchanged; the configured automatic retry policy applies, with no fallback to the legacy new-tab path.
+
 ## Install and test
 
 ```sh

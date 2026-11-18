@@ -22,6 +22,7 @@ import { poolFree } from "./lead-limit.ts";
 import { leadAlertPoster } from "./autoturn.ts";
 import { findLead, LeadError } from "./lead.ts";
 import { accountHome, ackHandover, handover, type HandoverDeps, LEAD_SUMMARY_TEMPLATE, missingWatchers, windowsDetachRefusal } from "./handover.ts";
+import { automaticLeadSessionHandover, LEAD_SESSION_HANDOVER_KEY, leadSessionHandover } from "./lead-session-handover.ts";
 import { laneHandover, type LaneHandoverDeps, markReady, paneSignals, SUMMARY_TEMPLATE } from "./lane-handover.ts";
 import { auditHandover, auditSummary, type Committed, findCommitted, markerFile, reportGap, sendAuditSummary, summaryWeek } from "./rollover-audit.ts";
 import { appendRollover, AUTO_GRANT_ENV, decidedBy, dueReasons, holdTyped, LEAD_PREFIX, limitsFor, mintAutoGrant, outcomeLine, peerStuckLines, pendingStuck, quietReason, readRollovers, type RolloverRequest, rolloverStats, sessionStart, stuckOutcomeLines } from "./rollover.ts";
@@ -459,6 +460,10 @@ const USAGE = `dori <command> [options]
                                        the audit ledger summed up; --send puts it in the lead's inbox (freshness does it
                                        each week after handover.auditSummaryAt)
   handover --template                  print the headings of the old lead's summary (--note FILE)
+  handover --key ${LEAD_SESSION_HANDOVER_KEY} --date YYYY-MM-DD [--dry-run]
+                                       require a non-empty user-written handover file and start a fresh omo session id
+                                       in the same herdr lead pane; a busy turn is refused, and a failed start restores
+                                       the recorded session
   handover ack <id> [--state DIR]      the new lead answers a HANDOVER_PROBE, HANDOVER_UNDERSTAND or HANDOVER_SUPPLEMENT line with this
   handover --lane <key> --approved-by REF [--note FILE] [--model M] [--thinking L] [--force] [--keep-old] [--minutes N] [--dry-run]
                                        move a lane to a new session (run by the lead): REF is lead:<reason and the signal behind
@@ -631,6 +636,7 @@ const flags = parseArgs({
     source: { type: "string" },
     start: { type: "string" }, end: { type: "string" }, location: { type: "string" }, description: { type: "string" }, reminder: { type: "string" }, approval: { type: "string" }, "request-id": { type: "string" },
     limit: { type: "string" },
+    key: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -1439,8 +1445,12 @@ try {
         const laneDeps = laneDepsFor(() => {});
         const hooks = {
           signals: (pane: string, model: string) => paneSignals(laneDeps, pane, model),
-          // automatic rollover (handover.autoRolloverLanes / autoRolloverLead): a detached run, approved as auto:<key>
+          // herdr lead rollovers use today's dated same-pane path; other automatic rollovers use the detached legacy path
           auto: async (who: "lead" | "lane", k: string) => {
+            if (who === "lead" && config.backend === "herdr") {
+              const result = await automaticLeadSessionHandover(leadDepsFor(() => {}), await currentTmuxSession(run));
+              return result.code === 0 ? `started ${result.line}` : `could not start: ${result.line}`;
+            }
             const refused = windowsDetachRefusal();
             if (refused) return `could not start: ${refused}`;
             const unit = `dori-rollover-${k}-${Date.now()}`;
@@ -2234,6 +2244,19 @@ try {
       break;
     }
     case "handover": {
+      if (flags.values.date !== undefined) {
+        if (key !== undefined) die("dori handover --date takes no subcommand");
+        onlyOptions("handover --date", ["date", "dry-run", "key"], 0);
+        const handoverKey = opt("key");
+        if (flags.values.key !== undefined && handoverKey !== LEAD_SESSION_HANDOVER_KEY) {
+          console.log(`HANDOVER_FAIL --key ${handoverKey || "(missing)"} does not match this Dori's fixed key ${LEAD_SESSION_HANDOVER_KEY}; no pane was accessed`);
+          process.exitCode = 2;
+          break;
+        }
+        const here = await currentTmuxSession(run);
+        const r = await leadSessionHandover(leadDepsFor((line) => console.log(line)), { date: need("date"), dryRun: Boolean(flags.values["dry-run"]), originPane: here });
+        process.exit(r.code);
+      }
       const here = await currentTmuxSession(run);
       // the one-use grant of a run freshness started (auto hook); kept from the sessions and processes this run starts
       const autoGrant = process.env[AUTO_GRANT_ENV];
