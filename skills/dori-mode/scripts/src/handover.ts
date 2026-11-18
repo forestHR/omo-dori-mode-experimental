@@ -9,6 +9,8 @@ import { captureTmux, closeAoeSession, inputLine, isClosedLine, laneEnv, liveSes
 import { strayTasks, taskRecords } from "./background.ts";
 import { type HandoverWatcher } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
+import { takeLock } from "./handover-lock.ts";
+export { takeLock } from "./handover-lock.ts";
 import { type FreezeDeps, type FrozenRecord, type Sig, freezePane, writeFrozen } from "./frozen.ts";
 import { pointInstanceAlerts } from "./handover-alerts.ts";
 import { endOldMonitors } from "./handover-monitors.ts";
@@ -718,28 +720,6 @@ export const endStrayTasks = async (deps: Pick<HandoverDeps, "run" | "clock" | "
   if (cancelled.length) o.emit(`HANDOVER_TASKS_CANCELLED ${o.who} ${cancelled.map((t) => `${t.id}${t.what ? ` "${t.what.slice(0, 80)}"` : ""}`).join(", ")} -> ${o.note}`);
   if (finished.length) o.emit(`HANDOVER_TASKS_ENDED ${o.who} ${finished.map((t) => `${t.id} ${now.get(t.id) ?? "gone"}`).join(", ")}: ended by themselves before the cancel -> ${o.note}`);
   if (left.length) o.emit(`HANDOVER_TASK_ALIVE ${o.who} ${left.map((t) => t.id).join(",")}: ${!told ? `the cancel request did not reach ${o.pane}` : acked === undefined ? `${o.pane} did not ack the cancel request` : "still open after the new session's task_cancel"}; they can still change files: end each with task_cancel <id> from any session of this account`);
-};
-
-// One handover at a time per state dir: two would each open a session and repoint the lead to their own.
-export const takeLock = (file: string, alive: (pid: number) => boolean, at: string, what = "handover"): string | undefined => {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(file, JSON.stringify({ pid: process.pid, at }), { flag: "wx" });
-      return undefined;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    }
-    const held = (() => {
-      try {
-        return JSON.parse(readFileSync(file, "utf8")) as { pid?: number; at?: string };
-      } catch {
-        return {};
-      }
-    })();
-    if (held.pid && alive(held.pid)) return `another ${what} is running (pid ${held.pid}, started ${held.at ?? "?"}); ${file}`;
-    rmSync(file, { force: true });
-  }
-  return `could not take the ${what} lock ${file}`;
 };
 
 type MoveContext = { readonly note: string; readonly stamp: string; readonly dir: string; readonly title: string; readonly model: string; readonly units: readonly string[]; readonly emit: (line: string) => void; readonly mark: (step: string, ok: boolean) => void; readonly supplements: Supplement[]; frozen?: FrozenRecord };
