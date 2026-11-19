@@ -1,8 +1,25 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { agentLine } from "../src/herdr.ts";
 import { agentPath } from "../src/aoe.ts";
+import { pidAlive } from "../src/heavy-slot.ts";
 import { AGENT, descendants, procTable, WIN_PROCS, winProcs } from "../src/session-id.ts";
 import { run, type Runner } from "../src/run.ts";
+
+test("Windows PID liveness accepts a live PID without querying the process table", () => {
+  const processTable = spyOn(Bun, "spawnSync").mockImplementation(() => {
+    throw new Error("unexpected process-table query");
+  });
+  try {
+    expect(pidAlive(process.pid, 0, "win32")).toBe(true);
+    expect(processTable).not.toHaveBeenCalled();
+  } finally {
+    processTable.mockRestore();
+  }
+});
+
+test("Windows PID liveness rejects a dead positive PID", () => {
+  expect(pidAlive(2_147_483_647, undefined, "win32")).toBe(false);
+});
 
 test("Windows process discovery rejects a recycled parent newer than its child", () => {
   const table = winProcs(JSON.stringify([
