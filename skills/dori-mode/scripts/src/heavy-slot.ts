@@ -315,13 +315,14 @@ export const releaseSlot = (slot: string): void => {
 };
 
 // alive and not a zombie; with `since`, also started by then (ps etimes is whole seconds, so 2 s of slack)
-export const pidAlive = (pid: number, since?: number): boolean => {
+export const pidAlive = (pid: number, since?: number, platform = process.platform): boolean => {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
   } catch {
     return false;
   }
+  if (platform === "win32") return true; // Windows skips since because it has no shell-free process start-time check.
   const [stat = "", etimes = ""] = Bun.spawnSync(["ps", "-o", "stat=,etimes=", "-p", String(pid)]).stdout.toString().trim().split(/\s+/);
   if (stat === "" || stat.startsWith("Z")) return false;
   return since === undefined || !/^\d+$/.test(etimes) || Date.now() - Number(etimes) * 1000 <= since + 2_000;
