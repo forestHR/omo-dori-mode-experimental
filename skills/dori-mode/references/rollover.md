@@ -133,7 +133,7 @@ The lead's own handover has the commit gate, the quiet mark, the summary heading
 
 ### Lead-session exit protocol
 
-For lead handovers, an active old-lead turn is refused; the old session is never interrupted with Esc. An idle old OMO exits with Ctrl+D. During rollback, Esc is used only when the live session id is known to be the newly started session and its turn is active; Ctrl+D then exits that session before the recorded old id is revived. Real OMO 5.1.65 behavior was verified on a disposable Herdr pane: Ctrl+C left an idle session alive and did not interrupt a running turn. Regression coverage is in `scripts/test/lead-session-handover.test.ts` and `scripts/test/lead-session-handover-transaction.test.ts`.
+For lead handovers, an active old-lead turn is refused; the old session is never interrupted with Esc. An idle old OMO exits with Ctrl+D. During rollback, Esc is used only when the live session id is known to be the newly started session and its turn is active; Ctrl+D then exits that session before the recorded old id is revived. Real OMO 5.1.65 behavior was measured on a disposable Herdr pane: Ctrl+C left an idle session alive; the active-turn Ctrl+C measurement was inconclusive, while Esc interrupted the turn. Regression coverage is in `scripts/test/lead-session-handover.test.ts` and `scripts/test/lead-session-handover-transaction.test.ts`.
 
 ### No restatement before the commit (owner Q476)
 
