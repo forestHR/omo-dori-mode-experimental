@@ -31,9 +31,7 @@ let failPaneRead: boolean;
 let deleteNoteOnRead: boolean;
 let changeNoteAfterFirstInput: boolean;
 let ignoreFirstOldStop: boolean;
-let interruptBusyTurnOnly: boolean;
 let oldStopAttempts: number;
-let busyTurnInterrupted: boolean;
 let printed: string[];
 
 const setup = (): HandoverDeps => {
@@ -59,15 +57,8 @@ const setup = (): HandoverDeps => {
       world.calls.push([...argv]);
       return { code: 1, out: "────────\n❯ \n────────", err: "injected screen read failure" };
     }
-    if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "send-keys" && argv.at(-1) === "ctrl+c") {
-      if (currentSession === OLD_ID && ignoreFirstOldStop && oldStopAttempts++ === 0) {
-        // Herdr accepted the first signal, but the old process has not exited yet.
-      } else if (currentSession !== OLD_ID && interruptBusyTurnOnly && !busyTurnInterrupted) {
-        // A busy OMO consumes Ctrl+C to stop its turn; a second signal exits the process.
-        busyTurnInterrupted = true;
-        world.started = [];
-        world.screens[PANE] = "────────\n❯ \n────────";
-      } else {
+    if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "send-keys" && argv.at(-1) === "ctrl+d") {
+      if (!(currentSession === OLD_ID && ignoreFirstOldStop && oldStopAttempts++ === 0)) {
         world.herdrDead = [PANE];
         world.ps = "4000 1 pwsh.exe";
       }
@@ -126,9 +117,7 @@ beforeEach(() => {
   deleteNoteOnRead = false;
   changeNoteAfterFirstInput = false;
   ignoreFirstOldStop = false;
-  interruptBusyTurnOnly = false;
   oldStopAttempts = 0;
-  busyTurnInterrupted = false;
   printed = [];
 });
 
@@ -167,7 +156,7 @@ test("refuses a failed OMO screen read without stopping the recorded session", a
   const result = await leadSessionHandover(deps, { date: DATE, dryRun: false });
   // Then
   expect(result.code).toBe(2);
-  expect(world.calls.some((argv) => argv[2] === "send-keys" && argv.at(-1) === "ctrl+c")).toBe(false);
+  expect(world.calls.some((argv) => argv[2] === "send-keys" && ["esc", "ctrl+d"].includes(argv.at(-1) ?? ""))).toBe(false);
   expect(world.calls.some((argv) => argv[2] === "run")).toBe(false);
   expect(readHerdrSessions(state.dir)[PANE]?.session).toBe(OLD_ID);
 });
@@ -180,7 +169,7 @@ test("refuses a shell prompt that is not an OMO input box", async () => {
   const result = await leadSessionHandover(deps, { date: DATE, dryRun: false });
   // Then
   expect(result.code).toBe(2);
-  expect(world.calls.some((argv) => argv[2] === "send-keys" && argv.at(-1) === "ctrl+c")).toBe(false);
+  expect(world.calls.some((argv) => argv[2] === "send-keys" && ["esc", "ctrl+d"].includes(argv.at(-1) ?? ""))).toBe(false);
   expect(readHerdrSessions(state.dir)[PANE]?.session).toBe(OLD_ID);
 });
 
@@ -239,22 +228,6 @@ test("restores the old session when the initial stop does not exit before its de
   expect(printed[0]).toContain(`old session ${OLD_ID} restored`);
   expect(currentSession).toBe(OLD_ID);
   expect(readHerdrSessions(state.dir)[PANE]?.session).toBe(OLD_ID);
-});
-
-test("retries Ctrl+C after the first signal only interrupts a busy new turn", async () => {
-  // Given
-  const deps = setup();
-  changeNoteAfterFirstInput = true;
-  rearmMonitor = true;
-  interruptBusyTurnOnly = true;
-  // When
-  const result = await leadSessionHandover(deps, { date: DATE, dryRun: false });
-  // Then
-  expect(result.code).toBe(3);
-  expect(busyTurnInterrupted).toBe(true);
-  expect(currentSession).toBe(OLD_ID);
-  expect(readHerdrSessions(state.dir)[PANE]?.session).toBe(OLD_ID);
-  expect(world.herdrDead?.includes(PANE)).toBe(false);
 });
 
 test("automatic Herdr lead rollover uses the current UTC note and records the same-pane commit", async () => {

@@ -94,13 +94,35 @@ export const leadSessionHandover = async (deps: HandoverDeps, opts: LeadSessionH
   const restoreOld = async (reason: string): Promise<LeadSessionHandoverResult> => {
     let recovery = "";
     try {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (!(await herdrAgentPid(deps.run, pane))) break;
-        const interrupted = await deps.run(["herdr", "pane", "send-keys", pane, "ctrl+c"]);
-        if (interrupted.code !== 0) throw new Error(`could not interrupt the current agent: ${interrupted.err || interrupted.out}`);
-        if (await waitForAgentExit()) break;
+      const liveSession = await deps.sessionOf(pane, old.cwd);
+      if (liveSession && liveSession !== old.session) {
+        let stopped = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (!(await herdrAgentPid(deps.run, pane))) { stopped = true; break; }
+          const screen = await deps.run(["herdr", "pane", "read", pane, "--source", "visible"]);
+          if (screen.code !== 0) throw new Error(`could not read the OMO input screen in ${pane}`);
+          if (!omoInputBox(screen.out)) throw new Error(`no recognizable OMO input box is visible in ${pane}`);
+          if (turnRunning(screen.out)) {
+            const interrupted = await deps.run(["herdr", "pane", "send-keys", pane, "esc"]);
+            if (interrupted.code !== 0) throw new Error(`could not interrupt the new OMO turn: ${interrupted.err || interrupted.out}`);
+            let idle = false;
+            for (let i = 0; i < 40; i++) {
+              if (!(await herdrAgentPid(deps.run, pane))) { stopped = true; break; }
+              const afterInterrupt = await deps.run(["herdr", "pane", "read", pane, "--source", "visible"]);
+              if (afterInterrupt.code !== 0) throw new Error(`could not read the OMO input screen in ${pane}`);
+              if (!omoInputBox(afterInterrupt.out)) throw new Error(`no recognizable OMO input box is visible in ${pane}`);
+              if (!turnRunning(afterInterrupt.out)) { idle = true; break; }
+              await deps.clock.sleep(250);
+            }
+            if (stopped) break;
+            if (!idle) continue;
+          }
+          const exited = await deps.run(["herdr", "pane", "send-keys", pane, "ctrl+d"]);
+          if (exited.code !== 0) throw new Error(`could not exit the new OMO session: ${exited.err || exited.out}`);
+          if (await waitForAgentExit()) { stopped = true; break; }
+        }
+        if (!stopped && await herdrAgentPid(deps.run, pane)) throw new Error("the new OMO session did not stop after 3 bounded Esc and Ctrl+D attempts");
       }
-      if (await herdrAgentPid(deps.run, pane)) throw new Error("the current agent did not stop after 3 bounded Ctrl+C attempts");
       if (readHerdrSessions(config.stateDir)[pane]?.session !== old.session) recordHerdrSession(config.stateDir, pane, old);
       const revived = await reviveHerdr(
         deps.run,
@@ -143,7 +165,7 @@ export const leadSessionHandover = async (deps: HandoverDeps, opts: LeadSessionH
     const stillSafe = await check().catch((error: unknown) => error instanceof Error ? error.message : String(error));
     if (stillSafe) return refuse(stillSafe);
     stopAttempted = true;
-    const launch = await deps.run(["herdr", "pane", "send-keys", pane, "ctrl+c"]);
+    const launch = await deps.run(["herdr", "pane", "send-keys", pane, "ctrl+d"]);
     if (launch.code !== 0) return await restoreOld(`could not end the old agent in ${pane}: ${launch.err || launch.out}`);
     const oldStopped = await waitForAgentExit();
     if (!oldStopped) return await restoreOld(`the old agent did not stop in ${pane}; no new session was started`);
