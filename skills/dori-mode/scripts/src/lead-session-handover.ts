@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { agentPath, herdrAgentArgv } from "./aoe.ts";
 import type { HandoverDeps } from "./handover.ts";
 import { takeLock } from "./handover-lock.ts";
+import { alertMissingLeadSessionNote } from "./lead-session-missing-alert.ts";
 import { liveMonitors, manifestPath, missingMonitors, readManifest } from "./handover.ts";
 import { agentLine, herdrAgentPid, herdrSessions, requireHerdrPwsh } from "./herdr.ts";
 import { argvSessionLog, omoInputBox, readHerdrSessions, recordHerdrSession, reviveHerdr } from "./herdr-sessions.ts";
@@ -225,6 +226,7 @@ export const automaticLeadSessionHandover = async (deps: HandoverDeps, originPan
   const statusLine = lines.find((line) => line.startsWith("HANDOVER_OK") || line.startsWith("HANDOVER_FAIL") || line.startsWith("HANDOVER_MISSING"))
     ?? `HANDOVER_FAIL automatic handover for ${date} returned ${result.code} without a status line`;
   const failedLine = result.code === 0 ? undefined : statusLine;
+  if (failedLine?.startsWith("HANDOVER_MISSING")) await alertMissingLeadSessionNote(deps, date);
   const ownerReport = result.code === 0
     ? await reportToOwner(
       automaticDeps,

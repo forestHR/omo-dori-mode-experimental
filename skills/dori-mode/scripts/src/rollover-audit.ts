@@ -32,6 +32,7 @@ import { sendVerified } from "./panes.ts";
 import { covered, fillGaps, flat, type Missing, quoted, section, words as wordsIn } from "./restatement.ts";
 import { type Candidate, inboxMessages, leadLines, type OwnerProof, ownerQuotes, QUOTE, readRollovers, type Said, userLines } from "./rollover.ts";
 import { QuestionStore } from "./messenger/discord-cards.ts";
+import { buildWeeklyAuditSummary } from "./rollover-weekly-summary.ts";
 import { iso } from "./run.ts";
 import { sessionDirFor } from "./session-id.ts";
 import { watchLog } from "./watch-log.ts";
@@ -578,12 +579,16 @@ export const auditSummary = (stateDir: string, now: number, days = 7): string =>
   const since = new Date(now - days * 86_400_000).toISOString();
   const moved = committedHandovers(stateDir).filter((c) => c.at >= since);
   const rows = readAudit(stateDir).filter((r) => r.at >= since);
-  const by = (pick: (r: AuditRow) => boolean): number => rows.filter(pick).length;
-  const kinds = [...rows.reduce((m, r) => m.set(r.kind, (m.get(r.kind) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]);
-  const lanes = [...rows.reduce((m, r) => m.set(r.lane, (m.get(r.lane) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]).slice(0, 3);
-  const head = `[ROLLOVER_AUDIT] 지난 ${days}일 교대 ${moved.length}번(점검 ${moved.filter((c) => readJson<Marker>(markerFile(c.note))?.status === "done").length}), 빠진 것 ${rows.length}건(교대 전 보충 ${by((r) => r.stage === "supplement")} · 교대 뒤 점검 ${by((r) => r.stage === "audit")} · 신고 ${by((r) => r.stage === "reported")}; 고침 ${by((r) => r.fixed)}, 못 고침 ${by((r) => !r.fixed)})`;
-  if (!rows.length) return `${head}. 교대 기능 고칠 거리 없음.`;
-  return `${head}. 많이 빠진 종류: ${kinds.slice(0, 3).map(([k, n]) => `${k} ${n}`).join(", ")}; lane: ${lanes.map(([k, n]) => `${k} ${n}`).join(", ")}. 교대 기능 고칠 거리로: 위 종류가 노트·요약에 실리게. 줄별 내용: ${auditLog(stateDir)}`;
+  return buildWeeklyAuditSummary({
+    days,
+    since,
+    moved: moved.length,
+    audited: moved.filter((c) => readJson<Marker>(markerFile(c.note))?.status === "done").length,
+    rows,
+    rollovers: readRollovers(stateDir),
+    committedResults: COMMITTED_RESULTS,
+    auditLog: auditLog(stateDir),
+  });
 };
 
 // One row in the lead's inbox (never the owner's channel), once per week.

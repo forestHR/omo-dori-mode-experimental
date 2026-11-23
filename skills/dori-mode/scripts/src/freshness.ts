@@ -7,6 +7,7 @@ import { type Lane, type RolloverDue, statusOf } from "./registry.ts";
 import { fixTag, recordFix } from "./same-fix.ts";
 import { leadAlert } from "./autoturn.ts";
 import { taskOpen, taskRecord } from "./background.ts";
+import { shouldResumeMissingLeadHandover } from "./lead-session-missing-alert.ts";
 import { compactionStuckOn, pendingFile, type ReadyMark, readyFile, safePointFile, safePointText, statusLine, waitingRequest } from "./lane-handover.ts";
 import { COMMITTED, crossed, dueReasons, limitsFor, readRollovers, type RolloverEntry, type RolloverRequest, type Signals, type Who } from "./rollover.ts";
 import { auditDue, type Committed, weeklyDue, writeMarker } from "./rollover-audit.ts";
@@ -243,7 +244,7 @@ const rolloverDue = async (deps: FlowDeps, hooks: RolloverHooks, who: Who, key: 
       }
     } else if (last.result === "refused" && last.blocked === "training") {
       return [];
-    } else {
+    } else if (!shouldResumeMissingLeadHandover(stateDir, now, last)) {
       // the move failed or rolled back, or the run was refused for another reason: back off, doubling up to 8 times
       failures = (seen.failures ?? 0) + 1;
       if (now - Date.parse(last.at) < retryMs * 2 ** Math.min(3, failures - 1)) return [];

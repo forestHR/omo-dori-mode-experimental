@@ -222,6 +222,60 @@ test("automatic lead busy refusal uses the configured retry path rather than the
   expect(fixture.currentSession).toBe(OLD_ID);
 });
 
+test("automatic lead handover alerts with fresh-note guidance when the dated note is missing", async () => {
+  // Given
+  const base = fixture.setup();
+  const deps = { ...base, clock: fakeClock(Date.parse(`${DATE}T12:00:00.000Z`)) };
+  rmSync(notePath(fixture.state.dir));
+  const posts: string[] = [];
+  const posting = { ...deps, postLeadAlert: async (text: string) => { posts.push(text); return ["LEAD_ALERT_POSTED pair c1 m1"]; } };
+  // When
+  const result = await automaticLeadSessionHandover(posting);
+  // Then
+  expect(result.line).toBe(`HANDOVER_MISSING ${notePath(fixture.state.dir)}`);
+  expect(posts).toHaveLength(1);
+  expect(posts[0]).toContain(notePath(fixture.state.dir));
+  expect(posts[0]).toContain("다음 freshness 차례");
+  expect(posts[0]).toContain("새 노트");
+  expect(posts[0]).toContain("지난 노트를 그대로 복사하지 말고");
+  expect(posts[0]).toContain("오늘 바뀐 진행 중인 일");
+  expect(posts[0]).toContain("혜린의 제약");
+  expect(posts[0]).toContain("다음 할 일");
+  expect(fixture.currentSession).toBe(OLD_ID);
+});
+
+test("automatic lead handover alerts about an empty dated note", async () => {
+  // Given
+  const base = fixture.setup();
+  const deps = { ...base, clock: fakeClock(Date.parse(`${DATE}T12:00:00.000Z`)) };
+  writeFileSync(notePath(fixture.state.dir), " \n");
+  const posts: string[] = [];
+  const posting = { ...deps, postLeadAlert: async (text: string) => { posts.push(text); return ["LEAD_ALERT_POSTED pair c1 m1"]; } };
+  // When
+  const result = await automaticLeadSessionHandover(posting);
+  // Then
+  expect(result.line).toBe(`HANDOVER_MISSING ${notePath(fixture.state.dir)} is empty`);
+  expect(posts).toHaveLength(1);
+  expect(posts[0]).toContain(notePath(fixture.state.dir));
+});
+
+test("automatic lead handover alerts once for one dated note path and again for a changed date", async () => {
+  // Given
+  const base = fixture.setup();
+  rmSync(notePath(fixture.state.dir));
+  const posts: string[] = [];
+  const posting = { ...base, postLeadAlert: async (text: string) => { posts.push(text); return ["LEAD_ALERT_POSTED pair c1 m1"]; } };
+  // When
+  await automaticLeadSessionHandover({ ...posting, clock: fakeClock(Date.parse(`${DATE}T12:00:00.000Z`)) });
+  await automaticLeadSessionHandover({ ...posting, clock: fakeClock(Date.parse(`${DATE}T12:30:00.000Z`)) });
+  await automaticLeadSessionHandover({ ...posting, clock: fakeClock(Date.parse("2026-11-17T12:00:00.000Z")) });
+  // Then
+  const nextNotePath = join(fixture.state.dir, "handover", "2026-11-17.md");
+  expect(posts).toHaveLength(2);
+  expect(posts[0]).toContain(notePath(fixture.state.dir));
+  expect(posts[1]).toContain(nextNotePath);
+});
+
 test("a handover lock refuses a second same-pane session transaction", async () => {
   // Given
   const deps = fixture.setup();
